@@ -1,44 +1,45 @@
 package core
 
 import (
-	"codezilla/internal/tools"
-	"codezilla/llm/ollama"
 	"context"
+
+	"codezilla/internal/tools"
+	"codezilla/llm"
 )
 
-// LLMClientAdapter adapts ollama.Client to tools.LLMClient
-type LLMClientAdapter struct {
-	client ollama.Client
+// LLMProviderAdapter adapts llm.Provider to tools.LLMClient
+type LLMProviderAdapter struct {
+	provider llm.Provider
 }
 
-// NewLLMClientAdapter creates a new adapter
-func NewLLMClientAdapter(client ollama.Client) *LLMClientAdapter {
-	return &LLMClientAdapter{client: client}
+// NewLLMProviderAdapter creates a new adapter
+func NewLLMProviderAdapter(provider llm.Provider) *LLMProviderAdapter {
+	return &LLMProviderAdapter{provider: provider}
 }
 
 // GenerateResponse adapts the GenerateResponse call
-func (a *LLMClientAdapter) GenerateResponse(ctx context.Context, messages []tools.LLMMessage) (string, error) {
-	// For now, we'll use a simple approach - concatenate messages into a single prompt
-	// In a real implementation, we'd want to use the Ollama chat API
-	var prompt string
-	for _, msg := range messages {
-		if msg.Role == "system" {
-			prompt += "System: " + msg.Content + "\n\n"
-		} else if msg.Role == "user" {
-			prompt += "User: " + msg.Content + "\n\n"
+func (a *LLMProviderAdapter) GenerateResponse(ctx context.Context, messages []tools.LLMMessage) (string, error) {
+	// Convert tools.LLMMessage to llm.Message
+	llmMessages := make([]llm.Message, len(messages))
+	for i, msg := range messages {
+		llmMessages[i] = llm.Message{
+			Role:    msg.Role,
+			Content: msg.Content,
 		}
 	}
 
-	// Use the default model for analysis
-	resp, err := a.client.Generate(ctx, ollama.GenerateRequest{
-		Model:  "qwen3:14b",
-		Prompt: prompt,
-		Stream: false,
+	// Use the provider to generate a response
+	resp, err := a.provider.Generate(ctx, llm.GenerateRequest{
+		Model:       "qwen3:14b", // Default model for analysis
+		Messages:    llmMessages,
+		Temperature: 0.7,
+		MaxTokens:   4000,
+		Stream:      false,
 	})
 
 	if err != nil {
 		return "", err
 	}
 
-	return resp.Response, nil
+	return resp.Content, nil
 }

@@ -5,12 +5,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"codezilla/internal/agent"
 	"codezilla/internal/cli"
+	"codezilla/internal/storage"
 	"codezilla/internal/tools"
 	"codezilla/internal/ui"
+	"codezilla/llm"
 	"codezilla/llm/ollama"
 	"codezilla/pkg/logger"
 )
@@ -20,7 +23,7 @@ type App struct {
 	config     *cli.Config
 	logger     *logger.Logger
 	agent      agent.Agent
-	llmClient  ollama.Client
+	provider   llm.Provider
 	contextMgr *cli.SimpleContextManager
 	tools      tools.ToolRegistry
 	ui         ui.UI
@@ -55,12 +58,13 @@ func NewApp(config *cli.Config, ui ui.UI) (*App, error) {
 		clientOptions = append(clientOptions, ollama.WithHeaders(config.OllamaHeaders))
 	}
 
-	llmClient := ollama.NewClient(clientOptions...)
+	// Create LLM provider (Ollama adapter)
+	provider := ollama.NewOllamaAdapter(clientOptions...)
 
 	// Test connection
 	ctx := context.Background()
 	ui.Print("Checking Ollama connection... ")
-	_, err = llmClient.ListModels(ctx)
+	_, err = provider.ListModels(ctx)
 	if err != nil {
 		ui.Error("Failed")
 		return nil, fmt.Errorf("cannot connect to Ollama at %s: %w", config.OllamaURL, err)
@@ -123,9 +127,9 @@ func NewApp(config *cli.Config, ui ui.UI) (*App, error) {
 	}
 
 	// Register tools after permission manager is configured
-	registerTools(toolRegistry, llmClient, config, log, permissionMgr)
+	registerTools(toolRegistry, provider, config, log, permissionMgr)
 
-	// Initialize agent
+	// Initialize agent with new orchestrator adapter
 	agentConfig := &agent.Config{
 		Model:         config.DefaultModel,
 		SystemPrompt:  config.SystemPrompt,
@@ -135,7 +139,7 @@ func NewApp(config *cli.Config, ui ui.UI) (*App, error) {
 		ToolRegistry:  toolRegistry,
 		PermissionMgr: permissionMgr,
 	}
-	agentInstance := agent.NewAgent(agentConfig)
+	agentInstance := agent.NewOrchestratorAdapter(provider, toolRegistry, permissionMgr, agentConfig)
 
 	// Initialize context manager
 	contextMgr := cli.NewSimpleContextManager(10)
@@ -144,7 +148,7 @@ func NewApp(config *cli.Config, ui ui.UI) (*App, error) {
 		config:     config,
 		logger:     log,
 		agent:      agentInstance,
-		llmClient:  llmClient,
+		provider:   provider,
 		contextMgr: contextMgr,
 		tools:      toolRegistry,
 		ui:         ui,
@@ -283,14 +287,14 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 
 // showModels displays available models
 func (app *App) showModels(ctx context.Context) {
-	models, err := app.llmClient.ListModels(ctx)
+	models, err := app.provider.ListModels(ctx)
 	if err != nil {
 		app.ui.Error("Failed to list models: %v", err)
 		return
 	}
 
 	var modelNames []string
-	for _, model := range models.Models {
+	for _, model := range models {
 		modelNames = append(modelNames, model.Name)
 	}
 
@@ -299,14 +303,14 @@ func (app *App) showModels(ctx context.Context) {
 
 // changeModel changes the current model
 func (app *App) changeModel(ctx context.Context, modelName string) {
-	models, err := app.llmClient.ListModels(ctx)
+	models, err := app.provider.ListModels(ctx)
 	if err != nil {
 		app.ui.Error("Failed to list models: %v", err)
 		return
 	}
 
 	found := false
-	for _, model := range models.Models {
+	for _, model := range models {
 		if model.Name == modelName {
 			found = true
 			break
@@ -376,14 +380,14 @@ func (app *App) showTools() {
 }
 
 // registerTools registers all available tools
-func registerTools(registry tools.ToolRegistry, llmClient ollama.Client, config *cli.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager) {
+func registerTools(registry tools.ToolRegistry, provider llm.Provider, config *cli.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager) {
 	// File operation tools
 	registry.RegisterTool(tools.NewFileReadTool())
 	registry.RegisterTool(tools.NewFileWriteTool())
 	registry.RegisterTool(tools.NewListFilesTool())
 
 	// Create analyzer factory and register analyzer tool
-	llmAdapter := NewLLMClientAdapter(llmClient)
+	llmAdapter := NewLLMProviderAdapter(provider)
 	analyzerFactory := tools.NewAnalyzerFactory(llmAdapter, logger)
 
 	// Register the analyzer (formerly V2)
@@ -395,8 +399,17 @@ func registerTools(registry tools.ToolRegistry, llmClient ollama.Client, config 
 
 	registry.RegisterTool(tools.NewExecuteTool(30))
 
-	// Todo management tools
-	for _, tool := range tools.GetTodoTools() {
+	// Todo management tools with dependency injection
+	// Determine data directory
+	homeDir, _ := os.UserHomeDir()
+	dataDir := filepath.Join(homeDir, ".codezilla", "todos")
+
+	// Create repository and manager
+	todoRepo := storage.NewFileRepository(dataDir)
+	todoManager := tools.NewTodoManagerV2(todoRepo)
+
+	// Register todo tools
+	for _, tool := range tools.GetTodoToolsV2(todoManager) {
 		registry.RegisterTool(tool)
 	}
 }

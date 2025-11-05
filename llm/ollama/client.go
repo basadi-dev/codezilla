@@ -21,6 +21,7 @@ type Client interface {
 	Generate(ctx context.Context, request GenerateRequest) (*GenerateResponse, error)
 	Chat(ctx context.Context, request ChatRequest) (*ChatResponse, error)
 	StreamGenerate(ctx context.Context, request GenerateRequest) (<-chan StreamResponse, error)
+	StreamChat(ctx context.Context, request ChatRequest) (<-chan StreamChatResponse, error)
 	ListModels(ctx context.Context) (*ListModelsResponse, error)
 }
 
@@ -173,6 +174,14 @@ type StreamResponse struct {
 	Done     bool   `json:"done"`
 	Context  []int  `json:"context,omitempty"`
 	Error    string `json:"error,omitempty"`
+}
+
+// StreamChatResponse represents a streamed chat response chunk
+type StreamChatResponse struct {
+	Model   string  `json:"model"`
+	Message Message `json:"message"`
+	Done    bool    `json:"done"`
+	Error   error   `json:"-"`
 }
 
 // ListModelsResponse represents the response from the Ollama list models API
@@ -350,6 +359,68 @@ func (c *clientImpl) StreamGenerate(ctx context.Context, request GenerateRequest
 			if err := decoder.Decode(&response); err != nil {
 				if err != io.EOF {
 					response.Error = fmt.Sprintf("failed to decode response: %v", err)
+					responseChannel <- response
+				}
+				break
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case responseChannel <- response:
+			}
+
+			if response.Done {
+				break
+			}
+		}
+	}()
+
+	return responseChannel, nil
+}
+
+// StreamChat sends a chat request to the Ollama API and returns a channel for streaming responses
+func (c *clientImpl) StreamChat(ctx context.Context, request ChatRequest) (<-chan StreamChatResponse, error) {
+	// Create a copy of the request with stream explicitly set to true
+	requestCopy := request
+	requestCopy.Stream = true
+
+	reqBody, err := json.Marshal(requestCopy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/chat", c.baseURL), bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.applyAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("unsuccessful response: %d %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Buffer the channel to prevent goroutine leak if consumer stops reading
+	responseChannel := make(chan StreamChatResponse, 10)
+
+	go func() {
+		defer close(responseChannel)
+		defer resp.Body.Close()
+
+		decoder := json.NewDecoder(resp.Body)
+		for {
+			var response StreamChatResponse
+			if err := decoder.Decode(&response); err != nil {
+				if err != io.EOF {
+					response.Error = fmt.Errorf("failed to decode response: %w", err)
 					responseChannel <- response
 				}
 				break
