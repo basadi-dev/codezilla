@@ -150,6 +150,14 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 					}
 					detail = cmd
 				}
+			case "webSearch":
+				if q, ok := params["query"].(string); ok {
+					detail = q
+				}
+			case "fetchURL":
+				if u, ok := params["url"].(string); ok {
+					detail = u
+				}
 			}
 
 			if detail != "" {
@@ -568,4 +576,24 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	for _, tool := range tools.GetTodoTools(todoMgr) {
 		registry.RegisterTool(tool)
 	}
+
+	// Web search – embedded metasearch engine (DDG HTML + Wikipedia + optional Bing), no API key needed
+	msConfig := tools.MetasearchConfig{
+		EnableBing:     cfg.Metasearch.EnableBing,
+		TimeoutSeconds: cfg.Metasearch.TimeoutSeconds,
+		MaxResults:     cfg.Metasearch.MaxResults,
+		JitterMs:       cfg.Metasearch.JitterMs,
+	}
+	if msConfig.TimeoutSeconds <= 0 {
+		msConfig.TimeoutSeconds = 8
+	}
+	if msConfig.MaxResults <= 0 {
+		msConfig.MaxResults = 5
+	}
+	registry.RegisterTool(tools.NewWebSearchTool(msConfig))
+	permissionMgr.SetDefaultPermissionLevel("webSearch", tools.NeverAsk)
+
+	// Fetch URL – converts any webpage to clean markdown via Jina AI Reader (free, no key)
+	registry.RegisterTool(tools.NewFetchURLTool())
+	permissionMgr.SetDefaultPermissionLevel("fetchURL", tools.NeverAsk)
 }

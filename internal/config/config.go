@@ -31,6 +31,9 @@ type Config struct {
 	MaxContextChars int    `json:"max_context_chars" yaml:"max_context_chars"`
 	HistoryFile     string `json:"history_file" yaml:"history_file"`
 
+	// Embedded metasearch settings (no API keys required)
+	Metasearch MetasearchSettings `json:"metasearch" yaml:"metasearch"`
+
 	// Permission settings
 	DangerousToolsWarn  bool              `json:"dangerous_tools_warn" yaml:"dangerous_tools_warn"`
 	AlwaysAskPermission bool              `json:"always_ask_permission" yaml:"always_ask_permission"`
@@ -45,6 +48,14 @@ type Config struct {
 
 	// Analyzer settings
 	AnalyzerSettings AnalyzerSettings `json:"analyzer_settings" yaml:"analyzer_settings"`
+}
+
+// MetasearchSettings configures the embedded metasearch engine.
+type MetasearchSettings struct {
+	EnableBing     bool `json:"enable_bing" yaml:"enable_bing"`             // Enable Bing HTML scraping (opt-in, more fragile)
+	TimeoutSeconds int  `json:"timeout_seconds" yaml:"timeout_seconds"`     // Per-backend timeout in seconds
+	MaxResults     int  `json:"max_results" yaml:"max_results"`             // Default number of results to return
+	JitterMs       int  `json:"jitter_ms" yaml:"jitter_ms"`                 // Random delay per request in ms (0 = off)
 }
 
 // AnalyzerSettings contains configuration for the file analyzer
@@ -100,12 +111,13 @@ IMPORTANT RULES FOR TOOL USAGE:
 2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
 3. When the user asks to run a command, you MUST explicitly use the execute tool via XML or JSON formats. NEVER output loose markdown bash blocks expecting them to be executed.
 4. When the user asks to write or create a file, use the fileWrite tool.
-5. For complex multi-step tasks, explain your plan step-by-step before executing.
-6. Always show what tool you are using and why.
-7. When the user refers to "the project", "this project", or uses relative paths, assume they mean the current working directory.
-8. Always reply in markdown format.
-9. Be concise, accurate, and helpful.
-10. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.`, cwd)
+5. When the user asks about current events, needs up-to-date documentation, or asks you to look something up on the web, use the webSearch tool.
+6. For complex multi-step tasks, explain your plan step-by-step before executing.
+7. Always show what tool you are using and why.
+8. When the user refers to "the project", "this project", or uses relative paths, assume they mean the current working directory.
+9. Always reply in markdown format.
+10. Be concise, accurate, and helpful.
+11. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.`, cwd)
 }
 
 // DefaultConfig returns the default configuration
@@ -148,6 +160,12 @@ func DefaultConfig() *Config {
 		ForceColor:       false,
 		NoColor:          false,
 		WorkingDirectory: cwd,
+		Metasearch: MetasearchSettings{
+			EnableBing:     false,
+			TimeoutSeconds: 8,
+			MaxResults:     5,
+			JitterMs:       0,
+		},
 		AnalyzerSettings: AnalyzerSettings{
 			UseLLM:             true,
 			Concurrency:        5,

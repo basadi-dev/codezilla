@@ -33,6 +33,14 @@ llm:
   #   anthropic: ""
   #   gemini: ""
 
+# Embedded metasearch engine — no API keys required.
+# Queries DuckDuckGo HTML + Wikipedia concurrently. Bing is opt-in.
+metasearch:
+  enable_bing: false        # Enable Bing HTML scraping (more fragile, off by default)
+  timeout_seconds: 8        # Per-backend timeout
+  max_results: 5            # Default number of results to return
+  jitter_ms: 0              # Random request delay in ms, helps avoid rate limits (0 = off)
+
 temperature: 0.7
 max_tokens: 32768
 system_prompt: |
@@ -45,11 +53,12 @@ system_prompt: |
   2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
   3. When the user asks to run a command, use the execute tool.
   4. When the user asks to write or create a file, use the fileWrite tool.
-  5. For complex multi-step tasks, explain your plan step-by-step before executing.
-  6. Always show what tool you are using and why.
-  7. Always reply in markdown format.
-  8. Be concise, accurate, and helpful.
-  9. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.
+  5. When the user asks about current events, needs up-to-date documentation, or asks you to look something up on the web, use the webSearch tool.
+  6. For complex multi-step tasks, explain your plan step-by-step before executing.
+  7. Always show what tool you are using and why.
+  8. Always reply in markdown format.
+  9. Be concise, accurate, and helpful.
+  10. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.
 
 # Logging outputs
 log_file: "logs/codezilla.log"
