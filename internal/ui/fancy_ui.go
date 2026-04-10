@@ -6,6 +6,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/styles"
 )
 
 // FancyUI implements a fancy UI with animations and extra visual elements
@@ -207,37 +210,92 @@ func (ui *FancyUI) HideThinking() {
 	}
 }
 
-// ShowResponse displays response with typing effect
+// ShowResponse displays response formatted with Glamour
 func (ui *FancyUI) ShowResponse(response string) {
 	// Move to a new line first to avoid overwriting issues
 	ui.Println("")
 	ui.Println("%s🤖 Assistant:%s", ui.theme.ColorGreen, ui.theme.ColorReset)
 
-	// Typing effect for first line
-	lines := strings.Split(response, "\n")
-	if len(lines) > 0 {
-		firstLine := lines[0]
-		if len(firstLine) > 100 {
-			// For long lines, just show normally
-			ui.Println(firstLine)
-		} else {
-			// Typing effect for short first line
-			for _, char := range firstLine {
-				ui.Print("%c", char)
-				time.Sleep(10 * time.Millisecond)
-			}
-			ui.Println("")
-		}
+	// Pre-process markdown to add spacing between table rows
+	response = addTableSpacing(response)
 
-		// Rest of the lines normally
-		for i := 1; i < len(lines); i++ {
-			ui.Println(lines[i])
-		}
+	// Ensure we have a reasonable width for terminal wrapping
+	width := ui.width - 4
+	if width < 40 {
+		width = 80 // fallback
 	}
+
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStyles(styles.DarkStyleConfig),
+		glamour.WithWordWrap(width),
+	)
+
+	var out string
+	if err == nil {
+		out, err = renderer.Render(response)
+	}
+
+	if err == nil {
+		fmt.Fprint(ui.writer, out)
+	} else {
+		// Fallback if Glamour fails
+		fmt.Fprint(ui.writer, response)
+		ui.Println("")
+	}
+
 	ui.Println("")
 
 	// Ensure the buffer is flushed so the prompt appears
 	ui.writer.Flush()
+}
+
+// addTableSpacing pre-processes markdown tables by inserting an empty
+// padding row between data rows for better readability.
+func addTableSpacing(md string) string {
+	lines := strings.Split(md, "\n")
+	var out []string
+
+	isSeparator := func(s string) bool {
+		s = strings.TrimSpace(s)
+		if !strings.HasPrefix(s, "|") || !strings.HasSuffix(s, "|") {
+			return false
+		}
+		cleaned := strings.ReplaceAll(s, " ", "")
+		for _, c := range cleaned {
+			if c != '|' && c != '-' && c != ':' {
+				return false
+			}
+		}
+		return true
+	}
+
+	isTableRow := func(s string) bool {
+		s = strings.TrimSpace(s)
+		return strings.HasPrefix(s, "|") && strings.HasSuffix(s, "|")
+	}
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		out = append(out, line)
+
+		if isTableRow(line) {
+			if isSeparator(line) {
+				continue
+			}
+			if i+1 < len(lines) && isSeparator(lines[i+1]) {
+				continue
+			}
+
+			// It's a data row! Append an empty row for padding.
+			trimmed := strings.TrimSpace(line)
+			pipes := strings.Count(trimmed, "|")
+			if pipes >= 2 {
+				emptyCols := strings.Repeat("   |", pipes-1)
+				out = append(out, "|"+emptyCols)
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // ShowResponseStream streams tokens as they arrive with a header.

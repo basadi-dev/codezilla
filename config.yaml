@@ -10,11 +10,11 @@ llm:
   models:
     default: "gpt-oss:20b"
     # Recommended models by provider:
-    #   ollama cloud: gpt-oss:20b, llama3.1:8b, qwen2.5-coder:7b
-    #   ollama local: qwen2.5-coder:3b, llama3.2:3b, codellama:7b
-    #   openai:       gpt-4o, gpt-4o-mini
-    #   anthropic:    claude-sonnet-4-20250514
-    #   gemini:       gemini-2.5-flash
+    #   ollama cloud: qwen3-coder:480b, deepseek-v3.2, gpt-oss:120b
+    #   ollama local: devstral-small-2:24b, qwen3-coder-next, ministral-3:14b
+    #   openai:       gpt-4o, o3-mini
+    #   anthropic:    claude-3-5-sonnet-20241022
+    #   gemini:       gemini-3.1-pro-preview
 
   # Ollama-specific settings
   ollama:

@@ -119,7 +119,7 @@ func DefaultConfig() *Config {
 		LLM: LLMConfig{
 			Provider: "ollama",
 			Models: LLMModelsConfig{
-				Default: "qwen2.5-coder:3b",
+				Default: "qwen3-coder:480b", // Best open-weight coder
 			},
 			Ollama: OllamaConfig{
 				BaseURL: "http://localhost:11434",

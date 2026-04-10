@@ -234,9 +234,6 @@ func (app *App) processInput(ctx context.Context, input string) error {
 			app.agent.ClearContext()
 		}
 
-		// Create a channel for streaming tokens
-		tokenCh := make(chan string, 64)
-
 		// Process with agent in background
 		var finalResponse string
 		var agentErr error
@@ -244,38 +241,22 @@ func (app *App) processInput(ctx context.Context, input string) error {
 
 		go func() {
 			defer close(done)
-			defer close(tokenCh)
 
 			fr, err := app.agent.ProcessMessageStream(ctx, input, func(token string) {
-				tokenCh <- token
+				// We consume the stream but do not display it since we require the
+				// full response to render markdown efficiently with glamour.
 			})
 			finalResponse = fr
 			agentErr = err
 		}()
 
-		// Wait for first token — at that point, hide spinner and start streaming display
-		firstToken, ok := <-tokenCh
-		if ok {
-			// First token arrived — hide thinking indicator and show stream header
-			app.ui.HideThinking()
-
-			// Create a new channel that includes the first token
-			displayCh := make(chan string, 64)
-			go func() {
-				defer close(displayCh)
-				displayCh <- firstToken
-				for token := range tokenCh {
-					app.ui.HideThinking()
-					displayCh <- token
-				}
-			}()
-
-			app.ui.ShowResponseStream(displayCh)
-		}
-
 		// Wait for agent to finish
 		<-done
-		app.ui.HideThinking() // ensure hidden if no tokens came
+		app.ui.HideThinking()
+
+		if agentErr == nil && finalResponse != "" {
+			app.ui.ShowResponse(finalResponse)
+		}
 
 		if agentErr != nil {
 			// Show the error clearly to the user
