@@ -189,8 +189,9 @@ func (c *Client) buildOllamaProvider() (anyllm.Provider, error) {
 	return ollama.New(opts...)
 }
 
-// Complete executes a non-streaming text completion
-func (c *Client) Complete(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64) (*anyllm.ChatCompletion, error) {
+// Complete executes a non-streaming text completion.
+// Pass a non-empty tools slice to enable native function calling.
+func (c *Client) Complete(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64, tools []anyllm.Tool) (*anyllm.ChatCompletion, error) {
 	p, err := c.GetProvider(providerName)
 	if err != nil {
 		return nil, err
@@ -201,12 +202,16 @@ func (c *Client) Complete(ctx context.Context, providerName, model string, messa
 		Messages:    messages,
 		Temperature: &temperature,
 	}
+	if len(tools) > 0 {
+		params.Tools = tools
+	}
 
 	return p.Completion(ctx, params)
 }
 
-// Stream executes a streaming text completion
-func (c *Client) Stream(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64) (<-chan anyllm.ChatCompletionChunk, <-chan error, error) {
+// Stream executes a streaming text completion.
+// Pass a non-empty tools slice to enable native function calling in the stream.
+func (c *Client) Stream(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64, tools []anyllm.Tool) (<-chan anyllm.ChatCompletionChunk, <-chan error, error) {
 	p, err := c.GetProvider(providerName)
 	if err != nil {
 		return nil, nil, err
@@ -216,6 +221,9 @@ func (c *Client) Stream(ctx context.Context, providerName, model string, message
 		Model:       model,
 		Messages:    messages,
 		Temperature: &temperature,
+	}
+	if len(tools) > 0 {
+		params.Tools = tools
 	}
 
 	streamCh, errCh := p.CompletionStream(ctx, params)

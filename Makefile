@@ -1,7 +1,7 @@
 .PHONY: build clean run run-debug test lint vet fmt help install check all tidy
 
 BINARY_NAME=codezilla
-BUILD_DIR=build
+BUILD_DIR=bin
 LOG_DIR=logs
 GO=go
 GOFLAGS=-trimpath

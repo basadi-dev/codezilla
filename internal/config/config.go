@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
@@ -85,6 +86,25 @@ type LLMConfig struct {
 	OpenAI   OpenAIConfig     `json:"openai,omitempty" yaml:"openai,omitempty"`
 }
 
+// defaultSystemPrompt returns the default system prompt with working directory.
+func defaultSystemPrompt(cwd string) string {
+	return fmt.Sprintf(`You are Codezilla, a helpful AI coding assistant. You have access to various tools that allow you to interact with the local system, read and write files, execute commands, and more.
+
+Current working directory: %s
+
+IMPORTANT RULES FOR TOOL USAGE:
+1. When the user asks to see, show, display, read, or print a file, you MUST use the fileRead tool with the appropriate file_path parameter. DO NOT say you cannot read files — you CAN via the fileRead tool.
+2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
+3. When the user asks to run a command, use the execute tool.
+4. When the user asks to write or create a file, use the fileWrite tool.
+5. For complex multi-step tasks, explain your plan step-by-step before executing.
+6. Always show what tool you are using and why.
+7. When the user refers to "the project", "this project", or uses relative paths, assume they mean the current working directory.
+8. Always reply in markdown format.
+9. Be concise, accurate, and helpful.
+10. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.`, cwd)
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	// Get current working directory
@@ -92,12 +112,6 @@ func DefaultConfig() *Config {
 	if err != nil {
 		cwd = "."
 	}
-
-	systemPrompt := fmt.Sprintf(`You are Codezilla, a helpful AI coding assistant. You have access to various tools that allow you to interact with the local system, read and write files, execute commands, and more.
-
-Current working directory: %s
-
-When the user refers to "the project", "this project", "search", or uses relative paths, assume they mean the current working directory and its contents. Always strive to be helpful, accurate, and safe in your responses.`, cwd)
 
 	return &Config{
 		LLM: LLMConfig{
@@ -111,7 +125,7 @@ When the user refers to "the project", "this project", "search", or uses relativ
 		},
 		Temperature:         0.7,
 		MaxTokens:           1024 * 32,
-		SystemPrompt:        systemPrompt,
+		SystemPrompt:        defaultSystemPrompt(cwd),
 		LogFile:             filepath.Join("logs", "codezilla.log"),
 		LogLevel:            "info",
 		LogSilent:           false,
@@ -174,12 +188,31 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	config.WorkingDirectory = cwd
 
-	// Update system prompt with current working directory
-	config.SystemPrompt = fmt.Sprintf(`You are Codezilla, a helpful AI coding assistant. You have access to various tools that allow you to interact with the local system, read and write files, execute commands, and more.
+	// If the config file didn't provide a system prompt (or it's the YAML default
+	// placeholder), use the enhanced default. Otherwise, append working directory
+	// context to the user-provided prompt so it always knows where it is.
+	if config.SystemPrompt == "" {
+		config.SystemPrompt = defaultSystemPrompt(cwd)
+	} else {
+		// Append working directory and tool usage rules if not already present
+		if !strings.Contains(config.SystemPrompt, "Current working directory:") {
+			config.SystemPrompt += fmt.Sprintf("\n\nCurrent working directory: %s", cwd)
+		}
+		if !strings.Contains(config.SystemPrompt, "IMPORTANT RULES FOR TOOL USAGE") {
+			config.SystemPrompt += `
 
-Current working directory: %s
-
-When the user refers to "the project", "this project", "search", or uses relative paths, assume they mean the current working directory and its contents. Always strive to be helpful, accurate, and safe in your responses.`, cwd)
+IMPORTANT RULES FOR TOOL USAGE:
+1. When the user asks to see, show, display, read, or print a file, you MUST use the fileRead tool with the appropriate file_path parameter. DO NOT say you cannot read files — you CAN via the fileRead tool.
+2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
+3. When the user asks to run a command, use the execute tool.
+4. When the user asks to write or create a file, use the fileWrite tool.
+5. For complex multi-step tasks, explain your plan step-by-step before executing.
+6. Always show what tool you are using and why.
+7. Always reply in markdown format.
+8. Be concise, accurate, and helpful.
+9. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.`
+		}
+	}
 
 	// Check environment variables for authentication (these override config file)
 	if apiKey := os.Getenv("OLLAMA_API_KEY"); apiKey != "" {

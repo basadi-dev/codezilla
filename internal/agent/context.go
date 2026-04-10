@@ -24,11 +24,12 @@ const (
 
 // Message represents a message in a conversation
 type Message struct {
-	Role       Role        `json:"role"`
-	Content    string      `json:"content"`
-	ToolCall   *ToolCall   `json:"tool_call,omitempty"`
-	ToolResult *ToolResult `json:"tool_result,omitempty"`
-	Timestamp  time.Time   `json:"timestamp"`
+	Role            Role              `json:"role"`
+	Content         string            `json:"content"`
+	ToolCall        *ToolCall         `json:"tool_call,omitempty"`
+	ToolResult      *ToolResult       `json:"tool_result,omitempty"`
+	NativeToolCalls []anyllm.ToolCall `json:"native_tool_calls,omitempty"`
+	Timestamp       time.Time         `json:"timestamp"`
 }
 
 // ToolCall represents a call to a tool
@@ -39,8 +40,9 @@ type ToolCall struct {
 
 // ToolResult represents the result of a tool call
 type ToolResult struct {
-	Result interface{} `json:"result"`
-	Error  string      `json:"error,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Result     interface{} `json:"result"`
+	Error      string      `json:"error,omitempty"`
 }
 
 // Context manages the conversation context for an agent
@@ -143,7 +145,7 @@ func (c *Context) AddAssistantMessage(content string) {
 	})
 }
 
-// AddToolCallMessage adds a tool call message to the context
+// AddToolCallMessage adds a tool call message to the context (Text-pattern fallback)
 func (c *Context) AddToolCallMessage(toolName string, params map[string]interface{}) {
 	c.AddMessage(Message{
 		Role:    RoleAssistant,
@@ -156,7 +158,7 @@ func (c *Context) AddToolCallMessage(toolName string, params map[string]interfac
 	})
 }
 
-// AddToolResultMessage adds a tool result message to the context
+// AddToolResultMessage adds a tool result message to the context (Text-pattern fallback)
 func (c *Context) AddToolResultMessage(result interface{}, err error) {
 	var errStr string
 	if err != nil {
@@ -174,6 +176,35 @@ func (c *Context) AddToolResultMessage(result interface{}, err error) {
 	})
 }
 
+// AddNativeToolCallsMessage adds an assistant message containing native ToolCalls.
+func (c *Context) AddNativeToolCallsMessage(content string, nativeCalls []anyllm.ToolCall) {
+	c.AddMessage(Message{
+		Role:            RoleAssistant,
+		Content:         content,
+		NativeToolCalls: nativeCalls,
+		Timestamp:       time.Now(),
+	})
+}
+
+// AddNativeToolResultMessage adds a native tool result to the context.
+func (c *Context) AddNativeToolResultMessage(toolCallID string, result interface{}, err error) {
+	var errStr string
+	if err != nil {
+		errStr = err.Error()
+	}
+
+	c.AddMessage(Message{
+		Role:    RoleTool,
+		Content: "Tool execution result",
+		ToolResult: &ToolResult{
+			ToolCallID: toolCallID,
+			Result:     result,
+			Error:      errStr,
+		},
+		Timestamp: time.Now(),
+	})
+}
+
 // AddMessage adds a message to the context
 func (c *Context) AddMessage(msg Message) {
 	c.mu.Lock()
@@ -182,19 +213,15 @@ func (c *Context) AddMessage(msg Message) {
 	// Estimate token count (very rough)
 	tokens := estimateTokens(msg.Content)
 	if msg.ToolCall != nil {
-		// Add estimated tokens for tool call
-		tokens += 20 // Base overhead for tool call
-		tokens += len(msg.ToolCall.ToolName)
-		for k, v := range msg.ToolCall.Params {
-			tokens += len(k)
-			tokens += estimateValueTokens(v)
+		tokens += estimateToolCallTokens(msg.ToolCall)
+	}
+	if len(msg.NativeToolCalls) > 0 {
+		for _, tc := range msg.NativeToolCalls {
+			tokens += 20 + len(tc.Function.Name) + len(tc.Function.Arguments)
 		}
 	}
 	if msg.ToolResult != nil {
-		// Add estimated tokens for tool result
-		tokens += 20 // Base overhead for tool result
-		tokens += len(msg.ToolResult.Error)
-		tokens += estimateValueTokens(msg.ToolResult.Result)
+		tokens += estimateToolResultTokens(msg.ToolResult)
 	}
 
 	c.logger.Debug("Adding message to context", "role", string(msg.Role), "tokens", tokens, "currentTokens", c.CurrentTokens)
@@ -241,17 +268,15 @@ func (c *Context) TruncateIfNeeded() {
 
 		msgTokens := estimateTokens(msg.Content)
 		if msg.ToolCall != nil {
-			msgTokens += 20 // Base overhead for tool call
-			msgTokens += len(msg.ToolCall.ToolName)
-			for k, v := range msg.ToolCall.Params {
-				msgTokens += len(k)
-				msgTokens += estimateValueTokens(v)
+			msgTokens += estimateToolCallTokens(msg.ToolCall)
+		}
+		if len(msg.NativeToolCalls) > 0 {
+			for _, tc := range msg.NativeToolCalls {
+				msgTokens += 20 + len(tc.Function.Name) + len(tc.Function.Arguments)
 			}
 		}
 		if msg.ToolResult != nil {
-			msgTokens += 20 // Base overhead for tool result
-			msgTokens += len(msg.ToolResult.Error)
-			msgTokens += estimateValueTokens(msg.ToolResult.Result)
+			msgTokens += estimateToolResultTokens(msg.ToolResult)
 		}
 
 		if newTokenCount+msgTokens > c.MaxTokens {
@@ -302,7 +327,13 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 		case RoleAssistant:
 			role = "assistant"
 		case RoleTool:
-			role = "user" // Map Tool to User so the LLM processes it as context
+			// For native tool results, ANY-LLM natively expects RoleTool
+			if msg.ToolResult != nil && msg.ToolResult.ToolCallID != "" {
+				role = "tool"
+			} else {
+				// Otherwise map back to user as fallback for text pattern logic
+				role = "user"
+			}
 		default:
 			role = "user"
 		}
@@ -312,16 +343,29 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 		}
 
 		// Handle different message types
-		if msg.ToolCall != nil {
-			// Basic generic mapping for tool calls (text representation)
+		if len(msg.NativeToolCalls) > 0 {
+			formattedMsg.Content = msg.Content
+			formattedMsg.ToolCalls = msg.NativeToolCalls
+		} else if msg.ToolCall != nil {
+			// Basic generic mapping for text-pattern tool calls
 			formattedMsg.Content = msg.Content
 		} else if msg.ToolResult != nil {
-			// Format tool results as XML
-			if msg.ToolResult.Error != "" {
-				formattedMsg.Content = fmt.Sprintf("Tool Result:\n<tool_result>\n  <error>%s</error>\n</tool_result>", escapeXML(msg.ToolResult.Error))
+			if msg.ToolResult.ToolCallID != "" {
+				// Native API format
+				formattedMsg.ToolCallID = msg.ToolResult.ToolCallID
+				if msg.ToolResult.Error != "" {
+					formattedMsg.Content = fmt.Sprintf("Error: %s", msg.ToolResult.Error)
+				} else {
+					formattedMsg.Content = formatToolResult(msg.ToolResult.Result)
+				}
 			} else {
-				content := formatToolResult(msg.ToolResult.Result)
-				formattedMsg.Content = "Tool Result:\n" + content
+				// Fallback Text XML format
+				if msg.ToolResult.Error != "" {
+					formattedMsg.Content = fmt.Sprintf("Tool Result:\n<tool_result>\n  <error>%s</error>\n</tool_result>", escapeXML(msg.ToolResult.Error))
+				} else {
+					content := formatToolResult(msg.ToolResult.Result)
+					formattedMsg.Content = "Tool Result:\n" + content
+				}
 			}
 		} else {
 			// Regular message

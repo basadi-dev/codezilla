@@ -122,6 +122,39 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		ToolRegistry:  toolRegistry,
 		PermissionMgr: permissionMgr,
 		AutoPlan:      false, // disabled by default; users can opt-in via config
+		OnToolExecution: func(toolName string, params map[string]interface{}) {
+			// Show tool usage to the user so they can see what's happening
+			detail := ""
+			switch toolName {
+			case "fileRead":
+				if fp, ok := params["file_path"].(string); ok {
+					detail = fp
+				}
+			case "fileWrite":
+				if fp, ok := params["file_path"].(string); ok {
+					detail = fp
+				}
+			case "listFiles":
+				if dir, ok := params["directory"].(string); ok {
+					detail = dir
+				} else if dir, ok := params["path"].(string); ok {
+					detail = dir
+				}
+			case "execute":
+				if cmd, ok := params["command"].(string); ok {
+					if len(cmd) > 60 {
+						cmd = cmd[:60] + "..."
+					}
+					detail = cmd
+				}
+			}
+
+			if detail != "" {
+				ui.Info("🔧 Using tool: %s (%s)", toolName, detail)
+			} else {
+				ui.Info("🔧 Using tool: %s", toolName)
+			}
+		},
 	}
 	agentInstance := agent.NewAgent(agentConfig)
 
@@ -518,6 +551,9 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	registry.RegisterTool(tools.NewFileReadTool())
 	registry.RegisterTool(tools.NewFileWriteTool())
 	registry.RegisterTool(tools.NewListFilesTool())
+	registry.RegisterTool(tools.NewFileEditTool())
+	registry.RegisterTool(tools.NewGrepSearchTool())
+	registry.RegisterTool(tools.NewFileManageTool())
 
 	// Create analyzer factory and register analyzer tool
 	analyzerFactory := tools.NewAnalyzerFactory(llmClient, cfg.LLM.Provider, cfg.LLM.Models.Default, logger)
@@ -525,9 +561,13 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	// Register the analyzer (formerly V2)
 	registry.RegisterTool(analyzerFactory.CreateProjectScanAnalyzer())
 
-	// Set default permissions for project scanning tool to never ask (always allow)
-	// This tool is safe to run automatically as it only reads files without modifying anything
+	// Set default permissions for safe read-only tools
 	permissionMgr.SetDefaultPermissionLevel("projectScanAnalyzer", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("grepSearch", tools.NeverAsk)
+	
+	// Modifying tools default to asking (they'll be managed by user configs usually)
+	permissionMgr.SetDefaultPermissionLevel("fileEdit", tools.AlwaysAsk)
+	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.AlwaysAsk)
 
 	registry.RegisterTool(tools.NewExecuteTool(30))
 

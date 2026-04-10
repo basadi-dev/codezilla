@@ -76,6 +76,9 @@ type Config struct {
 	// AutoPlan controls whether the agent automatically creates todo plans for
 	// complex tasks. Defaults to false to avoid unintended planning triggers.
 	AutoPlan bool
+	// OnToolExecution is an optional callback invoked before each tool execution.
+	// It allows the UI layer to display tool usage indicators to the user.
+	OnToolExecution func(toolName string, params map[string]interface{})
 }
 
 // DefaultConfig returns a default configuration
@@ -159,12 +162,14 @@ func (a *agent) ProcessMessage(ctx context.Context, message string) (string, err
 		}
 	}
 
-	response, err := a.generateResponse(ctx)
+	// Use completion-based path so native ToolCalls are handled before text parsing
+	llmTools := a.buildLLMTools()
+	completion, err := a.generateCompletion(ctx, llmTools)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate response: %w", err)
 	}
 
-	finalResponse, err := a.runToolLoop(ctx, response)
+	finalResponse, err := a.handleCompletion(ctx, completion, llmTools)
 	if err != nil {
 		return "", err
 	}
@@ -192,7 +197,7 @@ func (a *agent) ProcessMessageStream(ctx context.Context, message string, onToke
 	// --- Stream the first response ---
 	chatMessages := a.buildChatMessages()
 
-	// Ensure system prompt is the first message if needed
+	// Ensure system prompt is the first message
 	sysPrompt := a.buildSystemPrompt()
 	if len(chatMessages) > 0 && chatMessages[0].Role != "system" {
 		chatMessages = append([]anyllm.Message{
@@ -200,20 +205,22 @@ func (a *agent) ProcessMessageStream(ctx context.Context, message string, onToke
 		}, chatMessages...)
 	}
 
-	streamCh, errCh, err := a.llmClient.Stream(ctx, a.config.Provider, a.config.Model, chatMessages, a.config.Temperature)
+	llmTools := a.buildLLMTools()
+	streamCh, errCh, err := a.llmClient.Stream(ctx, a.config.Provider, a.config.Model, chatMessages, a.config.Temperature, llmTools)
 
 	if err != nil {
-		// Fall back to non-streaming. The user message is already in context,
-		// so we call generateResponse + runToolLoop directly to avoid the
-		// double-add that ProcessMessage would cause.
+		// Fall back to non-streaming completion with native tool support
 		a.logger.Warn("Streaming failed, falling back to non-streaming", "error", err)
-		response, genErr := a.generateResponse(ctx)
+		completion, genErr := a.generateCompletion(ctx, llmTools)
 		if genErr != nil {
 			return "", fmt.Errorf("failed to generate response: %w", genErr)
 		}
-		finalResponse, toolErr := a.runToolLoop(ctx, response)
+		finalResponse, toolErr := a.handleCompletion(ctx, completion, llmTools)
 		if toolErr != nil {
 			return "", toolErr
+		}
+		if onToken != nil && finalResponse != "" {
+			onToken(finalResponse)
 		}
 		a.AddAssistantMessage(finalResponse)
 		return finalResponse, nil
@@ -221,6 +228,8 @@ func (a *agent) ProcessMessageStream(ctx context.Context, message string, onToke
 
 	var fullResponse strings.Builder
 	var streamErr error
+	var totalChunks, contentChunks, reasoningChunks int
+	var streamedToolCalls []anyllm.ToolCall
 
 	// Process stream until completion or error
 	for {
@@ -229,10 +238,25 @@ func (a *agent) ProcessMessageStream(ctx context.Context, message string, onToke
 			if !ok {
 				streamCh = nil
 			} else {
-				if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-					fullResponse.WriteString(chunk.Choices[0].Delta.Content)
-					if onToken != nil {
-						onToken(chunk.Choices[0].Delta.Content)
+				totalChunks++
+				if len(chunk.Choices) > 0 {
+					delta := chunk.Choices[0].Delta
+					if delta.Content != "" {
+						contentChunks++
+						fullResponse.WriteString(delta.Content)
+						if onToken != nil {
+							onToken(delta.Content)
+						}
+					} else if delta.Reasoning != nil && delta.Reasoning.Content != "" {
+						// Thinking/reasoning model — stream reasoning as visible content
+						reasoningChunks++
+						fullResponse.WriteString(delta.Reasoning.Content)
+						if onToken != nil {
+							onToken(delta.Reasoning.Content)
+						}
+					} else if len(delta.ToolCalls) > 0 {
+						// Native tool calls streamed as structured data
+						streamedToolCalls = append(streamedToolCalls, delta.ToolCalls...)
 					}
 				}
 			}
@@ -249,30 +273,43 @@ func (a *agent) ProcessMessageStream(ctx context.Context, message string, onToke
 		}
 	}
 
-	// If the stream returned an error, propagate it so callers can surface it
+	// If the stream returned an error, propagate it
 	if streamErr != nil {
 		return "", streamErr
 	}
 
-	firstResponse := strings.TrimSpace(fullResponse.String())
-	// Remove leading "Assistant:" if the model echoed it
-	firstResponse = strings.TrimPrefix(firstResponse, "Assistant:")
-	firstResponse = strings.TrimSpace(firstResponse)
-
-	// If streaming returned no content (e.g. a thinking model that streams
-	// internal reasoning with empty content fields), fall back to the
-	// non-streaming Complete API which consolidates the full response.
-	if firstResponse == "" {
-		a.logger.Warn("Streaming returned empty content, falling back to non-streaming Complete")
-		response, genErr := a.generateResponse(ctx)
-		if genErr != nil {
-			return "", fmt.Errorf("non-streaming fallback failed: %w", genErr)
-		}
-		finalResponse, toolErr := a.runToolLoop(ctx, response)
+	// Handle native tool calls that arrived as structured stream chunks
+	if len(streamedToolCalls) > 0 {
+		a.logger.Info("Native tool calls received via stream", "count", len(streamedToolCalls))
+		finalResponse, toolErr := a.executeNativeToolCalls(ctx, streamedToolCalls, llmTools)
 		if toolErr != nil {
 			return "", toolErr
 		}
-		// Emit the full response via onToken so the caller's display path works
+		if onToken != nil && finalResponse != "" {
+			onToken(finalResponse)
+		}
+		a.AddAssistantMessage(finalResponse)
+		return finalResponse, nil
+	}
+
+	firstResponse := strings.TrimSpace(fullResponse.String())
+	firstResponse = strings.TrimPrefix(firstResponse, "Assistant:")
+	firstResponse = strings.TrimSpace(firstResponse)
+
+	// Streaming returned no content — fall back to non-streaming with native tool support
+	if firstResponse == "" {
+		a.logger.Warn("Streaming returned empty content, falling back to non-streaming Complete",
+			"totalChunks", totalChunks,
+			"contentChunks", contentChunks,
+			"reasoningChunks", reasoningChunks)
+		completion, genErr := a.generateCompletion(ctx, llmTools)
+		if genErr != nil {
+			return "", fmt.Errorf("non-streaming fallback failed: %w", genErr)
+		}
+		finalResponse, toolErr := a.handleCompletion(ctx, completion, llmTools)
+		if toolErr != nil {
+			return "", toolErr
+		}
 		if onToken != nil && finalResponse != "" {
 			onToken(finalResponse)
 		}
