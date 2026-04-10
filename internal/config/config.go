@@ -56,7 +56,9 @@ type AnalyzerSettings struct {
 }
 
 type LLMModelsConfig struct {
-	Default string `json:"default" yaml:"default"`
+	Default  string `json:"default" yaml:"default"`
+	Planner  string `json:"planner,omitempty" yaml:"planner,omitempty"`
+	Analyzer string `json:"analyzer,omitempty" yaml:"analyzer,omitempty"`
 }
 
 type LLMAPIKeysConfig struct {

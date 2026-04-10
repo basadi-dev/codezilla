@@ -1,18 +1,14 @@
 package agent
 
 import (
-	"codezilla/pkg/logger"
+	"encoding/json"
 	"testing"
+
+	"codezilla/pkg/logger"
 )
 
 func TestExtractToolCallFormats(t *testing.T) {
-	// Create a test logger
 	log, _ := logger.New(logger.Config{Silent: true})
-
-	// Create a minimal agent for testing
-	a := &agent{
-		logger: log,
-	}
 
 	tests := []struct {
 		name       string
@@ -90,31 +86,32 @@ func TestExtractToolCallFormats(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			toolCall, remaining, hasTool := a.extractToolCall(tt.response)
+			remaining, toolCalls := ParseLLMResponse(tt.response, log)
+			hasTool := len(toolCalls) > 0
 
 			if hasTool != tt.expectTool {
-				t.Errorf("hasTool = %v, want %v", hasTool, tt.expectTool)
+				t.Errorf("hasTool = %v, want %v. Parsed tools: %v", hasTool, tt.expectTool, toolCalls)
 			}
 
 			if tt.expectTool {
-				if toolCall == nil {
-					t.Fatal("Expected tool call but got nil")
-				}
+				toolCall := toolCalls[0]
 
-				if toolCall.ToolName != tt.toolName {
-					t.Errorf("ToolName = %q, want %q", toolCall.ToolName, tt.toolName)
+				if toolCall.Function.Name != tt.toolName {
+					t.Errorf("ToolName = %q, want %q", toolCall.Function.Name, tt.toolName)
 				}
 
 				if tt.paramName != "" {
-					val, ok := toolCall.Params[tt.paramName]
+					var params map[string]interface{}
+					_ = json.Unmarshal([]byte(toolCall.Function.Arguments), &params)
+					
+					val, ok := params[tt.paramName]
 					if !ok {
-						t.Errorf("Parameter %q not found, available params: %v", tt.paramName, toolCall.Params)
+						t.Errorf("Parameter %q not found, available params: %v", tt.paramName, params)
 					} else if val != tt.paramValue {
 						t.Errorf("Parameter %q = %v, want %v", tt.paramName, val, tt.paramValue)
 					}
 				}
 
-				// Check that tool call was removed from remaining text
 				if tt.toolName == "execute" && remaining == tt.response {
 					t.Error("Tool call was not removed from response")
 				}
@@ -124,15 +121,8 @@ func TestExtractToolCallFormats(t *testing.T) {
 }
 
 func TestExtractToolCallPriority(t *testing.T) {
-	// Create a test logger
 	log, _ := logger.New(logger.Config{Silent: true})
 
-	// Create a minimal agent for testing
-	a := &agent{
-		logger: log,
-	}
-
-	// Test that JSON takes priority over XML when both are present
 	response := `Here's both formats:
 ` + "```json\n{\n  \"tool\": \"fileRead\",\n  \"params\": {\n    \"path\": \"/from/json\"\n  }\n}\n```" + `
 <tool>
@@ -142,34 +132,28 @@ func TestExtractToolCallPriority(t *testing.T) {
   </params>
 </tool>`
 
-	toolCall, _, hasTool := a.extractToolCall(response)
+	_, toolCalls := ParseLLMResponse(response, log)
 
-	if !hasTool {
-		t.Error("Expected to find tool call")
+	if len(toolCalls) == 0 {
+		t.Fatal("Expected to find tool calls")
 	}
 
-	if toolCall == nil {
-		t.Fatal("Expected tool call but got nil")
+	toolCall := toolCalls[0]
+
+	if toolCall.Function.Name != "fileRead" {
+		t.Errorf("Expected fileRead (JSON) to be extracted first, got %s", toolCall.Function.Name)
 	}
 
-	// JSON should be extracted first
-	if toolCall.ToolName != "fileRead" {
-		t.Errorf("Expected fileRead (JSON) to be extracted first, got %s", toolCall.ToolName)
-	}
+	var params map[string]interface{}
+	_ = json.Unmarshal([]byte(toolCall.Function.Arguments), &params)
 
-	if path, ok := toolCall.Params["path"].(string); !ok || path != "/from/json" {
-		t.Errorf("Expected path from JSON (/from/json), got %v", toolCall.Params["path"])
+	if path, ok := params["path"].(string); !ok || path != "/from/json" {
+		t.Errorf("Expected path from JSON (/from/json), got %v", params["path"])
 	}
 }
 
 func TestExtractMultipleToolCalls(t *testing.T) {
-	// Create a test logger
 	log, _ := logger.New(logger.Config{Silent: true})
-
-	// Create a minimal agent for testing
-	a := &agent{
-		logger: log,
-	}
 
 	tests := []struct {
 		name          string
@@ -223,12 +207,8 @@ And also:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			toolCalls := a.extractAllToolCalls(tt.response)
+			remaining, toolCalls := ParseLLMResponse(tt.response, log)
 			hasTools := len(toolCalls) > 0
-			var remaining string
-			if hasTools {
-				remaining = toolCalls[len(toolCalls)-1].remainingText
-			}
 
 			if !hasTools {
 				t.Error("Expected to find tool calls")
@@ -236,21 +216,17 @@ And also:
 
 			if len(toolCalls) != len(tt.expectedTools) {
 				t.Errorf("Expected %d tool calls, got %d", len(tt.expectedTools), len(toolCalls))
-				if len(toolCalls) > 0 {
-					t.Logf("Last remaining text: %q", toolCalls[len(toolCalls)-1].remainingText)
-				}
 			}
 
 			for i, expectedTool := range tt.expectedTools {
 				if i >= len(toolCalls) {
 					break
 				}
-				if toolCalls[i].toolCall.ToolName != expectedTool {
-					t.Errorf("Tool %d: expected %q, got %q", i, expectedTool, toolCalls[i].toolCall.ToolName)
+				if toolCalls[i].Function.Name != expectedTool {
+					t.Errorf("Tool %d: expected %q, got %q", i, expectedTool, toolCalls[i].Function.Name)
 				}
 			}
 
-			// Verify tool calls were removed from remaining text
 			if len(remaining) >= len(tt.response) {
 				t.Error("Tool calls were not properly removed from response")
 			}

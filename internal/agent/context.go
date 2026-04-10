@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,41 +12,29 @@ import (
 	anyllm "github.com/mozilla-ai/any-llm-go"
 )
 
-// Role defines the role of a message in a conversation
 type Role string
 
 const (
-	// Message roles
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
 	RoleTool      Role = "tool"
 )
 
-// Message represents a message in a conversation
 type Message struct {
-	Role            Role              `json:"role"`
-	Content         string            `json:"content"`
-	ToolCall        *ToolCall         `json:"tool_call,omitempty"`
-	ToolResult      *ToolResult       `json:"tool_result,omitempty"`
-	NativeToolCalls []anyllm.ToolCall `json:"native_tool_calls,omitempty"`
-	Timestamp       time.Time         `json:"timestamp"`
+	Role       Role              `json:"role"`
+	Content    string            `json:"content"`
+	ToolCalls  []anyllm.ToolCall `json:"tool_calls,omitempty"`
+	ToolResult *ToolResult       `json:"tool_result,omitempty"`
+	Timestamp  time.Time         `json:"timestamp"`
 }
 
-// ToolCall represents a call to a tool
-type ToolCall struct {
-	ToolName string                 `json:"tool_name"`
-	Params   map[string]interface{} `json:"params"`
-}
-
-// ToolResult represents the result of a tool call
 type ToolResult struct {
 	ToolCallID string      `json:"tool_call_id,omitempty"`
 	Result     interface{} `json:"result"`
 	Error      string      `json:"error,omitempty"`
 }
 
-// Context manages the conversation context for an agent
 type Context struct {
 	mu             sync.RWMutex
 	Messages       []Message
@@ -55,10 +44,9 @@ type Context struct {
 	logger         *logger.Logger
 }
 
-// NewContext creates a new conversation context
 func NewContext(maxTokens int, log *logger.Logger) *Context {
 	if maxTokens <= 0 {
-		maxTokens = 4000 // Default token limit
+		maxTokens = 4000
 	}
 	if log == nil {
 		log = logger.DefaultLogger()
@@ -73,23 +61,19 @@ func NewContext(maxTokens int, log *logger.Logger) *Context {
 	}
 }
 
-// ClearContext clears all non-system messages from the context
 func (c *Context) ClearContext() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Keep only system messages
 	var systemMessages []Message
 	var systemTokenCount int
 
-	// Collect system messages and their token counts
 	for _, msg := range c.Messages {
 		if msg.Role == RoleSystem {
 			systemMessages = append(systemMessages, msg)
 			systemTokenCount += estimateTokens(msg.Content)
-			// Add any additional tokens for tool calls/results if present
-			if msg.ToolCall != nil {
-				systemTokenCount += estimateToolCallTokens(msg.ToolCall)
+			if len(msg.ToolCalls) > 0 {
+				systemTokenCount += estimateToolCallsTokens(msg.ToolCalls)
 			}
 			if msg.ToolResult != nil {
 				systemTokenCount += estimateToolResultTokens(msg.ToolResult)
@@ -97,13 +81,10 @@ func (c *Context) ClearContext() {
 		}
 	}
 
-	// Reset context to only system messages
 	c.Messages = systemMessages
 	c.CurrentTokens = systemTokenCount
 }
 
-// ClearLastUserMessage removes the most recently added user message from context.
-// This is used when retrying a failed request to avoid duplicating the message.
 func (c *Context) ClearLastUserMessage() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -118,7 +99,6 @@ func (c *Context) ClearLastUserMessage() {
 	}
 }
 
-// AddSystemMessage adds a system message to the context
 func (c *Context) AddSystemMessage(content string) {
 	c.AddMessage(Message{
 		Role:      RoleSystem,
@@ -127,7 +107,6 @@ func (c *Context) AddSystemMessage(content string) {
 	})
 }
 
-// AddUserMessage adds a user message to the context
 func (c *Context) AddUserMessage(content string) {
 	c.AddMessage(Message{
 		Role:      RoleUser,
@@ -136,7 +115,6 @@ func (c *Context) AddUserMessage(content string) {
 	})
 }
 
-// AddAssistantMessage adds an assistant message to the context
 func (c *Context) AddAssistantMessage(content string) {
 	c.AddMessage(Message{
 		Role:      RoleAssistant,
@@ -145,49 +123,16 @@ func (c *Context) AddAssistantMessage(content string) {
 	})
 }
 
-// AddToolCallMessage adds a tool call message to the context (Text-pattern fallback)
-func (c *Context) AddToolCallMessage(toolName string, params map[string]interface{}) {
+func (c *Context) AddToolCallsMessage(content string, calls []anyllm.ToolCall) {
 	c.AddMessage(Message{
-		Role:    RoleAssistant,
-		Content: fmt.Sprintf("I'm using the %s tool.", toolName),
-		ToolCall: &ToolCall{
-			ToolName: toolName,
-			Params:   params,
-		},
+		Role:      RoleAssistant,
+		Content:   content,
+		ToolCalls: calls,
 		Timestamp: time.Now(),
 	})
 }
 
-// AddToolResultMessage adds a tool result message to the context (Text-pattern fallback)
-func (c *Context) AddToolResultMessage(result interface{}, err error) {
-	var errStr string
-	if err != nil {
-		errStr = err.Error()
-	}
-
-	c.AddMessage(Message{
-		Role:    RoleTool,
-		Content: "Tool execution result",
-		ToolResult: &ToolResult{
-			Result: result,
-			Error:  errStr,
-		},
-		Timestamp: time.Now(),
-	})
-}
-
-// AddNativeToolCallsMessage adds an assistant message containing native ToolCalls.
-func (c *Context) AddNativeToolCallsMessage(content string, nativeCalls []anyllm.ToolCall) {
-	c.AddMessage(Message{
-		Role:            RoleAssistant,
-		Content:         content,
-		NativeToolCalls: nativeCalls,
-		Timestamp:       time.Now(),
-	})
-}
-
-// AddNativeToolResultMessage adds a native tool result to the context.
-func (c *Context) AddNativeToolResultMessage(toolCallID string, result interface{}, err error) {
+func (c *Context) AddToolResultMessage(toolCallID string, result interface{}, err error) {
 	var errStr string
 	if err != nil {
 		errStr = err.Error()
@@ -205,20 +150,13 @@ func (c *Context) AddNativeToolResultMessage(toolCallID string, result interface
 	})
 }
 
-// AddMessage adds a message to the context
 func (c *Context) AddMessage(msg Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Estimate token count (very rough)
 	tokens := estimateTokens(msg.Content)
-	if msg.ToolCall != nil {
-		tokens += estimateToolCallTokens(msg.ToolCall)
-	}
-	if len(msg.NativeToolCalls) > 0 {
-		for _, tc := range msg.NativeToolCalls {
-			tokens += 20 + len(tc.Function.Name) + len(tc.Function.Arguments)
-		}
+	if len(msg.ToolCalls) > 0 {
+		tokens += estimateToolCallsTokens(msg.ToolCalls)
 	}
 	if msg.ToolResult != nil {
 		tokens += estimateToolResultTokens(msg.ToolResult)
@@ -228,25 +166,20 @@ func (c *Context) AddMessage(msg Message) {
 	c.Messages = append(c.Messages, msg)
 	c.CurrentTokens += tokens
 
-	// Truncate if needed
 	if c.TruncateOldest {
 		c.TruncateIfNeeded()
 	}
 }
 
-// TruncateIfNeeded removes oldest non-system messages if context exceeds max tokens
 func (c *Context) TruncateIfNeeded() {
-	c.logger.Debug("Checking if context needs truncation", "currentTokens", c.CurrentTokens, "maxTokens", c.MaxTokens)
 	if c.CurrentTokens <= c.MaxTokens {
 		return
 	}
 
-	// Keep system messages and remove oldest non-system messages first
 	var newMessages []Message
 	var newTokenCount int
-
-	// Always keep system messages
 	systemMessages := make([]Message, 0)
+
 	for _, msg := range c.Messages {
 		if msg.Role == RoleSystem {
 			systemMessages = append(systemMessages, msg)
@@ -254,54 +187,36 @@ func (c *Context) TruncateIfNeeded() {
 		}
 	}
 
-	// Start with system messages
 	newMessages = append(newMessages, systemMessages...)
 
-	// Add most recent messages until we're under the token limit
-	// Start from the end (most recent) and work backwards
 	for i := len(c.Messages) - 1; i >= 0; i-- {
 		msg := c.Messages[i]
 		if msg.Role == RoleSystem {
-			// Already added
 			continue
 		}
 
 		msgTokens := estimateTokens(msg.Content)
-		if msg.ToolCall != nil {
-			msgTokens += estimateToolCallTokens(msg.ToolCall)
-		}
-		if len(msg.NativeToolCalls) > 0 {
-			for _, tc := range msg.NativeToolCalls {
-				msgTokens += 20 + len(tc.Function.Name) + len(tc.Function.Arguments)
-			}
+		if len(msg.ToolCalls) > 0 {
+			msgTokens += estimateToolCallsTokens(msg.ToolCalls)
 		}
 		if msg.ToolResult != nil {
 			msgTokens += estimateToolResultTokens(msg.ToolResult)
 		}
 
 		if newTokenCount+msgTokens > c.MaxTokens {
-			// Would exceed limit, skip this message
 			continue
 		}
 
-		// Add this message (will be in reverse order for now)
 		newMessages = append(newMessages, msg)
 		newTokenCount += msgTokens
 	}
 
-	// If we have both system and non-system messages, we need to reverse the non-system part
 	if len(systemMessages) > 0 && len(newMessages) > len(systemMessages) {
-		// Reverse the order of non-system messages to restore chronological order
 		reversed := make([]Message, 0, len(newMessages))
-
-		// First add system messages
 		reversed = append(reversed, systemMessages...)
-
-		// Then add non-system messages in reverse order (chronological)
 		for i := len(newMessages) - 1; i >= len(systemMessages); i-- {
 			reversed = append(reversed, newMessages[i])
 		}
-
 		newMessages = reversed
 	}
 
@@ -309,12 +224,10 @@ func (c *Context) TruncateIfNeeded() {
 	c.CurrentTokens = newTokenCount
 }
 
-// GetFormattedMessages returns messages formatted for the LLM
 func (c *Context) GetFormattedMessages() []anyllm.Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	c.logger.Debug("Formatting messages for LLM", "messageCount", len(c.Messages))
 	formatted := make([]anyllm.Message, 0, len(c.Messages))
 
 	for _, msg := range c.Messages {
@@ -327,13 +240,7 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 		case RoleAssistant:
 			role = "assistant"
 		case RoleTool:
-			// For native tool results, ANY-LLM natively expects RoleTool
-			if msg.ToolResult != nil && msg.ToolResult.ToolCallID != "" {
-				role = "tool"
-			} else {
-				// Otherwise map back to user as fallback for text pattern logic
-				role = "user"
-			}
+			role = "tool"
 		default:
 			role = "user"
 		}
@@ -342,16 +249,11 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 			Role: role,
 		}
 
-		// Handle different message types
-		if len(msg.NativeToolCalls) > 0 {
+		if len(msg.ToolCalls) > 0 {
 			formattedMsg.Content = msg.Content
-			formattedMsg.ToolCalls = msg.NativeToolCalls
-		} else if msg.ToolCall != nil {
-			// Basic generic mapping for text-pattern tool calls
-			formattedMsg.Content = msg.Content
+			formattedMsg.ToolCalls = msg.ToolCalls
 		} else if msg.ToolResult != nil {
 			if msg.ToolResult.ToolCallID != "" {
-				// Native API format
 				formattedMsg.ToolCallID = msg.ToolResult.ToolCallID
 				if msg.ToolResult.Error != "" {
 					formattedMsg.Content = fmt.Sprintf("Error: %s", msg.ToolResult.Error)
@@ -359,7 +261,6 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 					formattedMsg.Content = formatToolResult(msg.ToolResult.Result)
 				}
 			} else {
-				// Fallback Text XML format
 				if msg.ToolResult.Error != "" {
 					formattedMsg.Content = fmt.Sprintf("Tool Result:\n<tool_result>\n  <error>%s</error>\n</tool_result>", escapeXML(msg.ToolResult.Error))
 				} else {
@@ -368,7 +269,6 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 				}
 			}
 		} else {
-			// Regular message
 			formattedMsg.Content = msg.Content
 		}
 
@@ -378,14 +278,12 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 	return formatted
 }
 
-// GetMessages returns a copy of all messages
 func (c *Context) GetMessages() []Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return append([]Message{}, c.Messages...)
 }
 
-// formatToolResult formats a tool result for display in the conversation using XML
 func formatToolResult(result interface{}) string {
 	switch v := result.(type) {
 	case string:
@@ -393,39 +291,29 @@ func formatToolResult(result interface{}) string {
 	case []byte:
 		return string(v)
 	case map[string]interface{}:
-		// Format map as XML
 		var builder strings.Builder
 		builder.WriteString("<tool_result>\n")
-
-		// Sort the keys for consistent output
 		keys := make([]string, 0, len(v))
 		for k := range v {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-
-		// Add each field as an XML element
 		for _, k := range keys {
 			val := v[k]
 			builder.WriteString(fmt.Sprintf("  <%s>%v</%s>\n", k, formatXMLValue(val), k))
 		}
-
 		builder.WriteString("</tool_result>")
 		return builder.String()
 	default:
-		// For simple values, just return the string representation
 		return fmt.Sprintf("%v", v)
 	}
 }
 
-// formatXMLValue formats a value for inclusion in XML
 func formatXMLValue(value interface{}) string {
 	switch v := value.(type) {
 	case string:
-		// Escape XML special characters
 		return escapeXML(v)
 	case []interface{}:
-		// Format arrays as nested elements
 		var builder strings.Builder
 		builder.WriteString("\n")
 		for i, item := range v {
@@ -434,19 +322,15 @@ func formatXMLValue(value interface{}) string {
 		builder.WriteString("  ")
 		return builder.String()
 	case map[string]interface{}:
-		// Format nested maps as nested XML
 		var builder strings.Builder
 		builder.WriteString("\n")
-
-		// Sort the keys for consistent output
 		keys := make([]string, 0, len(v))
 		for k := range v {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-
 		for _, k := range keys {
-			builder.WriteString(fmt.Sprintf("    <%s>%v</%s>\n", k, formatXMLValue(v[k]), k))
+			builder.WriteString(fmt.Sprintf("  <%s>%v</%s>\n", k, formatXMLValue(v[k]), k))
 		}
 		builder.WriteString("  ")
 		return builder.String()
@@ -455,7 +339,6 @@ func formatXMLValue(value interface{}) string {
 	}
 }
 
-// escapeXML escapes XML special characters
 func escapeXML(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
@@ -465,51 +348,51 @@ func escapeXML(s string) string {
 	return s
 }
 
-// estimateTokens provides a very rough estimate of token count for a string
-// This is not accurate but serves as a simple heuristic
 func estimateTokens(s string) int {
-	// Roughly 4 characters per token as a heuristic
 	return len(s) / 4
 }
 
-// estimateValueTokens estimates tokens for various value types
 func estimateValueTokens(v interface{}) int {
 	switch val := v.(type) {
 	case string:
 		return len(val) / 4
 	case map[string]interface{}:
-		count := 10 // Overhead for map structure
+		count := 10
 		for k, vv := range val {
 			count += len(k)
 			count += estimateValueTokens(vv)
 		}
 		return count
 	case []interface{}:
-		count := 5 // Overhead for array structure
+		count := 5
 		for _, item := range val {
 			count += estimateValueTokens(item)
 		}
 		return count
 	default:
-		// Numbers, booleans, etc.
 		return 5
 	}
 }
 
-// estimateToolCallTokens estimates the token count for a tool call
-func estimateToolCallTokens(tc *ToolCall) int {
-	tokens := 20 // Base overhead for tool call
-	tokens += len(tc.ToolName)
-	for k, v := range tc.Params {
-		tokens += len(k)
-		tokens += estimateValueTokens(v)
+func estimateToolCallsTokens(calls []anyllm.ToolCall) int {
+	tokens := 0
+	for _, tc := range calls {
+		tokens += 20 + len(tc.Function.Name)
+		var args map[string]interface{}
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
+			for k, v := range args {
+				tokens += len(k)
+				tokens += estimateValueTokens(v)
+			}
+		} else {
+			tokens += len(tc.Function.Arguments) / 4
+		}
 	}
 	return tokens
 }
 
-// estimateToolResultTokens estimates the token count for a tool result
 func estimateToolResultTokens(tr *ToolResult) int {
-	tokens := 20 // Base overhead for tool result
+	tokens := 20
 	tokens += len(tr.Error)
 	tokens += estimateValueTokens(tr.Result)
 	return tokens

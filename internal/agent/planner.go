@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -46,7 +47,6 @@ func (a *agent) shouldCreateTodoPlan(message string) bool {
 
 // createAutomaticTodoPlan creates a todo plan based on the user's message
 func (a *agent) createAutomaticTodoPlan(ctx context.Context, message string) (string, error) {
-	// Create a special prompt to analyze and create a plan
 	planPrompt := fmt.Sprintf(`Based on this request, create a todo plan:
 
 "%s"
@@ -69,31 +69,39 @@ Example format:
       <content>Design the feature</content>
       <priority>high</priority>
     </items>
-    <items>
-      <content>Implement backend</content>
-      <priority>high</priority>
-      <dependencies>task_1</dependencies>
-    </items>
   </params>
 </tool>`, message)
 
-	// Temporarily add this as a system message
 	a.context.AddSystemMessage(planPrompt)
 
-	// Generate response which should create a todo plan
-	response, err := a.generateResponse(ctx)
+	llmTools := a.buildLLMTools()
+	
+	targetModel := a.config.PlannerModel
+	if targetModel == "" {
+		targetModel = a.config.Model
+	}
+
+	completion, err := a.generateCompletion(ctx, targetModel, llmTools)
 	if err != nil {
 		return "", err
 	}
 
-	// Process any tool calls in the response
-	toolCall, _, hasTool := a.extractToolCall(response)
-	if hasTool && toolCall.ToolName == "todo_create" {
-		result, err := a.ExecuteTool(ctx, toolCall.ToolName, toolCall.Params)
-		if err != nil {
-			return "", err
+	response := ""
+	if len(completion.Choices) > 0 {
+		response = completion.Choices[0].Message.ContentString()
+	}
+
+	_, toolCalls := ParseLLMResponse(response, a.logger)
+	for _, tc := range toolCalls {
+		if tc.Function.Name == "todo_create" {
+			var params map[string]interface{}
+			_ = json.Unmarshal([]byte(tc.Function.Arguments), &params)
+			result, err := a.ExecuteTool(ctx, "todo_create", params)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%v", result), nil
 		}
-		return fmt.Sprintf("%v", result), nil
 	}
 
 	return response, nil

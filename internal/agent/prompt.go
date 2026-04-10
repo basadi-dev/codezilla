@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"codezilla/internal/tools"
+	anyllm "github.com/mozilla-ai/any-llm-go"
 )
 
 // PromptTemplate contains templates for different prompt components
@@ -169,16 +171,16 @@ func formatSchemaProperties(builder *strings.Builder, properties map[string]tool
 }
 
 // FormatToolCallPrompt formats a tool call message for the LLM
-func FormatToolCallPrompt(toolCall *ToolCall) string {
-	// Format the tool call as XML
+func FormatToolCallPrompt(toolCall *anyllm.ToolCall) string {
 	var builder strings.Builder
 	builder.WriteString("<tool>\n")
-	builder.WriteString(fmt.Sprintf("  <name>%s</name>\n", escapeXML(toolCall.ToolName)))
+	builder.WriteString(fmt.Sprintf("  <name>%s</name>\n", escapeXML(toolCall.Function.Name)))
 	builder.WriteString("  <params>\n")
 
-	// Add parameters
-	for paramName, paramValue := range toolCall.Params {
-		// Convert parameter value to string
+	var params map[string]interface{}
+	_ = json.Unmarshal([]byte(toolCall.Function.Arguments), &params)
+
+	for paramName, paramValue := range params {
 		var valueStr string
 		switch v := paramValue.(type) {
 		case string:

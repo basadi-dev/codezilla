@@ -113,6 +113,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	// Initialize agent
 	agentConfig := &agent.Config{
 		Model:         cfg.LLM.Models.Default,
+		PlannerModel:  cfg.LLM.Models.Planner,
 		Provider:      cfg.LLM.Provider,
 		SystemPrompt:  cfg.SystemPrompt,
 		Temperature:   float64(cfg.Temperature),
@@ -264,6 +265,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 				defer close(displayCh)
 				displayCh <- firstToken
 				for token := range tokenCh {
+					app.ui.HideThinking()
 					displayCh <- token
 				}
 			}()
@@ -556,7 +558,11 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	registry.RegisterTool(tools.NewFileManageTool())
 
 	// Create analyzer factory and register analyzer tool
-	analyzerFactory := tools.NewAnalyzerFactory(llmClient, cfg.LLM.Provider, cfg.LLM.Models.Default, logger)
+	analyzerModel := cfg.LLM.Models.Analyzer
+	if analyzerModel == "" {
+		analyzerModel = cfg.LLM.Models.Default
+	}
+	analyzerFactory := tools.NewAnalyzerFactory(llmClient, cfg.LLM.Provider, analyzerModel, logger)
 
 	// Register the analyzer (formerly V2)
 	registry.RegisterTool(analyzerFactory.CreateProjectScanAnalyzer())
