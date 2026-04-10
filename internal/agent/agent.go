@@ -37,6 +37,7 @@ type Config struct {
 	PlannerModel    string
 	Provider        string
 	MaxTokens       int
+	MaxIterations   int
 	Temperature     float64
 	SystemPrompt    string
 	LLMClient       *llm.Client
@@ -53,6 +54,7 @@ func DefaultConfig() *Config {
 		Model:          "qwen2.5-coder:3b",
 		Provider:       "ollama",
 		MaxTokens:      4000,
+		MaxIterations:  30,
 		Temperature:    0.7,
 		AutoPlan:       false,
 		PromptTemplate: DefaultPromptTemplate(),

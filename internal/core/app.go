@@ -118,6 +118,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		SystemPrompt:  cfg.SystemPrompt,
 		Temperature:   float64(cfg.Temperature),
 		MaxTokens:     cfg.MaxTokens,
+		MaxIterations: cfg.MaxIterations,
 		Logger:        log,
 		LLMClient:     llmClient,
 		ToolRegistry:  toolRegistry,

@@ -56,7 +56,10 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 		}
 	}
 
-	maxIter := 10
+	maxIter := 30
+	if o.agent.config.MaxIterations > 0 {
+		maxIter = o.agent.config.MaxIterations
+	}
 	iter := 0
 
 	for {
@@ -66,11 +69,12 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 		switch state {
 		case StatePrompting:
-			iter++
 			if stream {
 				state = StateStreaming
-			} else {
-				// blocking complete
+				continue
+			}
+			iter++
+			// blocking complete
 				llmTools := o.agent.buildLLMTools()
 				completion, err := o.agent.generateCompletion(ctx, "", llmTools)
 				if err != nil {
@@ -102,7 +106,6 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					currentLLMError = fmt.Errorf("empty response")
 					state = StateErrorRecovery
 				}
-			}
 
 		case StateStreaming:
 			iter++

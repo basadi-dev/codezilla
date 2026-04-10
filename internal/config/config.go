@@ -16,9 +16,10 @@ type Config struct {
 	LLM LLMConfig `json:"llm" yaml:"llm"`
 
 	// Generation parameters (common to all providers)
-	Temperature  float32 `json:"temperature" yaml:"temperature"`
-	MaxTokens    int     `json:"max_tokens" yaml:"max_tokens"`
-	SystemPrompt string  `json:"system_prompt" yaml:"system_prompt"`
+	Temperature   float32 `json:"temperature" yaml:"temperature"`
+	MaxTokens     int     `json:"max_tokens" yaml:"max_tokens"`
+	MaxIterations int     `json:"max_iterations" yaml:"max_iterations"`
+	SystemPrompt  string  `json:"system_prompt" yaml:"system_prompt"`
 
 	// Log configuration
 	LogFile   string `json:"log_file" yaml:"log_file"`
@@ -127,6 +128,7 @@ func DefaultConfig() *Config {
 		},
 		Temperature:         0.7,
 		MaxTokens:           1024 * 32,
+		MaxIterations:       30,
 		SystemPrompt:        defaultSystemPrompt(cwd),
 		LogFile:             filepath.Join("logs", "codezilla.log"),
 		LogLevel:            "info",
