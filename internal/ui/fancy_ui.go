@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/styles"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // FancyUI implements a fancy UI with animations and extra visual elements
@@ -55,12 +56,12 @@ func (ui *FancyUI) ShowBanner() {
 
 	// Reveal banner line by line
 	for i, line := range banner {
-		ui.Print("%s%s%s\n", ui.theme.ColorCyan, line, ui.theme.ColorReset)
+		ui.Println("%s", ui.theme.StyleCyan.Render(line))
 		time.Sleep(100 * time.Millisecond)
 
 		// Add sparkles on last line
 		if i == len(banner)-1 {
-			ui.Print("\n%s✨ ", ui.theme.ColorYellow)
+			ui.Print("\n%s", ui.theme.StyleYellow.Render("✨ "))
 			time.Sleep(50 * time.Millisecond)
 			ui.Print("AI-Powered ")
 			time.Sleep(50 * time.Millisecond)
@@ -68,12 +69,12 @@ func (ui *FancyUI) ShowBanner() {
 			time.Sleep(50 * time.Millisecond)
 			ui.Print("Assistant ")
 			time.Sleep(50 * time.Millisecond)
-			ui.Println("✨%s", ui.theme.ColorReset)
+			ui.Println("✨")
 		}
 	}
 
 	// Animated gradient separator
-	colors := []string{ui.theme.ColorPurple, ui.theme.ColorBlue, ui.theme.ColorCyan, ui.theme.ColorBlue, ui.theme.ColorPurple}
+	colors := []lipgloss.Style{ui.theme.StylePurple, ui.theme.StyleBlue, ui.theme.StyleCyan, ui.theme.StyleBlue, ui.theme.StylePurple}
 	separatorChars := []string{"═", "╪", "╬", "╪", "═"}
 
 	for i := 0; i < ui.width; i++ {
@@ -82,51 +83,45 @@ func (ui *FancyUI) ShowBanner() {
 		if charIndex >= len(separatorChars) {
 			charIndex = len(separatorChars) - 1
 		}
-		ui.Print("%s%s", colors[colorIndex], separatorChars[charIndex])
+		ui.Print("%s", colors[colorIndex].Render(separatorChars[charIndex]))
 		if i%3 == 0 {
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(3 * time.Millisecond)
 		}
 	}
-	ui.Print("%s\n", ui.theme.ColorReset)
+	ui.Println("")
+
+	// Subtitle
+	subtitle := ui.theme.StyleBold.Render("✨ AI-Powered Coding Assistant ✨")
+	ui.Println("%s", subtitle)
 }
 
 // ShowWelcome displays an enhanced welcome message
 func (ui *FancyUI) ShowWelcome(model, ollamaURL string, contextEnabled bool) {
-	// Animated welcome
+	// Type-writer animation on the welcome text as a whole styled string
 	welcome := "Welcome to Codezilla!"
-	ui.Print("%s", ui.theme.ColorBold)
-	for _, char := range welcome {
-		ui.Print("%c", char)
-		time.Sleep(30 * time.Millisecond)
+	for i := 1; i <= len(welcome); i++ {
+		ui.Print("\r%s", ui.theme.StyleBold.Foreground(lipgloss.Color("#FFD700")).Render(welcome[:i]))
+		time.Sleep(28 * time.Millisecond)
 	}
-	ui.Println("%s", ui.theme.ColorReset)
-
-	ui.Print("Type %s/help%s for commands or start chatting.\n",
-		ui.theme.ColorYellow, ui.theme.ColorReset)
-
-	// Model info with icon
-	ui.Print("🧠 Model: %s%s%s\n",
-		ui.theme.ColorYellow, model, ui.theme.ColorReset)
-
-	// Connection info with icon
-	ui.Print("🔌 Ollama: %s%s%s\n",
-		ui.theme.ColorDim, ollamaURL, ui.theme.ColorReset)
-
-	// Context status with appropriate icon
-	if contextEnabled {
-		ui.Print("💾 Context: %sEnabled%s %s\n",
-			ui.theme.ColorGreen, ui.theme.ColorReset, "✓")
-	} else {
-		ui.Print("💾 Context: %sDisabled%s\n",
-			ui.theme.ColorDim, ui.theme.ColorReset)
-	}
-
-	// Working directory info
-	cwd, _ := os.Getwd()
-	ui.Print("📁 Working Directory: %s%s%s\n",
-		ui.theme.ColorCyan, cwd, ui.theme.ColorReset)
-
 	ui.Println("")
+
+	// Status info panel
+	keyStyle := ui.theme.StyleDim.Width(22)
+
+	ui.Print("%s %s\n", keyStyle.Render("  🧠 Model:"), ui.theme.StyleYellow.Render(model))
+	ui.Print("%s %s\n", keyStyle.Render("  🔌 Provider:"), ui.theme.StyleDim.Render(ollamaURL))
+
+	contextVal := ui.theme.StyleRed.Render("Disabled")
+	if contextEnabled {
+		contextVal = ui.theme.StyleGreen.Render("Enabled ✓")
+	}
+	ui.Print("%s %s\n", keyStyle.Render("  💾 Context:"), contextVal)
+
+	cwd, _ := os.Getwd()
+	ui.Print("%s %s\n", keyStyle.Render("  📁 Directory:"), ui.theme.StyleCyan.Render(cwd))
+
+	ui.Print("\n  Type %s for commands or just start chatting.\n\n",
+		ui.theme.StyleYellow.Render("/help"))
 }
 
 // ShowThinking shows an enhanced thinking animation
@@ -164,8 +159,7 @@ func (ui *FancyUI) ShowThinking() {
 		defer ticker.Stop()
 
 		// Print initial frame
-		ui.Print("\r%s%s%s",
-			ui.theme.ColorCyan, frames[0], ui.theme.ColorReset)
+		ui.Print("\r%s", ui.theme.StyleCyan.Render(frames[0]))
 		ui.writer.Flush()
 
 		for {
@@ -177,8 +171,7 @@ func (ui *FancyUI) ShowThinking() {
 				return
 			case <-ticker.C:
 				i++
-				ui.Print("\r%s%s%s",
-					ui.theme.ColorCyan, frames[i%len(frames)], ui.theme.ColorReset)
+				ui.Print("\r%s", ui.theme.StyleCyan.Render(frames[i%len(frames)]))
 				ui.writer.Flush()
 			}
 		}
@@ -214,7 +207,7 @@ func (ui *FancyUI) HideThinking() {
 func (ui *FancyUI) ShowResponse(response string) {
 	// Move to a new line first to avoid overwriting issues
 	ui.Println("")
-	ui.Println("%s🤖 Assistant:%s", ui.theme.ColorGreen, ui.theme.ColorReset)
+	ui.Println("%s", ui.theme.StyleGreen.Render("🤖 Assistant:"))
 
 	// Pre-process markdown to add spacing between table rows
 	response = addTableSpacing(response)
@@ -301,7 +294,7 @@ func addTableSpacing(md string) string {
 // ShowResponseStream streams tokens as they arrive with a header.
 func (ui *FancyUI) ShowResponseStream(ch <-chan string) {
 	ui.Println("")
-	ui.Println("%s🤖 Assistant:%s", ui.theme.ColorGreen, ui.theme.ColorReset)
+	ui.Println("%s", ui.theme.StyleGreen.Render("🤖 Assistant:"))
 	for token := range ch {
 		fmt.Fprint(ui.writer, token)
 		ui.writer.Flush()
@@ -313,21 +306,21 @@ func (ui *FancyUI) ShowResponseStream(ch <-chan string) {
 // Success shows success with animation
 func (ui *FancyUI) Success(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	ui.Print("%s%s %s", ui.theme.ColorGreen, ui.theme.IconSuccess, msg)
+	ui.Print("%s %s", ui.theme.StyleGreen.Render(ui.theme.IconSuccess), msg)
 
 	// Add a subtle animation
 	for i := 0; i < 3; i++ {
 		time.Sleep(50 * time.Millisecond)
 		ui.Print(".")
 	}
-	ui.Println(" %s✅%s", ui.theme.ColorGreen, ui.theme.ColorReset)
+	ui.Println(" %s", ui.theme.StyleGreen.Render("✅"))
 	ui.writer.Flush()
 }
 
 // Error shows error with emphasis
 func (ui *FancyUI) Error(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	ui.Println("%s%s %s%s", ui.theme.ColorRed, ui.theme.IconError, msg, ui.theme.ColorReset)
+	ui.Println("%s %s", ui.theme.StyleRed.Render(ui.theme.IconError), msg)
 	// Flash effect
 	time.Sleep(100 * time.Millisecond)
 }

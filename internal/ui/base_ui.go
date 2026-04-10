@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"golang.org/x/term"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // BaseUI implements the UI interface with a base interface
@@ -51,15 +52,15 @@ func NewBaseUI(historyFile string) (UI, error) {
 // DefaultTheme returns the default terminal theme
 func DefaultTheme() Theme {
 	return Theme{
-		ColorReset:  "\033[0m",
-		ColorRed:    "\033[31m",
-		ColorGreen:  "\033[32m",
-		ColorYellow: "\033[33m",
-		ColorBlue:   "\033[34m",
-		ColorPurple: "\033[35m",
-		ColorCyan:   "\033[36m",
-		ColorBold:   "\033[1m",
-		ColorDim:    "\033[2m",
+		StyleReset:  lipgloss.NewStyle(),
+		StyleRed:    lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87")),
+		StyleGreen:  lipgloss.NewStyle().Foreground(lipgloss.Color("#00D787")),
+		StyleYellow: lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")),
+		StyleBlue:   lipgloss.NewStyle().Foreground(lipgloss.Color("#5FAFFF")),
+		StylePurple: lipgloss.NewStyle().Foreground(lipgloss.Color("#AF87FF")),
+		StyleCyan:   lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7D7")),
+		StyleBold:   lipgloss.NewStyle().Bold(true),
+		StyleDim:    lipgloss.NewStyle().Faint(true),
 
 		IconSuccess: "✓",
 		IconError:   "✗",
@@ -85,38 +86,39 @@ func (ui *BaseUI) ShowBanner() {
   \____\___/ \__,_|\___/___|_|_|_|\__,_|
                                          
 `
-	fmt.Fprint(ui.writer, ui.theme.ColorCyan+banner+ui.theme.ColorReset)
-	fmt.Fprintln(ui.writer, ui.theme.ColorBold+"AI-Powered Coding Assistant"+ui.theme.ColorReset)
-	fmt.Fprintln(ui.writer, strings.Repeat("─", ui.width))
+	fmt.Fprint(ui.writer, ui.theme.StyleCyan.Render(banner))
+	title := ui.theme.StyleBold.Render("AI-Powered Coding Assistant")
+	fmt.Fprintln(ui.writer, title)
+	separator := ui.theme.StyleDim.Render(strings.Repeat("─", ui.width))
+	fmt.Fprintln(ui.writer, separator)
 	ui.writer.Flush()
 }
 
 // ShowWelcome displays the welcome message
 func (ui *BaseUI) ShowWelcome(model, ollamaURL string, contextEnabled bool) {
-	ui.Print("%sWelcome!%s Type %s/help%s for commands or start chatting.\n",
-		ui.theme.ColorBold, ui.theme.ColorReset,
-		ui.theme.ColorYellow, ui.theme.ColorReset)
-	ui.Print("Press %sEnter%s to submit your message.\n",
-		ui.theme.ColorYellow, ui.theme.ColorReset)
-	ui.Print("Using model: %s%s%s\n",
-		ui.theme.ColorYellow, model, ui.theme.ColorReset)
-	ui.Print("Ollama URL: %s%s%s\n",
-		ui.theme.ColorDim, ollamaURL, ui.theme.ColorReset)
+	ui.Print("%s Type %s for commands or start chatting.\n",
+		ui.theme.StyleBold.Render("Welcome!"),
+		ui.theme.StyleYellow.Render("/help"))
+	ui.Print("Press %s to submit your message.\n",
+		ui.theme.StyleYellow.Render("Enter"))
+	ui.Print("Using model: %s\n",
+		ui.theme.StyleYellow.Render(model))
+	ui.Print("Ollama URL: %s\n",
+		ui.theme.StyleDim.Render(ollamaURL))
 
 	if contextEnabled {
-		ui.Print("Context retention: %sEnabled%s\n",
-			ui.theme.ColorGreen, ui.theme.ColorReset)
+		ui.Print("Context retention: %s\n",
+			ui.theme.StyleGreen.Render("Enabled"))
 	} else {
-		ui.Print("Context retention: %sDisabled%s (use /context on to enable)\n",
-			ui.theme.ColorDim, ui.theme.ColorReset)
+		ui.Print("Context retention: %s (use /context on to enable)\n",
+			ui.theme.StyleDim.Render("Disabled"))
 	}
 	ui.Println("")
 }
 
 // ShowPrompt returns the prompt string
 func (ui *BaseUI) ShowPrompt() string {
-	return fmt.Sprintf("%scodezilla%s 🤖 ",
-		ui.theme.ColorBlue, ui.theme.ColorReset)
+	return fmt.Sprintf("%s 🤖 ", ui.theme.StyleBlue.Render("codezilla"))
 }
 
 // Print outputs formatted text
@@ -134,25 +136,25 @@ func (ui *BaseUI) Println(format string, args ...interface{}) {
 // Success shows a success message
 func (ui *BaseUI) Success(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	ui.Println("%s%s%s %s", ui.theme.ColorGreen, ui.theme.IconSuccess, ui.theme.ColorReset, msg)
+	ui.Println("%s %s", ui.theme.StyleGreen.Render(ui.theme.IconSuccess), msg)
 }
 
 // Error shows an error message
 func (ui *BaseUI) Error(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	ui.Println("%s%s%s %s", ui.theme.ColorRed, ui.theme.IconError, ui.theme.ColorReset, msg)
+	ui.Println("%s %s", ui.theme.StyleRed.Render(ui.theme.IconError), msg)
 }
 
 // Warning shows a warning message
 func (ui *BaseUI) Warning(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	ui.Println("%s%s%s %s", ui.theme.ColorYellow, ui.theme.IconWarning, ui.theme.ColorReset, msg)
+	ui.Println("%s %s", ui.theme.StyleYellow.Render(ui.theme.IconWarning), msg)
 }
 
 // Info shows an info message
 func (ui *BaseUI) Info(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	ui.Println("%s%s%s %s", ui.theme.ColorBlue, ui.theme.IconInfo, ui.theme.ColorReset, msg)
+	ui.Println("%s %s", ui.theme.StyleBlue.Render(ui.theme.IconInfo), msg)
 }
 
 // ShowThinking shows a thinking/loading indicator
@@ -176,8 +178,7 @@ func (ui *BaseUI) ShowThinking() {
 				ui.Print("\r%s\r", strings.Repeat(" ", 20))
 				return
 			default:
-				ui.Print("\r%s%s Thinking...%s",
-					ui.theme.ColorCyan, chars[i%len(chars)], ui.theme.ColorReset)
+				ui.Print("\r%s Thinking...", ui.theme.StyleCyan.Render(chars[i%len(chars)]))
 				i++
 				time.Sleep(100 * time.Millisecond)
 			}
@@ -198,7 +199,7 @@ func (ui *BaseUI) HideThinking() {
 
 // ShowResponse displays an AI response
 func (ui *BaseUI) ShowResponse(response string) {
-	ui.Println("\n%sAssistant:%s", ui.theme.ColorGreen, ui.theme.ColorReset)
+	ui.Println("\n%s", ui.theme.StyleGreen.Render("Assistant:"))
 
 	// Process response for code blocks
 	lines := strings.Split(response, "\n")
@@ -209,9 +210,9 @@ func (ui *BaseUI) ShowResponse(response string) {
 			inCode = !inCode
 			if inCode {
 				lang := strings.TrimPrefix(line, "```")
-				ui.Print("%s```%s%s\n", ui.theme.ColorPurple, lang, ui.theme.ColorReset)
+				ui.Print("%s\n", ui.theme.StylePurple.Render("```"+lang))
 			} else {
-				ui.Print("%s```%s\n", ui.theme.ColorPurple, ui.theme.ColorReset)
+				ui.Print("%s\n", ui.theme.StylePurple.Render("```"))
 			}
 		} else {
 			ui.Println(line)
@@ -222,7 +223,7 @@ func (ui *BaseUI) ShowResponse(response string) {
 
 // ShowResponseStream displays a streaming AI response token by token.
 func (ui *BaseUI) ShowResponseStream(ch <-chan string) {
-	ui.Println("\n%sAssistant:%s", ui.theme.ColorGreen, ui.theme.ColorReset)
+	ui.Println("\n%s", ui.theme.StyleGreen.Render("Assistant:"))
 	for token := range ch {
 		fmt.Fprint(ui.writer, token)
 		ui.writer.Flush()
@@ -233,17 +234,21 @@ func (ui *BaseUI) ShowResponseStream(ch <-chan string) {
 
 // ShowCode displays a code block
 func (ui *BaseUI) ShowCode(language, code string) {
-	ui.Println("%s```%s%s", ui.theme.ColorPurple, language, ui.theme.ColorReset)
+	ui.Println("%s", ui.theme.StylePurple.Render("```"+language))
 	ui.Print("%s", code)
 	if !strings.HasSuffix(code, "\n") {
 		ui.Println("")
 	}
-	ui.Println("%s```%s", ui.theme.ColorPurple, ui.theme.ColorReset)
+	ui.Println("%s", ui.theme.StylePurple.Render("```"))
 }
 
 // ShowHelp displays help information
 func (ui *BaseUI) ShowHelp() {
-	ui.Println("\n%sAvailable Commands:%s", ui.theme.ColorBold, ui.theme.ColorReset)
+	ui.Println("\n%s", ui.theme.StyleBold.Render("Available Commands:"))
+
+	// Use lipgloss-width-aware padding to avoid ANSI escape byte miscount
+	cmdStyle := ui.theme.StyleYellow.Width(32)
+	descStyle := ui.theme.StyleDim
 
 	commands := []struct {
 		cmd  string
@@ -262,22 +267,22 @@ func (ui *BaseUI) ShowHelp() {
 	}
 
 	for _, cmd := range commands {
-		ui.Print("  %s%-30s%s %s\n",
-			ui.theme.ColorYellow, cmd.cmd, ui.theme.ColorReset, cmd.desc)
+		ui.Print("  %s%s\n", cmdStyle.Render(cmd.cmd), descStyle.Render(cmd.desc))
 	}
 	ui.Println("")
 }
 
 // ShowModels displays available models
 func (ui *BaseUI) ShowModels(models []string, current string) {
-	ui.Println("\n%sAvailable Models:%s", ui.theme.ColorBold, ui.theme.ColorReset)
+	ui.Println("\n%s", ui.theme.StyleBold.Render("Available Models:"))
 
 	for _, model := range models {
 		if model == current {
-			ui.Print("  %s*%s %s (current)\n",
-				ui.theme.ColorGreen, ui.theme.ColorReset, model)
+			ui.Println("  %s %s",
+				ui.theme.StyleGreen.Render("●"),
+				ui.theme.StyleGreen.Bold(true).Render(model+" (active)"))
 		} else {
-			ui.Println("    %s", model)
+			ui.Println("  %s %s", ui.theme.StyleDim.Render("○"), ui.theme.StyleDim.Render(model))
 		}
 	}
 	ui.Println("")
@@ -285,27 +290,33 @@ func (ui *BaseUI) ShowModels(models []string, current string) {
 
 // ShowTools displays available tools
 func (ui *BaseUI) ShowTools(tools []ToolInfo) {
-	ui.Println("\n%sAvailable Tools:%s", ui.theme.ColorBold, ui.theme.ColorReset)
+	ui.Println("\n%s", ui.theme.StyleBold.Render("Available Tools:"))
+
+	// Use lipgloss-width-aware padding so columns align correctly
+	nameStyle := ui.theme.StyleYellow.Width(20)
 
 	for _, tool := range tools {
-		permColor := ui.theme.ColorYellow
+		permStyle := ui.theme.StyleYellow
+		permIcon := "◆"
 		if tool.Permission == "never_ask" {
-			permColor = ui.theme.ColorGreen
+			permStyle = ui.theme.StyleGreen
+			permIcon = "✓"
 		} else if tool.Permission == "always_ask" {
-			permColor = ui.theme.ColorRed
+			permStyle = ui.theme.StyleRed
+			permIcon = "!"
 		}
 
-		ui.Print("  • %s%-15s%s %s %s(%s)%s\n",
-			ui.theme.ColorYellow, tool.Name, ui.theme.ColorReset,
-			tool.Description,
-			permColor, tool.Permission, ui.theme.ColorReset)
+		ui.Print("  %s %s %s\n",
+			nameStyle.Render(tool.Name),
+			ui.theme.StyleDim.Render(tool.Description),
+			permStyle.Render("["+permIcon+" "+tool.Permission+"]"))
 	}
 	ui.Println("")
 }
 
 // ShowContext displays conversation context
 func (ui *BaseUI) ShowContext(context string) {
-	ui.Println("\n%sConversation Context:%s", ui.theme.ColorBold, ui.theme.ColorReset)
+	ui.Println("\n%s", ui.theme.StyleBold.Render("Conversation Context:"))
 	if context == "" {
 		ui.Println("No context stored")
 	} else {
@@ -368,16 +379,17 @@ func (ui *BaseUI) SetTheme(theme Theme) {
 
 // DisableColors disables all colors in the theme
 func (ui *BaseUI) DisableColors() {
+	emptyStyle := lipgloss.NewStyle()
 	ui.theme = Theme{
-		ColorReset:  "",
-		ColorRed:    "",
-		ColorGreen:  "",
-		ColorYellow: "",
-		ColorBlue:   "",
-		ColorPurple: "",
-		ColorCyan:   "",
-		ColorBold:   "",
-		ColorDim:    "",
+		StyleReset:  emptyStyle,
+		StyleRed:    emptyStyle,
+		StyleGreen:  emptyStyle,
+		StyleYellow: emptyStyle,
+		StyleBlue:   emptyStyle,
+		StylePurple: emptyStyle,
+		StyleCyan:   emptyStyle,
+		StyleBold:   emptyStyle,
+		StyleDim:    emptyStyle,
 
 		IconSuccess: ui.theme.IconSuccess,
 		IconError:   ui.theme.IconError,

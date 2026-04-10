@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 )
 
@@ -181,7 +182,18 @@ func (ui *MinimalUI) Confirm(prompt string) (bool, error) {
 }
 
 func (ui *MinimalUI) GetTheme() Theme {
-	return Theme{} // Empty theme
+	emptyStyle := lipgloss.NewStyle()
+	return Theme{
+		StyleReset:  emptyStyle,
+		StyleRed:    emptyStyle,
+		StyleGreen:  emptyStyle,
+		StyleYellow: emptyStyle,
+		StyleBlue:   emptyStyle,
+		StylePurple: emptyStyle,
+		StyleCyan:   emptyStyle,
+		StyleBold:   emptyStyle,
+		StyleDim:    emptyStyle,
+	}
 }
 
 func (ui *MinimalUI) SetTheme(theme Theme) {

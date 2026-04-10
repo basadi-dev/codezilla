@@ -1,17 +1,19 @@
 package ui
 
+import "github.com/charmbracelet/lipgloss"
+
 // Theme defines the colors and styles for the UI
 type Theme struct {
-	// Colors
-	ColorReset  string
-	ColorRed    string
-	ColorGreen  string
-	ColorYellow string
-	ColorBlue   string
-	ColorPurple string
-	ColorCyan   string
-	ColorBold   string
-	ColorDim    string
+	// Styles
+	StyleReset   lipgloss.Style
+	StyleRed     lipgloss.Style
+	StyleGreen   lipgloss.Style
+	StyleYellow  lipgloss.Style
+	StyleBlue    lipgloss.Style
+	StylePurple  lipgloss.Style
+	StyleCyan    lipgloss.Style
+	StyleBold    lipgloss.Style
+	StyleDim     lipgloss.Style
 
 	// Icons
 	IconSuccess string

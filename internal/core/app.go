@@ -44,13 +44,13 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 	// Test connection
 	ctx := context.Background()
-	ui.Print("Checking LLM connection to %s... ", cfg.LLM.Provider)
+	ui.Info("Connecting to %s…", cfg.LLM.Provider)
 	_, err = llmClient.ListModels(ctx, cfg.LLM.Provider)
 	if err != nil {
-		ui.Error("Failed")
+		ui.Error("Cannot connect to provider %s: %v", cfg.LLM.Provider, err)
 		return nil, fmt.Errorf("cannot connect to provider %s: %w", cfg.LLM.Provider, err)
 	}
-	ui.Success("Connected")
+	ui.Success("Connected to %s", cfg.LLM.Provider)
 
 	// Initialize tool registry
 	toolRegistry := tools.NewToolRegistry()
@@ -61,14 +61,13 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		ui.HideThinking()
 
 		// Show permission request to user
-		ui.Warning("\n🔧 Tool Permission Request:")
-		ui.Print("Tool: %s\n", request.ToolContext.ToolName)
-		ui.Print("Description: %s\n", request.Description)
+		ui.Warning("🔐 Tool Permission Request")
+		ui.Print("   Tool:        %s\n", request.ToolContext.ToolName)
+		ui.Print("   Description: %s\n", request.Description)
 		ui.Print("\n")
 
 		// Ask for permission with a simple prompt
-		ui.Print("Allow this action? (y/n/always): ")
-
+		ui.Print("   Allow? (y/n/always): ")
 		// Read response directly without the usual prompt
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() {
@@ -125,7 +124,9 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		PermissionMgr: permissionMgr,
 		AutoPlan:      false, // disabled by default; users can opt-in via config
 		OnToolExecution: func(toolName string, params map[string]interface{}) {
-			// Show tool usage to the user so they can see what's happening
+			// Clear spinner before printing so messages don't collide on the same line
+			ui.HideThinking()
+
 			detail := ""
 			switch toolName {
 			case "fileRead":
@@ -156,6 +157,9 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			} else {
 				ui.Info("🔧 Using tool: %s", toolName)
 			}
+
+			// Resume spinner after printing
+			ui.ShowThinking()
 		},
 	}
 	agentInstance := agent.NewAgent(agentConfig)

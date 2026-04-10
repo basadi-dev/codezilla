@@ -6,11 +6,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 )
 
@@ -32,19 +31,10 @@ func (fi *FixedInput) SetPrompt(prompt string) {
 	fi.prompt = prompt
 }
 
-// stripANSI removes ANSI escape sequences from a string
-func stripANSI(str string) string {
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	return ansiRegex.ReplaceAllString(str, "")
-}
-
 // promptDisplayWidth calculates the actual display width of the prompt
-// accounting for ANSI codes and multi-width characters like emoji
+// accounting for styles and multi-width characters like emoji
 func (fi *FixedInput) promptDisplayWidth() int {
-	// Remove ANSI escape sequences first
-	clean := stripANSI(fi.prompt)
-	// Calculate display width using runewidth
-	return runewidth.StringWidth(clean)
+	return lipgloss.Width(fi.prompt)
 }
 
 // NewFixedInput creates a new input reader with history support but no multi-line bugs
