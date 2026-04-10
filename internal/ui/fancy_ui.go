@@ -244,9 +244,13 @@ func (ui *FancyUI) ShowResponse(response string) {
 
 // addTableSpacing pre-processes markdown tables by inserting an empty
 // padding row between data rows for better readability.
+// It is careful to skip any content inside fenced code blocks (``` ... ```),
+// which prevents the spacing logic from corrupting code blocks placed inside
+// table cells by the LLM.
 func addTableSpacing(md string) string {
 	lines := strings.Split(md, "\n")
 	var out []string
+	inFence := false
 
 	isSeparator := func(s string) bool {
 		s = strings.TrimSpace(s)
@@ -269,9 +273,17 @@ func addTableSpacing(md string) string {
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
+
+		// Track fenced code block entry/exit so we never mutate their contents.
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+		}
+
 		out = append(out, line)
 
-		if isTableRow(line) {
+		// Only add padding outside of fenced code blocks.
+		if !inFence && isTableRow(line) {
 			if isSeparator(line) {
 				continue
 			}
@@ -279,9 +291,8 @@ func addTableSpacing(md string) string {
 				continue
 			}
 
-			// It's a data row! Append an empty row for padding.
-			trimmed := strings.TrimSpace(line)
-			pipes := strings.Count(trimmed, "|")
+			// It's a data row — append an empty row for padding.
+			pipes := strings.Count(strings.TrimSpace(line), "|")
 			if pipes >= 2 {
 				emptyCols := strings.Repeat("   |", pipes-1)
 				out = append(out, "|"+emptyCols)
