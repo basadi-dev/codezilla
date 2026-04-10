@@ -3,67 +3,52 @@ package core
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
 	"codezilla/internal/agent"
-	"codezilla/internal/cli"
+	"codezilla/internal/config"
+	"codezilla/internal/core/llm"
 	"codezilla/internal/tools"
 	"codezilla/internal/ui"
-	"codezilla/llm/ollama"
 	"codezilla/pkg/logger"
 )
 
 // App represents the core application logic, independent of UI
 type App struct {
-	config     *cli.Config
-	logger     *logger.Logger
-	agent      agent.Agent
-	llmClient  ollama.Client
-	contextMgr *cli.SimpleContextManager
-	tools      tools.ToolRegistry
-	ui         ui.UI
+	config    *config.Config
+	logger    *logger.Logger
+	agent     agent.Agent
+	llmClient *llm.Client
+	tools     tools.ToolRegistry
+	ui        ui.UI
 }
 
 // NewApp creates a new application instance
-func NewApp(config *cli.Config, ui ui.UI) (*App, error) {
+func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	// Initialize logger
 	logConfig := logger.Config{
-		LogFile:  config.LogFile,
-		LogLevel: config.LogLevel,
-		Silent:   config.LogSilent,
+		LogFile:  cfg.LogFile,
+		LogLevel: cfg.LogLevel,
+		Silent:   cfg.LogSilent,
 	}
 	log, err := logger.New(logConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize logger: %w", err)
 	}
 
-	// Initialize LLM client with authentication
-	clientOptions := []func(*ollama.ClientOptions){
-		ollama.WithBaseURL(config.OllamaURL),
-	}
-
-	// Add authentication if configured
-	if config.OllamaAPIKey != "" {
-		clientOptions = append(clientOptions, ollama.WithAPIKey(config.OllamaAPIKey))
-	} else if config.OllamaUsername != "" && config.OllamaPassword != "" {
-		clientOptions = append(clientOptions, ollama.WithBasicAuth(config.OllamaUsername, config.OllamaPassword))
-	}
-
-	if len(config.OllamaHeaders) > 0 {
-		clientOptions = append(clientOptions, ollama.WithHeaders(config.OllamaHeaders))
-	}
-
-	llmClient := ollama.NewClient(clientOptions...)
+	// Initialize LLM factory
+	llmClient := llm.NewClient(cfg)
 
 	// Test connection
 	ctx := context.Background()
-	ui.Print("Checking Ollama connection... ")
-	_, err = llmClient.ListModels(ctx)
+	ui.Print("Checking LLM connection to %s... ", cfg.LLM.Provider)
+	_, err = llmClient.ListModels(ctx, cfg.LLM.Provider)
 	if err != nil {
 		ui.Error("Failed")
-		return nil, fmt.Errorf("cannot connect to Ollama at %s: %w", config.OllamaURL, err)
+		return nil, fmt.Errorf("cannot connect to provider %s: %w", cfg.LLM.Provider, err)
 	}
 	ui.Success("Connected")
 
@@ -107,7 +92,7 @@ func NewApp(config *cli.Config, ui ui.UI) (*App, error) {
 	})
 
 	// Apply permission levels from config
-	for toolName, permString := range config.ToolPermissions {
+	for toolName, permString := range cfg.ToolPermissions {
 		var level tools.PermissionLevel
 		switch permString {
 		case "never_ask":
@@ -123,31 +108,30 @@ func NewApp(config *cli.Config, ui ui.UI) (*App, error) {
 	}
 
 	// Register tools after permission manager is configured
-	registerTools(toolRegistry, llmClient, config, log, permissionMgr)
+	registerTools(toolRegistry, llmClient, cfg, log, permissionMgr)
 
 	// Initialize agent
 	agentConfig := &agent.Config{
-		Model:         config.DefaultModel,
-		SystemPrompt:  config.SystemPrompt,
-		Temperature:   float64(config.Temperature),
-		MaxTokens:     config.MaxTokens,
+		Model:         cfg.LLM.Models.Default,
+		Provider:      cfg.LLM.Provider,
+		SystemPrompt:  cfg.SystemPrompt,
+		Temperature:   float64(cfg.Temperature),
+		MaxTokens:     cfg.MaxTokens,
 		Logger:        log,
+		LLMClient:     llmClient,
 		ToolRegistry:  toolRegistry,
 		PermissionMgr: permissionMgr,
+		AutoPlan:      false, // disabled by default; users can opt-in via config
 	}
 	agentInstance := agent.NewAgent(agentConfig)
 
-	// Initialize context manager
-	contextMgr := cli.NewSimpleContextManager(10)
-
 	return &App{
-		config:     config,
-		logger:     log,
-		agent:      agentInstance,
-		llmClient:  llmClient,
-		contextMgr: contextMgr,
-		tools:      toolRegistry,
-		ui:         ui,
+		config:    cfg,
+		logger:    log,
+		agent:     agentInstance,
+		llmClient: llmClient,
+		tools:     toolRegistry,
+		ui:        ui,
 	}, nil
 }
 
@@ -164,7 +148,12 @@ func (app *App) Run(ctx context.Context) error {
 	// Show UI elements
 	app.ui.Clear()
 	app.ui.ShowBanner()
-	app.ui.ShowWelcome(app.config.DefaultModel, app.config.OllamaURL, app.config.RetainContext)
+	
+	connStr := app.config.LLM.Provider
+	if app.config.LLM.Provider == "ollama" {
+		connStr = app.config.LLM.Ollama.BaseURL
+	}
+	app.ui.ShowWelcome(app.config.LLM.Models.Default, connStr, app.config.RetainContext)
 
 	// Main loop
 	for {
@@ -200,37 +189,81 @@ func (app *App) Run(ctx context.Context) error {
 	}
 }
 
-// processInput processes user input with the AI
+// processInput processes user input with the AI using streaming.
 func (app *App) processInput(ctx context.Context, input string) error {
-	// Show thinking indicator
-	app.ui.ShowThinking()
-	defer app.ui.HideThinking()
+	for {
+		// Show thinking indicator while the connection is being established
+		app.ui.ShowThinking()
 
-	// Add to context if enabled
-	if app.config.RetainContext {
-		app.contextMgr.AddMessage("User", input)
-		app.agent.AddUserMessage(input)
-	} else {
-		app.agent.ClearContext()
-		app.agent.AddUserMessage(input)
+		// If context retention is disabled, clear previous conversation
+		if !app.config.RetainContext {
+			app.agent.ClearContext()
+		}
+
+		// Create a channel for streaming tokens
+		tokenCh := make(chan string, 64)
+
+		// Process with agent in background
+		var finalResponse string
+		var agentErr error
+		done := make(chan struct{})
+
+		go func() {
+			defer close(done)
+			defer close(tokenCh)
+
+			fr, err := app.agent.ProcessMessageStream(ctx, input, func(token string) {
+				tokenCh <- token
+			})
+			finalResponse = fr
+			agentErr = err
+		}()
+
+		// Wait for first token — at that point, hide spinner and start streaming display
+		firstToken, ok := <-tokenCh
+		if ok {
+			// First token arrived — hide thinking indicator and show stream header
+			app.ui.HideThinking()
+
+			// Create a new channel that includes the first token
+			displayCh := make(chan string, 64)
+			go func() {
+				defer close(displayCh)
+				displayCh <- firstToken
+				for token := range tokenCh {
+					displayCh <- token
+				}
+			}()
+
+			app.ui.ShowResponseStream(displayCh)
+		}
+
+		// Wait for agent to finish
+		<-done
+		app.ui.HideThinking() // ensure hidden if no tokens came
+
+		if agentErr != nil {
+			// Show the error clearly to the user
+			app.ui.Error("LLM request failed: %v", agentErr)
+			app.ui.Print("\nRetry? (y/n): ")
+
+			retryInput, err := app.ui.ReadLine()
+			if err != nil {
+				return nil
+			}
+			retryInput = strings.ToLower(strings.TrimSpace(retryInput))
+			if retryInput == "y" || retryInput == "yes" {
+				// Remove the failed user message from context so it doesn't double-up on retry
+				app.agent.ClearLastUserMessage()
+				continue
+			}
+			return nil
+		}
+
+		// Final response is already persisted by the agent's context
+		_ = finalResponse
+		return nil
 	}
-
-	// Process with agent
-	response, err := app.agent.ProcessMessage(ctx, input)
-	if err != nil {
-		return err
-	}
-
-	// Add response to context
-	if app.config.RetainContext {
-		app.contextMgr.AddMessage("Assistant", response)
-		app.agent.AddAssistantMessage(response)
-	}
-
-	// Display response
-	app.ui.ShowResponse(response)
-
-	return nil
 }
 
 // handleCommand processes commands
@@ -259,7 +292,7 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 		if len(parts) > 1 {
 			app.changeModel(ctx, strings.Join(parts[1:], " "))
 		} else {
-			app.ui.Info("Current model: %s", app.config.DefaultModel)
+			app.ui.Info("Current model: %s", app.config.LLM.Models.Default)
 		}
 
 	case "/context":
@@ -269,9 +302,22 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 		app.showTools()
 
 	case "/reset":
-		app.contextMgr.Clear()
 		app.agent.ClearContext()
 		app.ui.Success("Conversation reset")
+
+	case "/save":
+		if len(parts) < 2 {
+			app.ui.Warning("Usage: /save <filename>")
+		} else {
+			app.saveConversation(parts[1])
+		}
+
+	case "/load":
+		if len(parts) < 2 {
+			app.ui.Warning("Usage: /load <filename>")
+		} else {
+			app.loadConversation(parts[1])
+		}
 
 	default:
 		app.ui.Warning("Unknown command: %s", parts[0])
@@ -281,45 +327,126 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 	return false
 }
 
+// saveConversation serialises the conversation context to a JSON file.
+func (app *App) saveConversation(filename string) {
+	messages := app.agent.GetMessages()
+	if len(messages) == 0 {
+		app.ui.Warning("No conversation to save.")
+		return
+	}
+
+	// Build a serialisable structure from agent messages
+	type savedMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+
+	saved := make([]savedMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == agent.RoleSystem {
+			continue // Don't persist system prompts
+		}
+		saved = append(saved, savedMessage{
+			Role:    string(msg.Role),
+			Content: msg.Content,
+		})
+	}
+
+	if len(saved) == 0 {
+		app.ui.Warning("No conversation to save.")
+		return
+	}
+
+	raw, err := json.MarshalIndent(saved, "", "  ")
+	if err != nil {
+		app.ui.Error("Failed to serialise conversation: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(filename, raw, 0644); err != nil {
+		app.ui.Error("Failed to write file: %v", err)
+		return
+	}
+
+	app.ui.Success("Conversation saved to %s", filename)
+}
+
+// loadConversation reads a JSON file and restores the conversation context.
+func (app *App) loadConversation(filename string) {
+	raw, err := os.ReadFile(filename)
+	if err != nil {
+		app.ui.Error("Failed to read file: %v", err)
+		return
+	}
+
+	type savedMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+
+	var messages []savedMessage
+	if err := json.Unmarshal(raw, &messages); err != nil {
+		// Try legacy format (flat conversation string)
+		var legacyData map[string]interface{}
+		if legacyErr := json.Unmarshal(raw, &legacyData); legacyErr == nil {
+			if conv, ok := legacyData["conversation"].(string); ok && conv != "" {
+				app.agent.ClearContext()
+				app.agent.AddSystemMessage("The following is a prior conversation that was loaded from disk:\n\n" + conv)
+				app.ui.Success("Conversation loaded from %s (legacy format)", filename)
+				return
+			}
+		}
+		app.ui.Error("Failed to parse conversation file: %v", err)
+		return
+	}
+
+	// Reset context and replay messages
+	app.agent.ClearContext()
+	for _, msg := range messages {
+		switch agent.Role(msg.Role) {
+		case agent.RoleUser:
+			app.agent.AddUserMessage(msg.Content)
+		case agent.RoleAssistant:
+			app.agent.AddAssistantMessage(msg.Content)
+		}
+	}
+
+	app.ui.Success("Conversation loaded from %s (%d messages)", filename, len(messages))
+}
+
 // showModels displays available models
 func (app *App) showModels(ctx context.Context) {
-	models, err := app.llmClient.ListModels(ctx)
+	models, err := app.llmClient.ListModels(ctx, app.config.LLM.Provider)
 	if err != nil {
 		app.ui.Error("Failed to list models: %v", err)
 		return
 	}
 
-	var modelNames []string
-	for _, model := range models.Models {
-		modelNames = append(modelNames, model.Name)
-	}
-
-	app.ui.ShowModels(modelNames, app.config.DefaultModel)
+	app.ui.ShowModels(models, app.config.LLM.Models.Default)
 }
 
 // changeModel changes the current model
 func (app *App) changeModel(ctx context.Context, modelName string) {
-	models, err := app.llmClient.ListModels(ctx)
+	models, err := app.llmClient.ListModels(ctx, app.config.LLM.Provider)
 	if err != nil {
 		app.ui.Error("Failed to list models: %v", err)
 		return
 	}
 
 	found := false
-	for _, model := range models.Models {
-		if model.Name == modelName {
+	for _, model := range models {
+		if model == modelName {
 			found = true
 			break
 		}
 	}
 
 	if !found {
-		app.ui.Error("Model '%s' not found", modelName)
-		app.ui.Info("Use /models to see available models")
-		return
+		// Provide a warning but allow overriding since many remote APIs (like OpenAI) don't strictly validate listed vs available
+		app.ui.Warning("Model '%s' not explicitly found in model list, but assigning anyway.", modelName)
 	}
 
-	app.config.DefaultModel = modelName
+	app.config.LLM.Models.Default = modelName
 	app.agent.SetModel(modelName)
 	app.ui.Success("Switched to model: %s", modelName)
 }
@@ -333,15 +460,25 @@ func (app *App) handleContextCommand(parts []string) {
 			app.ui.Success("Context retention enabled")
 		case "off":
 			app.config.RetainContext = false
-			app.contextMgr.Clear()
 			app.agent.ClearContext()
 			app.ui.Success("Context retention disabled and cleared")
 		case "clear":
-			app.contextMgr.Clear()
 			app.agent.ClearContext()
 			app.ui.Success("Context cleared")
 		case "show":
-			app.ui.ShowContext(app.contextMgr.GetContext())
+			messages := app.agent.GetMessages()
+			if len(messages) == 0 {
+				app.ui.ShowContext("")
+			} else {
+				var parts []string
+				for _, msg := range messages {
+					if msg.Role == agent.RoleSystem {
+						continue
+					}
+					parts = append(parts, fmt.Sprintf("%s: %s", msg.Role, msg.Content))
+				}
+				app.ui.ShowContext(strings.Join(parts, "\n"))
+			}
 		default:
 			app.ui.Warning("Usage: /context [on|off|clear|show]")
 		}
@@ -376,15 +513,14 @@ func (app *App) showTools() {
 }
 
 // registerTools registers all available tools
-func registerTools(registry tools.ToolRegistry, llmClient ollama.Client, config *cli.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager) {
+func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager) {
 	// File operation tools
 	registry.RegisterTool(tools.NewFileReadTool())
 	registry.RegisterTool(tools.NewFileWriteTool())
 	registry.RegisterTool(tools.NewListFilesTool())
 
 	// Create analyzer factory and register analyzer tool
-	llmAdapter := NewLLMClientAdapter(llmClient)
-	analyzerFactory := tools.NewAnalyzerFactory(llmAdapter, logger)
+	analyzerFactory := tools.NewAnalyzerFactory(llmClient, cfg.LLM.Provider, cfg.LLM.Models.Default, logger)
 
 	// Register the analyzer (formerly V2)
 	registry.RegisterTool(analyzerFactory.CreateProjectScanAnalyzer())
@@ -396,7 +532,8 @@ func registerTools(registry tools.ToolRegistry, llmClient ollama.Client, config 
 	registry.RegisterTool(tools.NewExecuteTool(30))
 
 	// Todo management tools
-	for _, tool := range tools.GetTodoTools() {
+	todoMgr := tools.NewTodoManager()
+	for _, tool := range tools.GetTodoTools(todoMgr) {
 		registry.RegisterTool(tool)
 	}
 }

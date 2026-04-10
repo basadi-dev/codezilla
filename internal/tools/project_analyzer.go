@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"codezilla/internal/core/llm"
 	"codezilla/pkg/logger"
+	anyllm "github.com/mozilla-ai/any-llm-go"
 )
 
 // ================================
@@ -101,14 +103,18 @@ func (a *DefaultFileAnalyzer) AnalyzeFile(ctx context.Context, filePath string, 
 
 // LLMFileAnalyzer uses an LLM to analyze files
 type LLMFileAnalyzer struct {
-	llmClient LLMClient
+	llmClient *llm.Client
+	provider  string
+	model     string
 	logger    *logger.Logger
 }
 
 // NewLLMFileAnalyzer creates a new LLM-based file analyzer
-func NewLLMFileAnalyzer(llmClient LLMClient, logger *logger.Logger) *LLMFileAnalyzer {
+func NewLLMFileAnalyzer(llmClient *llm.Client, provider, model string, logger *logger.Logger) *LLMFileAnalyzer {
 	return &LLMFileAnalyzer{
 		llmClient: llmClient,
+		provider:  provider,
+		model:     model,
 		logger:    logger,
 	}
 }
@@ -149,7 +155,7 @@ Format your response as JSON with these fields:
 - dependencies: array of strings (optional)
 - code_smells: array of strings (optional)`, userQuery, filePath, truncatedContent)
 
-	messages := []LLMMessage{
+	messages := []anyllm.Message{
 		{
 			Role:    "system",
 			Content: "You are a code analysis assistant. Provide concise, relevant analysis focused on the user's query. Return valid JSON only.",
@@ -160,15 +166,20 @@ Format your response as JSON with these fields:
 		},
 	}
 
-	response, err := a.llmClient.GenerateResponse(ctx, messages)
+	response, err := a.llmClient.Complete(ctx, a.provider, a.model, messages, 0.2)
 	if err != nil {
 		a.logger.Error("LLM analysis failed for %s: %v", filePath, err)
 		// Fall back to basic analysis
 		return a.fallbackAnalysis(filePath, content, userQuery), nil
 	}
 
+	cleanResponse := ""
+	if len(response.Choices) > 0 {
+		cleanResponse = strings.TrimSpace(response.Choices[0].Message.ContentString())
+	}
+
 	// Parse LLM response
-	analysis, err := a.parseAnalysisResponse(response)
+	analysis, err := a.parseAnalysisResponse(cleanResponse)
 	if err != nil {
 		a.logger.Warn("Failed to parse LLM response for %s: %v", filePath, err)
 		return a.fallbackAnalysis(filePath, content, userQuery), nil
@@ -796,9 +807,9 @@ type ProjectScanAnalyzer struct {
 }
 
 // NewProjectScanAnalyzer creates the enhanced analyzer
-func NewProjectScanAnalyzer(llmClient LLMClient, logger *logger.Logger) *ProjectScanAnalyzer {
+func NewProjectScanAnalyzer(llmClient *llm.Client, provider, model string, logger *logger.Logger) *ProjectScanAnalyzer {
 	// Create base LLM analyzer
-	llmAnalyzer := NewLLMFileAnalyzer(llmClient, logger)
+	llmAnalyzer := NewLLMFileAnalyzer(llmClient, provider, model, logger)
 
 	// Create enhanced analyzer with categorization
 	enhancedAnalyzer := NewEnhancedProjectScanAnalyzer(llmAnalyzer)

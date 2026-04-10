@@ -6,18 +6,17 @@ import (
 	"os"
 	"strings"
 
-	"codezilla/internal/cli"
 	"golang.org/x/term"
 )
 
 // MinimalUI implements a minimal UI with no colors or fancy formatting
 type MinimalUI struct {
-	reader cli.InputReader
+	reader *FixedInput
 }
 
 // NewMinimalUI creates a minimal UI implementation
 func NewMinimalUI(historyFile string) (UI, error) {
-	reader, err := cli.NewFixedInput("> ", historyFile)
+	reader, err := NewFixedInput("> ", historyFile)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +85,14 @@ func (ui *MinimalUI) ShowResponse(response string) {
 	fmt.Println()
 }
 
+func (ui *MinimalUI) ShowResponseStream(ch <-chan string) {
+	fmt.Println("\nAssistant:")
+	for token := range ch {
+		fmt.Print(token)
+	}
+	fmt.Println()
+}
+
 func (ui *MinimalUI) ShowCode(language, code string) {
 	fmt.Printf("--- %s ---\n", language)
 	fmt.Print(code)
@@ -97,13 +104,15 @@ func (ui *MinimalUI) ShowCode(language, code string) {
 
 func (ui *MinimalUI) ShowHelp() {
 	fmt.Println("\nCommands:")
-	fmt.Println("  /help       - Show help")
-	fmt.Println("  /exit       - Exit")
-	fmt.Println("  /clear      - Clear screen")
-	fmt.Println("  /models     - List models")
-	fmt.Println("  /model      - Show/change model")
-	fmt.Println("  /context    - Manage context")
-	fmt.Println("  /tools      - Show tools")
+	fmt.Println("  /help            - Show help")
+	fmt.Println("  /exit            - Exit")
+	fmt.Println("  /clear           - Clear screen")
+	fmt.Println("  /models          - List models")
+	fmt.Println("  /model           - Show/change model")
+	fmt.Println("  /context         - Manage context")
+	fmt.Println("  /tools           - Show tools")
+	fmt.Println("  /save <filename> - Save conversation")
+	fmt.Println("  /load <filename> - Load conversation")
 	fmt.Println()
 }
 

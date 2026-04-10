@@ -8,15 +8,13 @@ import (
 	"sync"
 	"time"
 
-	"codezilla/internal/cli"
-
 	"golang.org/x/term"
 )
 
 // BaseUI implements the UI interface with a base interface
 type BaseUI struct {
 	theme        Theme
-	reader       cli.InputReader
+	reader       *FixedInput
 	writer       *bufio.Writer
 	spinnerStop  chan bool
 	spinnerMutex sync.Mutex
@@ -32,7 +30,7 @@ func NewBaseUI(historyFile string) (UI, error) {
 	}
 
 	// Create input reader
-	reader, err := cli.NewFixedInput(
+	reader, err := NewFixedInput(
 		"", // Prompt will be set by theme
 		historyFile,
 	)
@@ -222,10 +220,21 @@ func (ui *BaseUI) ShowResponse(response string) {
 	ui.Println("")
 }
 
+// ShowResponseStream displays a streaming AI response token by token.
+func (ui *BaseUI) ShowResponseStream(ch <-chan string) {
+	ui.Println("\n%sAssistant:%s", ui.theme.ColorGreen, ui.theme.ColorReset)
+	for token := range ch {
+		fmt.Fprint(ui.writer, token)
+		ui.writer.Flush()
+	}
+	ui.Println("")
+	ui.writer.Flush()
+}
+
 // ShowCode displays a code block
 func (ui *BaseUI) ShowCode(language, code string) {
 	ui.Println("%s```%s%s", ui.theme.ColorPurple, language, ui.theme.ColorReset)
-	ui.Print(code)
+	ui.Print("%s", code)
 	if !strings.HasSuffix(code, "\n") {
 		ui.Println("")
 	}
@@ -248,6 +257,8 @@ func (ui *BaseUI) ShowHelp() {
 		{"/context [on|off|clear|show]", "Manage context"},
 		{"/tools", "Show available tools"},
 		{"/reset", "Reset conversation"},
+		{"/save <filename>", "Save conversation to JSON file"},
+		{"/load <filename>", "Load conversation from JSON file"},
 	}
 
 	for _, cmd := range commands {
@@ -305,16 +316,13 @@ func (ui *BaseUI) ShowContext(context string) {
 
 // ReadLine reads a line of input (single-line mode)
 func (ui *BaseUI) ReadLine() (string, error) {
-	// Update prompt in reader if it's our FixedInput
-	if fixedInput, ok := ui.reader.(*cli.FixedInput); ok {
-		fixedInput.SetPrompt(ui.ShowPrompt())
-	}
+	ui.reader.SetPrompt(ui.ShowPrompt())
 	return ui.reader.ReadLine()
 }
 
 // ReadPassword reads a password without echoing
 func (ui *BaseUI) ReadPassword(prompt string) (string, error) {
-	ui.Print(prompt)
+	ui.Print("%s", prompt)
 
 	fd := int(os.Stdin.Fd())
 	if term.IsTerminal(fd) {

@@ -19,7 +19,7 @@ A modular AI-powered coding assistant CLI tool that uses Ollama for local LLM in
 
 ## Prerequisites
 
-- Go 1.22 or higher (project uses Go 1.23 features but can run with 1.22+)
+- Go 1.26 or higher
 - Ollama installed and running locally (default: http://localhost:11434)
 - A compatible Ollama model installed (default: qwen2.5-coder:3b)
 
@@ -206,7 +206,7 @@ make help        # Show all available commands
 ### Building from Source
 
 Requirements:
-- Go 1.22 or higher
+- Go 1.26 or higher
 - Make (optional, but recommended)
 
 Without Make:

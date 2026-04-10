@@ -1,0 +1,64 @@
+# Codezilla Configuration Example
+# By default, Codezilla looks for this config at ~/.config/codezilla/config.yaml
+# You can override it by using the -config flag: `codezilla -config ./config.yaml`
+
+# LLM Provider Configuration
+llm:
+  # Provider: ollama (default), openai, anthropic, gemini
+  provider: "ollama"
+
+  models:
+    default: "gpt-oss:20b"
+
+  # Ollama-specific settings
+  ollama:
+    base_url: "https://ollama.com"
+    auth_type: "bearer"  # bearer, basic, or custom
+
+  # OpenAI-specific settings (also used for OpenAI-compatible APIs)
+  # openai:
+  #   base_url: "https://api.openai.com/v1"
+
+  # API keys can also be set via environment variables:
+  #   OLLAMA_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY
+  # api_keys:
+  #   ollama: ""
+  #   openai: ""
+  #   anthropic: ""
+  #   gemini: ""
+
+temperature: 0.7
+max_tokens: 32768
+system_prompt: |
+  You are Codezilla, a helpful AI coding assistant. You have access to various tools that allow you to interact with the local system, read and write files, execute commands, and more.
+
+  When the user refers to "the project", "this project", "search", or uses relative paths, assume they mean the current working directory and its contents. Always strive to be helpful, accurate, and safe in your responses.
+
+# Logging outputs
+log_file: "logs/codezilla.log"
+log_level: "info"
+log_silent: false
+
+retain_context: true
+max_context_chars: 50000
+
+# Safety Configuration
+dangerous_tools_warn: true
+always_ask_permission: false
+tool_permissions:
+    execute: always_ask
+    fileRead: never_ask
+    fileWrite: always_ask
+    listFiles: never_ask
+    projectScanAnalyzer: never_ask
+
+# Appearance
+force_color: false
+no_color: false
+
+analyzer_settings:
+    use_llm: true
+    concurrency: 5
+    relevance_threshold: 0.3
+    analysis_timeout: 30
+    max_file_size: 1048576

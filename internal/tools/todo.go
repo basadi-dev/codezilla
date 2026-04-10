@@ -44,11 +44,8 @@ func NewTodoManager() *TodoManager {
 	}
 }
 
-// Global todo manager instance
-var globalTodoManager = NewTodoManager()
-
 // TodoCreateTool creates new todo plans
-type TodoCreateTool struct{}
+type TodoCreateTool struct{ mgr *TodoManager }
 
 func (t TodoCreateTool) Name() string {
 	return "todo_create"
@@ -128,6 +125,7 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 		}
 	}
 
+	globalTodoManager := t.mgr
 	globalTodoManager.mu.Lock()
 	globalTodoManager.plans[plan.ID] = plan
 	globalTodoManager.currentPlanID = plan.ID
@@ -138,7 +136,7 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 }
 
 // TodoUpdateTool updates todo item status
-type TodoUpdateTool struct{}
+type TodoUpdateTool struct{ mgr *TodoManager }
 
 func (t TodoUpdateTool) Name() string {
 	return "todo_update"
@@ -165,6 +163,7 @@ func (t TodoUpdateTool) Execute(ctx context.Context, params map[string]interface
 	taskID, _ := params["task_id"].(string)
 	status, _ := params["status"].(string)
 
+	globalTodoManager := t.mgr
 	globalTodoManager.mu.Lock()
 	defer globalTodoManager.mu.Unlock()
 
@@ -201,7 +200,7 @@ func (t TodoUpdateTool) Execute(ctx context.Context, params map[string]interface
 }
 
 // TodoListTool lists current todo plans and items
-type TodoListTool struct{}
+type TodoListTool struct{ mgr *TodoManager }
 
 func (t TodoListTool) Name() string {
 	return "todo_list"
@@ -222,6 +221,7 @@ func (t TodoListTool) ParameterSchema() JSONSchema {
 }
 
 func (t TodoListTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+	globalTodoManager := t.mgr
 	globalTodoManager.mu.RLock()
 	defer globalTodoManager.mu.RUnlock()
 
@@ -322,7 +322,7 @@ func formatPlan(plan *TodoPlan, statusFilter string) string {
 }
 
 // TodoAnalyzeTool analyzes the current plan and suggests next actions
-type TodoAnalyzeTool struct{}
+type TodoAnalyzeTool struct{ mgr *TodoManager }
 
 func (t TodoAnalyzeTool) Name() string {
 	return "todo_analyze"
@@ -342,6 +342,7 @@ func (t TodoAnalyzeTool) ParameterSchema() JSONSchema {
 }
 
 func (t TodoAnalyzeTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+	globalTodoManager := t.mgr
 	globalTodoManager.mu.RLock()
 	defer globalTodoManager.mu.RUnlock()
 
@@ -475,12 +476,12 @@ func (t TodoAnalyzeTool) Execute(ctx context.Context, params map[string]interfac
 	return output, nil
 }
 
-// GetTodoTools returns all todo management tools
-func GetTodoTools() []Tool {
+// GetTodoTools returns all todo management tools using the provided manager.
+func GetTodoTools(mgr *TodoManager) []Tool {
 	return []Tool{
-		TodoCreateTool{},
-		TodoUpdateTool{},
-		TodoListTool{},
-		TodoAnalyzeTool{},
+		TodoCreateTool{mgr: mgr},
+		TodoUpdateTool{mgr: mgr},
+		TodoListTool{mgr: mgr},
+		TodoAnalyzeTool{mgr: mgr},
 	}
 }

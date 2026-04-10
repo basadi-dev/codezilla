@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"codezilla/internal/cli"
+	"codezilla/internal/config"
 	"codezilla/internal/core"
 	"codezilla/internal/ui"
 )
@@ -20,6 +20,7 @@ func main() {
 		configPath  = flag.String("config", "", "Path to config file")
 		uiType      = flag.String("ui", "fancy", "UI type: minimal or fancy")
 		noColors    = flag.Bool("no-colors", false, "Disable colored output")
+		provider    = flag.String("provider", "", "Override LLM provider (ollama, openai, anthropic, gemini)")
 		model       = flag.String("model", "", "Override default model")
 		ollamaURL   = flag.String("ollama-url", "", "Override Ollama API URL")
 		temperature = flag.Float64("temperature", -1, "Override temperature (0.0-1.0)")
@@ -47,33 +48,36 @@ func main() {
 	}
 
 	// Load configuration
-	config, err := cli.LoadConfig(*configPath)
+	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		config = cli.DefaultConfig()
+		cfg = config.DefaultConfig()
 		fmt.Printf("Note: Using default configuration\n")
 	}
 
 	// Apply CLI overrides
+	if *provider != "" {
+		cfg.LLM.Provider = *provider
+	}
 	if *model != "" {
-		config.DefaultModel = *model
+		cfg.LLM.Models.Default = *model
 	}
 	if *ollamaURL != "" {
-		config.OllamaURL = *ollamaURL
+		cfg.LLM.Ollama.BaseURL = *ollamaURL
 	}
 	if *temperature >= 0 && *temperature <= 1 {
-		config.Temperature = float32(*temperature)
+		cfg.Temperature = float32(*temperature)
 	}
 	if *maxTokens > 0 {
-		config.MaxTokens = *maxTokens
+		cfg.MaxTokens = *maxTokens
 	}
 
 	// Apply color settings
 	if *noColors {
-		config.NoColor = true
+		cfg.NoColor = true
 	}
 
 	// Get history file path
-	historyPath, _ := cli.GetDefaultHistoryFilePath()
+	historyPath, _ := ui.GetDefaultHistoryFilePath()
 
 	// Create UI based on selection
 	var appUI ui.UI
@@ -96,7 +100,7 @@ func main() {
 	}
 
 	// Create the core application
-	app, err := core.NewApp(config, appUI)
+	app, err := core.NewApp(cfg, appUI)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize application: %v\n", err)
 		os.Exit(1)
@@ -124,9 +128,9 @@ func main() {
 
 func getDefaultConfigPath() string {
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".config", "codezilla", "config.json")
+		return filepath.Join(home, ".config", "codezilla", "config.yaml")
 	}
-	return "config.json"
+	return "config.yaml"
 }
 
 func printHelp() {
@@ -137,8 +141,9 @@ Usage:
 
 Options:
   -config string       Path to configuration file
+  -provider string     Override LLM provider (ollama, openai, anthropic, gemini)
   -model string        Override default model (e.g., "qwen3:14b")
-  -ollama-url string   Override Ollama API URL (e.g., "http://localhost:11434/api")
+  -ollama-url string   Override Ollama API URL (e.g., "http://localhost:11434")
   -temperature float   Override temperature (0.0-1.0)
   -max-tokens int      Override max tokens
   -ui string           UI type: fancy (default) or minimal
@@ -161,13 +166,16 @@ Examples:
   codezilla -no-colors
 
   # Use custom config
-  codezilla -config /path/to/config.json
+  codezilla -config /path/to/config.yaml
 
   # Override model
   codezilla -model "llama3:latest"
 
+  # Override provider
+  codezilla -provider openai -model "gpt-4o"
+
   # Override Ollama URL
-  codezilla -ollama-url "http://192.168.1.100:11434/api"
+  codezilla -ollama-url "http://192.168.1.100:11434"
 
   # Override temperature
   codezilla -temperature 0.8

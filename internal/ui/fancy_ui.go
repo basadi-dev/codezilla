@@ -240,6 +240,18 @@ func (ui *FancyUI) ShowResponse(response string) {
 	ui.writer.Flush()
 }
 
+// ShowResponseStream streams tokens as they arrive with a header.
+func (ui *FancyUI) ShowResponseStream(ch <-chan string) {
+	ui.Println("")
+	ui.Println("%s🤖 Assistant:%s", ui.theme.ColorGreen, ui.theme.ColorReset)
+	for token := range ch {
+		fmt.Fprint(ui.writer, token)
+		ui.writer.Flush()
+	}
+	ui.Println("")
+	ui.writer.Flush()
+}
+
 // Success shows success with animation
 func (ui *FancyUI) Success(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)

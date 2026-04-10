@@ -1,4 +1,4 @@
-package cli
+package ui
 
 import (
 	"bufio"
@@ -440,4 +440,14 @@ func (fi *FixedInput) addHistory(line string) {
 			fmt.Fprintf(os.Stderr, "Failed to save history: %v\n", err)
 		}
 	}()
+}
+
+// GetDefaultHistoryFilePath returns the default path for the command history file
+func GetDefaultHistoryFilePath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	configDir := filepath.Join(homeDir, ".config", "codezilla")
+	return filepath.Join(configDir, "history"), nil
 }

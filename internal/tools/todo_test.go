@@ -6,8 +6,19 @@ import (
 	"time"
 )
 
+// newTestTodoTools creates a fresh set of todo tools backed by an isolated manager
+// so tests don't share global state.
+func newTestTodoTools() (*TodoManager, TodoCreateTool, TodoUpdateTool, TodoListTool, TodoAnalyzeTool) {
+	mgr := NewTodoManager()
+	return mgr,
+		TodoCreateTool{mgr: mgr},
+		TodoUpdateTool{mgr: mgr},
+		TodoListTool{mgr: mgr},
+		TodoAnalyzeTool{mgr: mgr}
+}
+
 func TestTodoCreateTool(t *testing.T) {
-	tool := TodoCreateTool{}
+	_, createTool, _, _, _ := newTestTodoTools()
 	ctx := context.Background()
 
 	// Test creating a simple todo plan
@@ -27,7 +38,7 @@ func TestTodoCreateTool(t *testing.T) {
 		},
 	}
 
-	result, err := tool.Execute(ctx, params)
+	result, err := createTool.Execute(ctx, params)
 	if err != nil {
 		t.Fatalf("Failed to create todo plan: %v", err)
 	}
@@ -44,8 +55,7 @@ func TestTodoCreateTool(t *testing.T) {
 }
 
 func TestTodoUpdateTool(t *testing.T) {
-	// First create a plan
-	createTool := TodoCreateTool{}
+	_, createTool, updateTool, listTool, _ := newTestTodoTools()
 	ctx := context.Background()
 
 	createParams := map[string]interface{}{
@@ -63,7 +73,6 @@ func TestTodoUpdateTool(t *testing.T) {
 	}
 
 	// Get the plan to find task ID
-	listTool := TodoListTool{}
 	_, err = listTool.Execute(ctx, map[string]interface{}{})
 	if err != nil {
 		t.Fatalf("Failed to list todos: %v", err)
@@ -71,7 +80,6 @@ func TestTodoUpdateTool(t *testing.T) {
 
 	// For this test, we'll assume the task ID format
 	// In a real test, we'd parse the result to get the actual ID
-	updateTool := TodoUpdateTool{}
 	updateParams := map[string]interface{}{
 		"task_id": "task_1", // This would need to be extracted from the list
 		"status":  "in_progress",
@@ -87,11 +95,17 @@ func TestTodoUpdateTool(t *testing.T) {
 }
 
 func TestTodoListTool(t *testing.T) {
-	tool := TodoListTool{}
+	_, createTool, _, listTool, _ := newTestTodoTools()
 	ctx := context.Background()
 
+	// Seed a plan so the list is non-empty
+	_, _ = createTool.Execute(ctx, map[string]interface{}{
+		"name":  "Seed Plan",
+		"items": []interface{}{map[string]interface{}{"content": "seed task"}},
+	})
+
 	// List all todos
-	result, err := tool.Execute(ctx, map[string]interface{}{})
+	result, err := listTool.Execute(ctx, map[string]interface{}{})
 	if err != nil {
 		t.Fatalf("Failed to list todos: %v", err)
 	}
@@ -107,7 +121,7 @@ func TestTodoListTool(t *testing.T) {
 	}
 
 	// Test with status filter
-	filteredResult, err := tool.Execute(ctx, map[string]interface{}{
+	filteredResult, err := listTool.Execute(ctx, map[string]interface{}{
 		"status_filter": "completed",
 	})
 	if err != nil {
@@ -118,8 +132,7 @@ func TestTodoListTool(t *testing.T) {
 }
 
 func TestTodoAnalyzeTool(t *testing.T) {
-	// Create a plan with dependencies
-	createTool := TodoCreateTool{}
+	_, createTool, _, _, analyzeTool := newTestTodoTools()
 	ctx := context.Background()
 
 	createParams := map[string]interface{}{
@@ -148,7 +161,6 @@ func TestTodoAnalyzeTool(t *testing.T) {
 	}
 
 	// Analyze the plan
-	analyzeTool := TodoAnalyzeTool{}
 	result, err := analyzeTool.Execute(ctx, map[string]interface{}{})
 	if err != nil {
 		t.Fatalf("Failed to analyze todos: %v", err)
@@ -230,40 +242,6 @@ func TestTodoPersistence(t *testing.T) {
 		t.Errorf("Plan should have 1 item, got %d", len(loadedPlan.Items))
 	}
 }
-
-// TestTodoClearTool is commented out because TodoClearTool is not implemented
-// func TestTodoClearTool(t *testing.T) {
-// 	// Create a plan with mixed statuses
-// 	createTool := TodoCreateTool{}
-// 	ctx := context.Background()
-
-// 	createParams := map[string]interface{}{
-// 		"name": "Clear Test Plan",
-// 		"items": []interface{}{
-// 			map[string]interface{}{"content": "Completed task"},
-// 			map[string]interface{}{"content": "Pending task"},
-// 			map[string]interface{}{"content": "Another completed"},
-// 		},
-// 	}
-
-// 	_, err := createTool.Execute(ctx, createParams)
-// 	if err != nil {
-// 		t.Fatalf("Failed to create plan for clear test: %v", err)
-// 	}
-
-// 	// Manually mark some as completed (in a real scenario)
-// 	// For now, just test the clear functionality
-// 	clearTool := TodoClearTool{}
-
-// 	result, err := clearTool.Execute(ctx, map[string]interface{}{
-// 		"status": "completed",
-// 	})
-// 	if err != nil {
-// 		t.Fatalf("Failed to clear completed tasks: %v", err)
-// 	}
-
-// 	t.Logf("Clear result: %v", result)
-// }
 
 // Helper function for string contains
 func testContains(s, substr string) bool {

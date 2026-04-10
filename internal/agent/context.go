@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"codezilla/pkg/logger"
+	anyllm "github.com/mozilla-ai/any-llm-go"
 )
 
 // Role defines the role of a message in a conversation
@@ -53,9 +54,12 @@ type Context struct {
 }
 
 // NewContext creates a new conversation context
-func NewContext(maxTokens int) *Context {
+func NewContext(maxTokens int, log *logger.Logger) *Context {
 	if maxTokens <= 0 {
 		maxTokens = 4000 // Default token limit
+	}
+	if log == nil {
+		log = logger.DefaultLogger()
 	}
 
 	return &Context{
@@ -63,7 +67,7 @@ func NewContext(maxTokens int) *Context {
 		MaxTokens:      maxTokens,
 		CurrentTokens:  0,
 		TruncateOldest: true,
-		logger:         logger.DefaultLogger(),
+		logger:         log,
 	}
 }
 
@@ -94,6 +98,22 @@ func (c *Context) ClearContext() {
 	// Reset context to only system messages
 	c.Messages = systemMessages
 	c.CurrentTokens = systemTokenCount
+}
+
+// ClearLastUserMessage removes the most recently added user message from context.
+// This is used when retrying a failed request to avoid duplicating the message.
+func (c *Context) ClearLastUserMessage() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for i := len(c.Messages) - 1; i >= 0; i-- {
+		if c.Messages[i].Role == RoleUser {
+			tokens := estimateTokens(c.Messages[i].Content)
+			c.Messages = append(c.Messages[:i], c.Messages[i+1:]...)
+			c.CurrentTokens -= tokens
+			return
+		}
+	}
 }
 
 // AddSystemMessage adds a system message to the context
@@ -265,37 +285,47 @@ func (c *Context) TruncateIfNeeded() {
 }
 
 // GetFormattedMessages returns messages formatted for the LLM
-func (c *Context) GetFormattedMessages() []map[string]interface{} {
+func (c *Context) GetFormattedMessages() []anyllm.Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	c.logger.Debug("Formatting messages for LLM", "messageCount", len(c.Messages))
-	formatted := make([]map[string]interface{}, 0, len(c.Messages))
+	formatted := make([]anyllm.Message, 0, len(c.Messages))
 
 	for _, msg := range c.Messages {
-		formattedMsg := map[string]interface{}{
-			"role": string(msg.Role),
+		var role string
+		switch msg.Role {
+		case RoleSystem:
+			role = "system"
+		case RoleUser:
+			role = "user"
+		case RoleAssistant:
+			role = "assistant"
+		case RoleTool:
+			role = "user" // Map Tool to User so the LLM processes it as context
+		default:
+			role = "user"
+		}
+
+		formattedMsg := anyllm.Message{
+			Role: role,
 		}
 
 		// Handle different message types
 		if msg.ToolCall != nil {
-			// Format tool calls
-			formattedMsg["content"] = msg.Content
-			formattedMsg["tool_call"] = map[string]interface{}{
-				"name":   msg.ToolCall.ToolName,
-				"params": msg.ToolCall.Params,
-			}
+			// Basic generic mapping for tool calls (text representation)
+			formattedMsg.Content = msg.Content
 		} else if msg.ToolResult != nil {
 			// Format tool results as XML
 			if msg.ToolResult.Error != "" {
-				formattedMsg["content"] = fmt.Sprintf("<tool_result>\n  <error>%s</error>\n</tool_result>", escapeXML(msg.ToolResult.Error))
+				formattedMsg.Content = fmt.Sprintf("Tool Result:\n<tool_result>\n  <error>%s</error>\n</tool_result>", escapeXML(msg.ToolResult.Error))
 			} else {
 				content := formatToolResult(msg.ToolResult.Result)
-				formattedMsg["content"] = content
+				formattedMsg.Content = "Tool Result:\n" + content
 			}
 		} else {
 			// Regular message
-			formattedMsg["content"] = msg.Content
+			formattedMsg.Content = msg.Content
 		}
 
 		formatted = append(formatted, formattedMsg)

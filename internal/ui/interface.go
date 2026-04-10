@@ -41,6 +41,7 @@ type UI interface {
 	ShowThinking()
 	HideThinking()
 	ShowResponse(response string)
+	ShowResponseStream(ch <-chan string)
 	ShowCode(language, code string)
 
 	// Structured displays

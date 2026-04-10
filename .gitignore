@@ -34,3 +34,6 @@ Thumbs.db
 *.swo
 
 **/.claude/settings.local.json
+
+# Environment variables and local configs
+.env

@@ -87,7 +87,7 @@ func (tp *TodoPersistence) Load(manager *TodoManager) error {
 	return nil
 }
 
-// AutoSave creates a function that automatically saves after operations
+// AutoSave returns a function that automatically saves after operations
 func (tp *TodoPersistence) AutoSave(manager *TodoManager) func() {
 	return func() {
 		if err := tp.Save(manager); err != nil {
@@ -97,36 +97,11 @@ func (tp *TodoPersistence) AutoSave(manager *TodoManager) func() {
 	}
 }
 
-// Initialize global persistence
-var todoPersistence *TodoPersistence
-
-func initTodoPersistence() {
-	// Use a hidden directory in the project root for persistence
+// DefaultTodoPersistencePath returns the default path for todo state persistence.
+func DefaultTodoPersistencePath() string {
 	dataDir := ".codezilla"
 	if home, err := os.UserHomeDir(); err == nil {
 		dataDir = filepath.Join(home, ".codezilla", "todos")
 	}
-
-	todoPersistence = NewTodoPersistence(dataDir)
-
-	// Load existing state
-	if err := todoPersistence.Load(globalTodoManager); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load todo state: %v\n", err)
-	}
-}
-
-// wrapWithAutoSave wraps a todo operation with automatic persistence
-func wrapWithAutoSave(original func(map[string]interface{}) (string, error)) func(map[string]interface{}) (string, error) {
-	return func(params map[string]interface{}) (string, error) {
-		result, err := original(params)
-		if err == nil && todoPersistence != nil {
-			todoPersistence.AutoSave(globalTodoManager)()
-		}
-		return result, err
-	}
-}
-
-func init() {
-	// Initialize persistence
-	initTodoPersistence()
+	return dataDir
 }
