@@ -50,33 +50,7 @@ func TestExtractToolCallFormats(t *testing.T) {
 			paramName:  "file_path",
 			paramValue: "/tmp/test.txt",
 		},
-		{
-			name: "Bash code block",
-			response: `Let me list the files:
-` + "```bash\nls -la /tmp\n```",
-			expectTool: true,
-			toolName:   "execute",
-			paramName:  "command",
-			paramValue: "ls -la /tmp",
-		},
-		{
-			name: "Shell code block",
-			response: `Checking disk usage:
-` + "```shell\ndf -h\n```",
-			expectTool: true,
-			toolName:   "execute",
-			paramName:  "command",
-			paramValue: "df -h",
-		},
-		{
-			name: "Sh code block",
-			response: `Running the script:
-` + "```sh\necho \"Hello from shell\"\n```",
-			expectTool: true,
-			toolName:   "execute",
-			paramName:  "command",
-			paramValue: "echo \"Hello from shell\"",
-		},
+
 		{
 			name:       "No tool call",
 			response:   `This is just a regular response with no tool calls.`,
@@ -168,14 +142,7 @@ And then:
 ` + "```json\n{\n  \"tool\": \"fileRead\",\n  \"params\": {\n    \"file_path\": \"/file2.txt\"\n  }\n}\n```",
 			expectedTools: []string{"fileRead", "fileRead"},
 		},
-		{
-			name: "Mixed JSON and bash",
-			response: `First, let me check the directory:
-` + "```bash\nls -la\n```" + `
-Then read the config:
-` + "```json\n{\n  \"tool\": \"fileRead\",\n  \"params\": {\n    \"file_path\": \"config.json\"\n  }\n}\n```",
-			expectedTools: []string{"execute", "fileRead"},
-		},
+
 		{
 			name: "Multiple XML tool calls",
 			response: `Here are the operations:
@@ -195,14 +162,7 @@ And also:
 </tool>`,
 			expectedTools: []string{"fileRead", "fileWrite"},
 		},
-		{
-			name: "Three bash commands",
-			response: `Running multiple commands:
-` + "```bash\npwd\n```" + `
-` + "```sh\nls -la\n```" + `
-` + "```shell\necho \"Done\"\n```",
-			expectedTools: []string{"execute", "execute", "execute"},
-		},
+
 	}
 
 	for _, tt := range tests {

@@ -53,7 +53,6 @@ func extractToolCall(response string, log *logger.Logger) (*anyllm.ToolCall, str
 	log.Debug("Checking for tool calls in response", "responseLength", len(response))
 
 	jsonPattern := regexp.MustCompile("(?s)```json\\s*\\n(.*?)\\n?```")
-	bashPattern := regexp.MustCompile("(?s)```(bash|sh|shell|terminal|console)\\s*\\n(.*?)\\n?```")
 	xmlPattern := regexp.MustCompile(`(?s)<tool>[\s\n]*(.*?)[\s\n]*</tool>`)
 
 	type match struct {
@@ -67,11 +66,6 @@ func extractToolCall(response string, log *logger.Logger) (*anyllm.ToolCall, str
 
 	if loc := jsonPattern.FindStringSubmatchIndex(response); loc != nil && len(loc) >= 4 {
 		earliestMatch = &match{start: loc[0], end: loc[1], matchType: "json", submatches: jsonPattern.FindStringSubmatch(response)}
-	}
-	if loc := bashPattern.FindStringSubmatchIndex(response); loc != nil && len(loc) >= 6 {
-		if earliestMatch == nil || loc[0] < earliestMatch.start {
-			earliestMatch = &match{start: loc[0], end: loc[1], matchType: "bash", submatches: bashPattern.FindStringSubmatch(response)}
-		}
 	}
 	if loc := xmlPattern.FindStringSubmatchIndex(response); loc != nil && len(loc) >= 2 {
 		if earliestMatch == nil || loc[0] < earliestMatch.start {
@@ -113,19 +107,6 @@ func extractToolCall(response string, log *logger.Logger) (*anyllm.ToolCall, str
 					}, remainingText, true
 				}
 			}
-		}
-	case "bash":
-		if len(earliestMatch.submatches) >= 3 {
-			command := strings.TrimSpace(earliestMatch.submatches[2])
-			argsBytes, _ := json.Marshal(map[string]interface{}{"command": command})
-			return &anyllm.ToolCall{
-				ID:   id,
-				Type: "function",
-				Function: providers.FunctionCall{
-					Name:      "execute",
-					Arguments: string(argsBytes),
-				},
-			}, remainingText, true
 		}
 	case "xml":
 		toolXML := earliestMatch.submatches[0]

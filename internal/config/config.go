@@ -97,7 +97,7 @@ Current working directory: %s
 IMPORTANT RULES FOR TOOL USAGE:
 1. When the user asks to see, show, display, read, or print a file, you MUST use the fileRead tool with the appropriate file_path parameter. DO NOT say you cannot read files — you CAN via the fileRead tool.
 2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
-3. When the user asks to run a command, use the execute tool.
+3. When the user asks to run a command, you MUST explicitly use the execute tool via XML or JSON formats. NEVER output loose markdown bash blocks expecting them to be executed.
 4. When the user asks to write or create a file, use the fileWrite tool.
 5. For complex multi-step tasks, explain your plan step-by-step before executing.
 6. Always show what tool you are using and why.
@@ -206,7 +206,7 @@ func LoadConfig(path string) (*Config, error) {
 IMPORTANT RULES FOR TOOL USAGE:
 1. When the user asks to see, show, display, read, or print a file, you MUST use the fileRead tool with the appropriate file_path parameter. DO NOT say you cannot read files — you CAN via the fileRead tool.
 2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
-3. When the user asks to run a command, use the execute tool.
+3. When the user asks to run a command, you MUST explicitly use the execute tool via XML or JSON formats. NEVER output loose markdown bash blocks expecting them to be executed.
 4. When the user asks to write or create a file, use the fileWrite tool.
 5. For complex multi-step tasks, explain your plan step-by-step before executing.
 6. Always show what tool you are using and why.
