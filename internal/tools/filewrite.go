@@ -5,6 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"codezilla/pkg/style"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // FileWriteTool allows writing content to a file
@@ -148,11 +153,11 @@ func (t *FileWriteTool) Execute(ctx context.Context, params map[string]interface
 		// Add diff to params with special "_" prefix to indicate it's internal
 		params["_fileDiff"] = diffOutput
 
-		// Also print the diff directly to stderr for immediate visibility
-		fmt.Fprintf(os.Stderr, "\n==== FILE DIFF ====\n")
-		fmt.Fprintf(os.Stderr, "File: %s\n", filePath)
-		fmt.Fprintf(os.Stderr, "%s\n", diffOutput)
-		fmt.Fprintf(os.Stderr, "================\n\n")
+		title := "File Diff Preview: " + filePath
+		if style.UseColors {
+			title = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7D7")).Bold(true).Render(title)
+		}
+		fmt.Fprintf(os.Stderr, "\n%s\n%s\n", title, diffOutput)
 	}
 
 	// Determine flags based on append mode
@@ -192,15 +197,37 @@ func (t *FileWriteTool) Execute(ctx context.Context, params map[string]interface
 
 	// If a diff was generated, show it again after writing (so user can see what was changed)
 	if fileExists && !skipDiff && diffOutput != "No changes detected." {
-		fmt.Fprintf(os.Stderr, "\n==== CHANGES WRITTEN ====\n")
-		fmt.Fprintf(os.Stderr, "File updated: %s\n", filePath)
-		fmt.Fprintf(os.Stderr, "Bytes written: %d\n", len(content))
+		var modeStr string
 		if append {
-			fmt.Fprintf(os.Stderr, "Mode: Append\n")
+			modeStr = "Append"
 		} else {
-			fmt.Fprintf(os.Stderr, "Mode: Overwrite\n")
+			modeStr = "Overwrite"
 		}
-		fmt.Fprintf(os.Stderr, "======================\n\n")
+
+		// Create styled box for success message
+		var output strings.Builder
+		output.WriteString(fmt.Sprintf("File updated: %s\n", filePath))
+		output.WriteString(fmt.Sprintf("Bytes written: %d\n", len(content)))
+		output.WriteString(fmt.Sprintf("Mode: %s", modeStr))
+
+		boxStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			Padding(0, 1)
+
+		title := "Changes Successfully Written"
+		if style.UseColors {
+			boxStyle = boxStyle.BorderForeground(lipgloss.Color("#00D787"))
+			title = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D787")).Bold(true).Render(title)
+		}
+
+		var finalOutput string
+		if style.UseColors {
+			finalOutput = boxStyle.Render(output.String())
+		} else {
+			finalOutput = "==== CHANGES WRITTEN ====\n" + output.String() + "\n========================="
+		}
+
+		fmt.Fprintf(os.Stderr, "\n%s\n%s\n\n", title, finalOutput)
 	}
 
 	result := map[string]interface{}{
