@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"codezilla/pkg/logger"
+
 	anyllm "github.com/mozilla-ai/any-llm-go"
 	"github.com/mozilla-ai/any-llm-go/providers"
 )
@@ -64,10 +65,10 @@ func extractToolCall(response string, log *logger.Logger) (*anyllm.ToolCall, str
 
 	var earliestMatch *match
 
-	if loc := jsonPattern.FindStringSubmatchIndex(response); loc != nil && len(loc) >= 4 {
+	if loc := jsonPattern.FindStringSubmatchIndex(response); len(loc) >= 4 {
 		earliestMatch = &match{start: loc[0], end: loc[1], matchType: "json", submatches: jsonPattern.FindStringSubmatch(response)}
 	}
-	if loc := xmlPattern.FindStringSubmatchIndex(response); loc != nil && len(loc) >= 2 {
+	if loc := xmlPattern.FindStringSubmatchIndex(response); len(loc) >= 2 {
 		if earliestMatch == nil || loc[0] < earliestMatch.start {
 			earliestMatch = &match{start: loc[0], end: loc[1], matchType: "xml", submatches: xmlPattern.FindStringSubmatch(response)}
 		}
@@ -79,7 +80,7 @@ func extractToolCall(response string, log *logger.Logger) (*anyllm.ToolCall, str
 
 	remainingText := response[:earliestMatch.start] + response[earliestMatch.end:]
 	remainingText = strings.TrimSpace(remainingText)
-	id := fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), rand.Intn(1000))
+	id := fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), rand.Intn(1000)) //nolint:gosec // weak rng is fine for a tool call ID
 
 	switch earliestMatch.matchType {
 	case "json":
