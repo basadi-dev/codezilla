@@ -21,6 +21,19 @@ type Theme struct {
 	IconWarning string
 	IconInfo    string
 	IconPrompt  string
+
+	// Autocomplete Theme
+	ACTheme AutocompleteTheme
+}
+
+// AutocompleteTheme defines the colors for the popup interactive autocomplete
+type AutocompleteTheme struct {
+	Cmd       lipgloss.Style
+	Desc      lipgloss.Style
+	HiCmd     lipgloss.Style
+	HiDesc    lipgloss.Style
+	HiPrefix  lipgloss.Style
+	Separator lipgloss.Style
 }
 
 // UI defines the interface for user interaction

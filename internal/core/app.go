@@ -215,6 +215,7 @@ func (app *App) wireCompleter() {
 		{Primary: "/clear", Aliases: []string{"/c"}, Desc: "Clear the screen"},
 		{Primary: "/model ", Desc: "Manage or list models [ls|<name>]"},
 		{Primary: "/context ", Desc: "Manage context [on|off|clear|show]"},
+		{Primary: "/theme ", Desc: "Change UI color theme [tokyonight|dracula|catppuccin]"},
 		{Primary: "/tools", Desc: "Show available tools"},
 		{Primary: "/skill ", Desc: "Manage skills"},
 		{Primary: "/reset", Desc: "Reset conversation"},
@@ -252,6 +253,17 @@ func (app *App) wireCompleter() {
 				opts[i+2] = ui.Completion{Text: m}
 			}
 			return filterPrefix(prefix, opts, sub)
+		}
+
+		// /theme arg
+		if strings.HasPrefix(line, "/theme ") {
+			sub := line[len("/theme "):]
+			themes := ui.AvailableThemes()
+			opts := make([]ui.Completion, len(themes))
+			for i, t := range themes {
+				opts[i] = ui.Completion{Text: t}
+			}
+			return filterPrefix("/theme ", opts, sub)
 		}
 
 		// /skill <sub> or /skills <sub>
@@ -513,6 +525,22 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 
 	case "/context":
 		app.handleContextCommand(parts)
+
+	case "/theme":
+		if len(parts) > 1 {
+			themeName := strings.ToLower(parts[1])
+			tProvider, ok := ui.ThemeRegistry[themeName]
+			if ok {
+				app.ui.SetTheme(tProvider())
+				app.ui.Clear()
+				app.ui.ShowBanner()
+				app.ui.Success("Theme changed to: %s", themeName)
+			} else {
+				app.ui.Warning("Unknown theme '%s'. Available: %s", themeName, strings.Join(ui.AvailableThemes(), ", "))
+			}
+		} else {
+			app.ui.Info("Type '/theme <name>' to switch themes.")
+		}
 
 	case "/tools":
 		app.showTools()

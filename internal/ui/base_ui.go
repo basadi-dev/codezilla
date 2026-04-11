@@ -40,35 +40,19 @@ func NewBaseUI(historyFile string) (UI, error) {
 	}
 
 	ui := &BaseUI{
-		theme:  DefaultTheme(),
+		theme:  ThemeTokyoNight(),
 		reader: reader,
 		writer: bufio.NewWriter(os.Stdout),
 		width:  width,
 	}
+	
+	// Apply initial theme to reader
+	ui.reader.SetTheme(ui.theme)
 
 	return ui, nil
 }
 
-// DefaultTheme returns the default terminal theme
-func DefaultTheme() Theme {
-	return Theme{
-		StyleReset:  lipgloss.NewStyle(),
-		StyleRed:    lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87")),
-		StyleGreen:  lipgloss.NewStyle().Foreground(lipgloss.Color("#00D787")),
-		StyleYellow: lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")),
-		StyleBlue:   lipgloss.NewStyle().Foreground(lipgloss.Color("#5FAFFF")),
-		StylePurple: lipgloss.NewStyle().Foreground(lipgloss.Color("#AF87FF")),
-		StyleCyan:   lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7D7")),
-		StyleBold:   lipgloss.NewStyle().Bold(true),
-		StyleDim:    lipgloss.NewStyle().Faint(true),
 
-		IconSuccess: "✓",
-		IconError:   "✗",
-		IconWarning: "⚠",
-		IconInfo:    "ℹ",
-		IconPrompt:  ">",
-	}
-}
 
 // Clear clears the terminal screen
 func (ui *BaseUI) Clear() {
@@ -386,6 +370,7 @@ func (ui *BaseUI) GetTheme() Theme {
 // SetTheme sets a new theme
 func (ui *BaseUI) SetTheme(theme Theme) {
 	ui.theme = theme
+	ui.reader.SetTheme(theme)
 }
 
 // DisableColors disables all colors in the theme

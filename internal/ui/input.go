@@ -30,6 +30,14 @@ type FixedInput struct {
 	menuCandidates []Completion                   // cached results for the dropdown
 	menuLines      int                            // how many lines were printed below the prompt for the menu
 	cursorLine     int                            // tracks vertical offset of terminal cursor from prompt start
+	theme          Theme                          // active theme for the UI
+}
+
+// SetTheme updates the active theme dynamically
+func (fi *FixedInput) SetTheme(t Theme) {
+	fi.mu.Lock()
+	fi.theme = t
+	fi.mu.Unlock()
 }
 
 // SetPrompt updates the prompt string
@@ -468,20 +476,21 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 				fmt.Print("\r\n")
 				currentCursorY++
 
-				// Optional top border for the menu
+				// Determine separator width
 				width := termWidth - 1
 				if width > 120 { width = 120 }
 				if width < 20 { width = 20 }
-				separator := lipgloss.NewStyle().Foreground(lipgloss.Color("239")).Render(strings.Repeat("─", width))
+
+				cmdStyle := fi.theme.ACTheme.Cmd
+				descStyle := fi.theme.ACTheme.Desc
+				hiCmdStyle := fi.theme.ACTheme.HiCmd
+				hiDescStyle := fi.theme.ACTheme.HiDesc
+				hiPrefixStyle := fi.theme.ACTheme.HiPrefix
+				separator := fi.theme.ACTheme.Separator.Render(strings.Repeat("─", width))
+				
 				fmt.Print(separator + "\r\n")
 				currentCursorY++
 				menuDrawnLines += 2 // newline + separator
-
-				cmdStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7"))
-				descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
-				hiCmdStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#BB9AF7")).Bold(true)
-				hiDescStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
-				hiPrefixStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
 				
 				// padding calculation (first column)
 				maxLen := 0
@@ -528,7 +537,9 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 					currentCursorY++
 					menuDrawnLines++
 				}
-				fmt.Print(separator) // Bottom border without trailing newline
+				
+				bottomSeparator := fi.theme.ACTheme.Separator.Render(strings.Repeat("─", width))
+				fmt.Print(bottomSeparator) // Bottom border without trailing newline
 			} else {
 				fi.menuActive = false // no candidates, deactivate
 			}
