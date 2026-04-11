@@ -1652,7 +1652,7 @@ func (r *EnhancedProgressReporter) FileCompleted(fileName string, success bool, 
 		if r.showDetails {
 			relevanceColor := r.getRelevanceColor(relevance)
 			status := fmt.Sprintf("%s✓%s", r.color(ColorGreen), r.color(ColorReset))
-			r.print("\r%s %-40s %s[%.2f]%s\n",
+			r.print("\r\033[K%s %-40s %s[%.2f]%s\n",
 				status,
 				truncateFileName(fileName, 40),
 				r.color(relevanceColor),
@@ -1665,7 +1665,7 @@ func (r *EnhancedProgressReporter) FileCompleted(fileName string, success bool, 
 
 		if r.showDetails {
 			status := fmt.Sprintf("%s✗%s", r.color(ColorRed), r.color(ColorReset))
-			r.print("\r%s %-40s %s[ERROR]%s\n",
+			r.print("\r\033[K%s %-40s %s[ERROR]%s\n",
 				status,
 				truncateFileName(fileName, 40),
 				r.color(ColorRed),

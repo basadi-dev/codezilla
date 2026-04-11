@@ -15,6 +15,8 @@ import (
 	"codezilla/internal/tools"
 	"codezilla/internal/ui"
 	"codezilla/pkg/logger"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // App represents the core application logic, independent of UI
@@ -121,8 +123,11 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		permissionMgr.SetDefaultPermissionLevel(toolName, level)
 	}
 
+	// Create the todo manager here so onToolExec can close over it
+	todoMgr := tools.NewTodoManager()
+
 	// Register tools after permission manager is configured
-	registerTools(toolRegistry, llmClient, cfg, log, permissionMgr)
+	registerTools(toolRegistry, llmClient, cfg, log, permissionMgr, todoMgr)
 
 	onToolExec := func(toolName string, params map[string]interface{}) {
 			// Clear spinner before printing so messages don't collide on the same line
@@ -195,25 +200,113 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 					}
 				}
 			case "todoCreate":
-				if name, ok := params["name"].(string); ok {
-					detail = name
+				name, _ := params["name"].(string)
+				desc, _ := params["description"].(string)
+				theme := ui.GetTheme()
+
+				// Build plan box content
+				var lines []string
+
+				// Title line
+				titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#1E66F5", Dark: "#7AA2F7"})
+				if name != "" {
+					lines = append(lines, titleStyle.Render("📋 "+name))
+				} else {
+					lines = append(lines, titleStyle.Render("📋 New Plan"))
 				}
-			case "todoUpdate":
-				task, _ := params["task_id"].(string)
-				status, _ := params["status"].(string)
-				content, _ := params["content"].(string)
-				if task != "" {
-					display := task
-					if content != "" {
-						display = content
-					} else if strings.HasPrefix(task, "task_") {
-						parts := strings.Split(task, "_")
-						if len(parts) > 2 {
-							display = "Task " + parts[len(parts)-1]
+				if desc != "" {
+					lines = append(lines, theme.StyleDim.Render(desc))
+				}
+				lines = append(lines, "")
+
+				// Task items
+				if items, ok := params["items"].([]interface{}); ok {
+					for _, item := range items {
+						content := "Untitled Task"
+						if strItem, ok := item.(string); ok {
+							content = strItem
+						} else if itemMap, ok := item.(map[string]interface{}); ok {
+							if c, ok := itemMap["content"].(string); ok && c != "" { content = c }
+							if content == "Untitled Task" { if c, ok := itemMap["name"].(string); ok && c != "" { content = c } }
+							if content == "Untitled Task" { if c, ok := itemMap["title"].(string); ok && c != "" { content = c } }
+							if content == "Untitled Task" { if c, ok := itemMap["item"].(string); ok && c != "" { content = c } }
+							if content == "Untitled Task" { if c, ok := itemMap["task"].(string); ok && c != "" { content = c } }
+							if content == "Untitled Task" { if c, ok := itemMap["description"].(string); ok && c != "" { content = c } }
+
+							priority, _ := itemMap["priority"].(string)
+							priorityBadge := ""
+							switch priority {
+							case "high":
+								priorityBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87")).Render("▲") + " "
+							case "low":
+								priorityBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262")).Render("▽") + " "
+							}
+							
+							if len(content) > 65 {
+								content = content[:62] + "..."
+							}
+
+							circleStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#7C7F93", Dark: "#565F89"})
+							lines = append(lines, fmt.Sprintf("  %s  %s%s", circleStyle.Render("○"), priorityBadge, content))
+						} else {
+							// If it's something else, just cast and truncate
+							content = fmt.Sprintf("%v", item)
+							if len(content) > 65 { content = content[:62] + "..." }
+							circleStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#7C7F93", Dark: "#565F89"})
+							lines = append(lines, fmt.Sprintf("  %s  %s", circleStyle.Render("○"), content))
 						}
 					}
-					detail = fmt.Sprintf("%s -> %s", display, status)
 				}
+
+				// Plain output — no box
+				ui.Print("\n")
+				for _, l := range lines {
+					ui.Print("%s\n", l)
+				}
+				ui.Print("\n")
+				ui.ShowThinking()
+				return
+			case "todoUpdate":
+				theme := ui.GetTheme()
+				statusIcons := map[string]string{
+					"pending":     "○",
+					"in_progress": "◐",
+					"completed":   "●",
+					"cancelled":   "⊘",
+				}
+
+				if plan := todoMgr.CurrentPlan(); plan != nil {
+					// Re-render the whole list so the user sees live progress
+					ui.Print("\n")
+					for _, item := range plan.Items {
+						icon := statusIcons[item.Status]
+						var iconStyle lipgloss.Style
+						switch item.Status {
+						case "in_progress":
+							iconStyle = theme.StyleYellow
+						case "completed":
+							iconStyle = theme.StyleGreen
+						case "cancelled":
+							iconStyle = theme.StyleRed
+						default:
+							iconStyle = theme.StyleDim
+						}
+						content := item.Content
+						if len(content) > 65 {
+							content = content[:62] + "..."
+						}
+						var lineStyle lipgloss.Style
+						if item.Status == "completed" || item.Status == "cancelled" {
+							lineStyle = theme.StyleDim
+						} else {
+							lineStyle = lipgloss.NewStyle()
+						}
+						ui.Print("  %s  %s\n", iconStyle.Render(icon), lineStyle.Render(content))
+					}
+					ui.Print("\n")
+				}
+				ui.ShowThinking()
+				return
 			case "projectScanAnalyzer":
 				dir, _ := params["dir"].(string)
 				if dir == "" { dir, _ = params["directory"].(string) }
@@ -229,9 +322,18 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				}
 			}
 
+			// Only show tool description for non-obvious tools (skip todo/file noise)
+			showDesc := true
+			switch toolName {
+			case "todoCreate", "todoUpdate", "todoList", "todoAnalyze",
+				"fileRead", "fileWrite", "fileEdit", "fileManage", "listFiles":
+				showDesc = false
+			}
 			var desc string
-			if tool, ok := toolRegistry.GetTool(toolName); ok {
-				desc = tool.Description()
+			if showDesc {
+				if tool, ok := toolRegistry.GetTool(toolName); ok {
+					desc = tool.Description()
+				}
 			}
 
 			displayName := toolName
@@ -246,19 +348,24 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			case "subAgent": displayName = "🤖 Sub-Agent"
 			case "fileEdit": displayName = "✏️ Edit File"
 			case "fileManage": displayName = "🏗️ Manage Files"
-			case "todoCreate": displayName = "📋 Create Task Plan"
-			case "todoUpdate": displayName = "✅ Update Task"
-			case "todoList": displayName = "📃 List Tasks"
+			case "todoCreate": displayName = "📋 Plan"
+			case "todoUpdate": displayName = "" // detail carries full info
+			case "todoList": displayName = "📃 Tasks"
 			case "todoAnalyze": displayName = "🧠 Analyze Tasks"
 			case "projectScanAnalyzer": displayName = "🔍 Analyze Project"
 			}
 
-			if detail != "" {
-				ui.Info("🛠  %s (%s)", displayName, detail)
+			if displayName == "" {
+				// e.g. todoUpdate: just print detail directly
+				if detail != "" {
+					ui.Info("   %s", detail)
+				}
+			} else if detail != "" {
+				ui.Info("🛠  %s: %s", displayName, detail)
 			} else {
 				ui.Info("🛠  %s", displayName)
 			}
-			
+
 			if desc != "" {
 				ui.Info("   ↳ %s", ui.GetTheme().StyleDim.Render(desc))
 			}
@@ -1008,7 +1115,7 @@ func (app *App) handleSkillCommand(parts []string) {
 }
 
 // registerTools registers all available tools
-func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager) {
+func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager, todoMgr *tools.TodoManager) {
 	// File operation tools
 	registry.RegisterTool(tools.NewFileReadTool())
 	registry.RegisterTool(tools.NewFileWriteTool())
@@ -1037,8 +1144,7 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 
 	registry.RegisterTool(tools.NewExecuteTool(30))
 
-	// Todo management tools
-	todoMgr := tools.NewTodoManager()
+	// Todo management tools — manager is passed in from NewApp so the UI hook can access it
 	for _, tool := range tools.GetTodoTools(todoMgr) {
 		registry.RegisterTool(tool)
 	}

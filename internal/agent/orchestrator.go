@@ -52,7 +52,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 		if err != nil {
 			o.logger.Error("Failed to create automatic todo plan", "error", err)
 		} else if planResponse != "" {
-			o.agent.AddAssistantMessage(planResponse)
+			o.agent.AddAssistantMessage("[System Background Action: Auto-Plan Created]\n" + planResponse + "\n\nI have successfully generated the plan using the tool. Since the user has already seen the visual checklist, I will NOT output the plan again. I will simply acknowledge the plan is ready and ask what to tackle first.")
 		}
 	}
 

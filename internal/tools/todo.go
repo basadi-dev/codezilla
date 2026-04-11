@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -41,6 +40,26 @@ type TodoManager struct {
 func NewTodoManager() *TodoManager {
 	return &TodoManager{
 		plans: make(map[string]*TodoPlan),
+	}
+}
+
+// CurrentPlan returns a snapshot of the current plan (name + items) for display.
+// Returns nil if no plan is set.
+func (m *TodoManager) CurrentPlan() *TodoPlan {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	plan, ok := m.plans[m.currentPlanID]
+	if !ok {
+		return nil
+	}
+	// Return a shallow copy so the caller doesn't need to hold the lock
+	items := make([]TodoItem, len(plan.Items))
+	copy(items, plan.Items)
+	return &TodoPlan{
+		ID:          plan.ID,
+		Name:        plan.Name,
+		Description: plan.Description,
+		Items:       items,
 	}
 }
 
@@ -97,36 +116,46 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 	}
 
 	if items, ok := params["items"].([]interface{}); ok {
-		for i, item := range items {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				contentStr := "Untitled Task"
-				if content, ok := itemMap["content"].(string); ok {
-					contentStr = content
+		for _, item := range items {
+			contentStr := "Untitled Task"
+			priorityStr := "medium"
+			var deps []string
+
+			if strItem, ok := item.(string); ok {
+				contentStr = strItem
+			} else if itemMap, ok := item.(map[string]interface{}); ok {
+				if c, ok := itemMap["content"].(string); ok && c != "" { contentStr = c }
+				if contentStr == "Untitled Task" { if c, ok := itemMap["name"].(string); ok && c != "" { contentStr = c } }
+				if contentStr == "Untitled Task" { if c, ok := itemMap["title"].(string); ok && c != "" { contentStr = c } }
+				if contentStr == "Untitled Task" { if c, ok := itemMap["item"].(string); ok && c != "" { contentStr = c } }
+				if contentStr == "Untitled Task" { if c, ok := itemMap["task"].(string); ok && c != "" { contentStr = c } }
+				if contentStr == "Untitled Task" { if c, ok := itemMap["description"].(string); ok && c != "" { contentStr = c } }
+
+				if p, ok := itemMap["priority"].(string); ok {
+					priorityStr = p
 				}
 
-				todoItem := TodoItem{
-					ID:        fmt.Sprintf("task_%d_%d", time.Now().UnixNano(), i),
-					Content:   contentStr,
-					Status:    "pending",
-					Priority:  "medium",
-					CreatedAt: time.Now(),
-					UpdatedAt: time.Now(),
-				}
-
-				if priority, ok := itemMap["priority"].(string); ok {
-					todoItem.Priority = priority
-				}
-
-				if deps, ok := itemMap["dependencies"].([]interface{}); ok {
-					for _, dep := range deps {
+				if dInfo, ok := itemMap["dependencies"].([]interface{}); ok {
+					for _, dep := range dInfo {
 						if depStr, ok := dep.(string); ok {
-							todoItem.Dependencies = append(todoItem.Dependencies, depStr)
+							deps = append(deps, depStr)
 						}
 					}
 				}
-
-				plan.Items = append(plan.Items, todoItem)
 			}
+
+			todoItem := TodoItem{
+				ID:           fmt.Sprintf("t%d", len(plan.Items)+1),
+				Content:      contentStr,
+				Status:       "pending",
+				Priority:     priorityStr,
+				Dependencies: deps,
+				CreatedAt:    time.Time{}, // Time assignment follows
+			}
+			todoItem.CreatedAt = time.Now()
+			todoItem.UpdatedAt = time.Now()
+
+			plan.Items = append(plan.Items, todoItem)
 		}
 	}
 
@@ -136,8 +165,11 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 	globalTodoManager.currentPlanID = plan.ID
 	globalTodoManager.mu.Unlock()
 
-	result, _ := json.MarshalIndent(plan, "", "  ")
-	return fmt.Sprintf("Created todo plan:\n%s", string(result)), nil
+	result := fmt.Sprintf("Created todo plan: %s (ID: %s)\n", plan.Name, plan.ID)
+	for _, item := range plan.Items {
+		result += fmt.Sprintf("- [%s] %s\n", item.ID, item.Content)
+	}
+	return result, nil
 }
 
 // TodoUpdateTool updates todo item status
@@ -155,12 +187,13 @@ func (t TodoUpdateTool) ParameterSchema() JSONSchema {
 	return JSONSchema{
 		Type: "object",
 		Properties: map[string]JSONSchema{
-			"plan_id": {Type: "string", Description: "Plan ID (optional, uses current plan if not specified)"},
-			"task_id": {Type: "string", Description: "Task ID to update"},
-			"status":  {Type: "string", Enum: []interface{}{"pending", "in_progress", "completed", "cancelled"}},
-			"content": {Type: "string", Description: "Updated task content (optional)"},
+			"plan_id":   {Type: "string", Description: "Plan ID (optional, uses current plan if not specified)"},
+			"task_id":   {Type: "string", Description: "Task ID to update"},
+			"status":    {Type: "string", Enum: []interface{}{"pending", "in_progress", "completed", "cancelled"}},
+			"task_name": {Type: "string", Description: "The name of the task, for displaying in the terminal. Does NOT rename the task."},
+			"content":   {Type: "string", Description: "Updated task content (optional)"},
 		},
-		Required: []string{"task_id", "status"},
+		Required: []string{"task_id", "status", "task_name"},
 	}
 }
 
@@ -197,7 +230,14 @@ func (t TodoUpdateTool) Execute(ctx context.Context, params map[string]interface
 			}
 
 			plan.UpdatedAt = time.Now()
-			return fmt.Sprintf("Updated task %s to status: %s", taskID, status), nil
+			
+			statusIcon := "○"
+			switch status {
+			case "in_progress": statusIcon = "◐"
+			case "completed": statusIcon = "●"
+			case "cancelled": statusIcon = "⊘"
+			}
+			return fmt.Sprintf("%s %s: %s", statusIcon, status, plan.Items[i].Content), nil
 		}
 	}
 
@@ -266,58 +306,45 @@ func formatPlan(plan *TodoPlan, statusFilter string) string {
 	}
 	output += fmt.Sprintf("ID: %s | Created: %s\n\n", plan.ID, plan.CreatedAt.Format("2006-01-02 15:04"))
 
-	// Group tasks by status
-	statusGroups := map[string][]TodoItem{
-		"pending":     {},
-		"in_progress": {},
-		"completed":   {},
-		"cancelled":   {},
-	}
-
-	for _, item := range plan.Items {
-		if statusFilter == "all" || item.Status == statusFilter {
-			statusGroups[item.Status] = append(statusGroups[item.Status], item)
-		}
-	}
-
-	// Display tasks by status
-	statusOrder := []string{"in_progress", "pending", "completed", "cancelled"}
 	statusIcons := map[string]string{
-		"pending":     "⏳",
-		"in_progress": "🔄",
-		"completed":   "✅",
-		"cancelled":   "❌",
+		"pending":     "○",
+		"in_progress": "◐",
+		"completed":   "●",
+		"cancelled":   "⊘",
 	}
 
-	for _, status := range statusOrder {
-		items := statusGroups[status]
-		if len(items) > 0 {
-			output += fmt.Sprintf("### %s %s (%d)\n\n", statusIcons[status], status, len(items))
-			for _, item := range items {
-				priorityIcon := ""
-				switch item.Priority {
-				case "high":
-					priorityIcon = "🔴"
-				case "medium":
-					priorityIcon = "🟡"
-				case "low":
-					priorityIcon = "🟢"
-				}
+	completed := 0
+	for _, item := range plan.Items {
+		if item.Status == "completed" {
+			completed++
+		}
 
-				output += fmt.Sprintf("- [%s] %s %s (ID: %s)\n",
-					item.ID, priorityIcon, item.Content, item.ID)
+		if statusFilter != "all" && item.Status != statusFilter {
+			continue
+		}
 
-				if len(item.Dependencies) > 0 {
-					output += fmt.Sprintf("  Dependencies: %v\n", item.Dependencies)
-				}
-			}
-			output += "\n"
+		icon := statusIcons[item.Status]
+		
+		priorityIcon := ""
+		switch item.Priority {
+		case "high":
+			priorityIcon = "🔴"
+		case "medium":
+			priorityIcon = "🟡"
+		case "low":
+			priorityIcon = "🟢"
+		}
+
+		output += fmt.Sprintf("%s %s %s [ID: %s]\n", icon, priorityIcon, item.Content, item.ID)
+
+		if len(item.Dependencies) > 0 {
+			output += fmt.Sprintf("  Dependencies: %v\n", item.Dependencies)
 		}
 	}
+	output += "\n"
 
 	// Show progress
 	total := len(plan.Items)
-	completed := len(statusGroups["completed"])
 	if total > 0 {
 		progress := float64(completed) / float64(total) * 100
 		output += fmt.Sprintf("**Progress: %d/%d (%.0f%%)**\n", completed, total, progress)
