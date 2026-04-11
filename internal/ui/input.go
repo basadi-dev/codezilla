@@ -477,10 +477,11 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 				currentCursorY++
 				menuDrawnLines += 2 // newline + separator
 
-				cmdStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
-				descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-				hiCmdStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("14")).Bold(true)
-				hiDescStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Background(lipgloss.Color("250"))
+				cmdStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7"))
+				descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
+				hiCmdStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#BB9AF7")).Bold(true)
+				hiDescStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
+				hiPrefixStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
 				
 				// padding calculation (first column)
 				maxLen := 0
@@ -501,7 +502,7 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 					isHighlighted := (idx == fi.menuIndex)
 					prefixStr := "   "
 					if isHighlighted {
-						prefixStr = " > "
+						prefixStr = hiPrefixStyle.Render(" ❯ ")
 					}
 					
 					cmdStr := c.Display

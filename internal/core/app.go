@@ -216,7 +216,7 @@ func (app *App) wireCompleter() {
 		{Primary: "/model ", Desc: "Manage or list models [ls|<name>]"},
 		{Primary: "/context ", Desc: "Manage context [on|off|clear|show]"},
 		{Primary: "/tools", Desc: "Show available tools"},
-		{Primary: "/skill ", Aliases: []string{"/skills "}, Desc: "Manage skills"},
+		{Primary: "/skill ", Desc: "Manage skills"},
 		{Primary: "/reset", Desc: "Reset conversation"},
 		{Primary: "/save ", Desc: "Save conversation to JSON file"},
 		{Primary: "/load ", Desc: "Load conversation from JSON file"},
@@ -274,6 +274,7 @@ func (app *App) wireCompleter() {
 			}
 			// Sub-commands + skill names
 			opts := []ui.Completion{
+				{Text: "ls", Description: "List all available skills"},
 				{Text: "list", Description: "List all available skills"},
 				{Text: "reset", Description: "Deactivate all skills"},
 				{Text: "info ", Description: "Show skill details"},
@@ -764,13 +765,13 @@ func (app *App) handleSkillTrigger(skill *skills.Skill) {
 // handleSkillCommand handles the /skill subcommands.
 func (app *App) handleSkillCommand(parts []string) {
 	if len(parts) < 2 {
-		app.ui.Warning("Usage: /skill [list|info <name>|<name>|off <name>|reset]")
+		app.ui.Warning("Usage: /skill [ls|list|info <name>|<name>|off <name>|reset]")
 		return
 	}
 
-	sub := parts[1]
+	sub := strings.ToLower(parts[1])
 	switch sub {
-	case "list":
+	case "list", "ls":
 		allSkills := app.skillReg.List()
 		if len(allSkills) == 0 {
 			app.ui.Info("No skills loaded. Add .md files to %s", app.config.Skills.Dir)
