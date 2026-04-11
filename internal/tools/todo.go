@@ -162,7 +162,10 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 	globalTodoManager := t.mgr
 	globalTodoManager.mu.Lock()
 	globalTodoManager.plans[plan.ID] = plan
-	globalTodoManager.currentPlanID = plan.ID
+	if setCur, ok := params["set_current"].(bool); ok && setCur {
+		globalTodoManager.currentPlanID = plan.ID
+	}
+
 	globalTodoManager.mu.Unlock()
 
 	result := fmt.Sprintf("Created todo plan: %s (ID: %s)\n", plan.Name, plan.ID)
@@ -508,6 +511,31 @@ func (t TodoAnalyzeTool) Execute(ctx context.Context, params map[string]interfac
 	return output, nil
 }
 
+type TodoSetCurrentTool struct{ mgr *TodoManager }
+
+func (t TodoSetCurrentTool) Name() string { return "todoSetCurrent" }
+func (t TodoSetCurrentTool) Description() string { return "Set an existing todo plan as the current active plan" }
+func (t TodoSetCurrentTool) ParameterSchema() JSONSchema {
+    return JSONSchema{
+        Type: "object",
+        Properties: map[string]JSONSchema{
+            "plan_id": {Type: "string", Description: "ID of the plan to set as current"},
+        },
+        Required: []string{"plan_id"},
+    }
+}
+func (t TodoSetCurrentTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+    planID, _ := params["plan_id"].(string)
+    globalTodoManager := t.mgr
+    globalTodoManager.mu.Lock()
+    defer globalTodoManager.mu.Unlock()
+    if _, ok := globalTodoManager.plans[planID]; !ok {
+        return "", fmt.Errorf("plan not found: %s", planID)
+    }
+    globalTodoManager.currentPlanID = planID
+    return fmt.Sprintf("Current plan set to %s", planID), nil
+}
+
 // GetTodoTools returns all todo management tools using the provided manager.
 func GetTodoTools(mgr *TodoManager) []Tool {
 	return []Tool{
@@ -515,5 +543,6 @@ func GetTodoTools(mgr *TodoManager) []Tool {
 		TodoUpdateTool{mgr: mgr},
 		TodoListTool{mgr: mgr},
 		TodoAnalyzeTool{mgr: mgr},
+		TodoSetCurrentTool{mgr: mgr},
 	}
 }
