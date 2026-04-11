@@ -123,6 +123,7 @@ func (fi *FixedInput) ReadLine() (string, error) {
 	historySize := len(fi.history)
 	fi.mu.Unlock()
 	savedLine := ""
+	historyNavMode := false
 
 	for {
 		// Read one byte
@@ -175,30 +176,36 @@ func (fi *FixedInput) ReadLine() (string, error) {
 			}
 			// Delete character at cursor
 			if pos < len(line) {
+				historyNavMode = false
 				line = append(line[:pos], line[pos+1:]...)
 				fi.redrawLine(line, pos)
 			}
 
 		case 0x01: // Ctrl-A - beginning of line
+			historyNavMode = false
 			pos = 0
 			fi.redrawLine(line, pos)
 
 		case 0x05: // Ctrl-E - end of line
+			historyNavMode = false
 			pos = len(line)
 			fi.redrawLine(line, pos)
 
 		case 0x0B: // Ctrl-K - kill to end of line
+			historyNavMode = false
 			if pos < len(line) {
 				line = line[:pos]
 				fi.redrawLine(line, pos)
 			}
 
 		case 0x15: // Ctrl-U - kill to beginning of line
+			historyNavMode = false
 			line = line[pos:]
 			pos = 0
 			fi.redrawLine(line, pos)
 
 		case 0x17: // Ctrl-W - delete word backward
+			historyNavMode = false
 			if pos > 0 {
 				start := pos
 				// Skip spaces
@@ -221,6 +228,7 @@ func (fi *FixedInput) ReadLine() (string, error) {
 			fi.redrawLine(line, pos)
 
 		case 0x7F, 0x08: // Backspace
+			historyNavMode = false
 			if pos > 0 {
 				line = append(line[:pos-1], line[pos:]...)
 				pos--
@@ -234,13 +242,14 @@ func (fi *FixedInput) ReadLine() (string, error) {
 			if n == 2 && seq[0] == '[' {
 				switch seq[1] {
 				case 'A': // Up arrow
-					if fi.menuActive && len(fi.menuCandidates) > 0 {
+					if fi.menuActive && len(fi.menuCandidates) > 0 && !historyNavMode {
 						fi.menuIndex--
 						if fi.menuIndex < 0 {
 							fi.menuIndex = len(fi.menuCandidates) - 1
 						}
 						fi.redrawLine(line, pos)
 					} else if historySize > 0 && fi.historyIndex > 0 {
+						historyNavMode = true
 						// previous history
 						if fi.historyIndex == historySize {
 							savedLine = string(line)
@@ -254,18 +263,20 @@ func (fi *FixedInput) ReadLine() (string, error) {
 					}
 
 				case 'B': // Down arrow
-					if fi.menuActive && len(fi.menuCandidates) > 0 {
+					if fi.menuActive && len(fi.menuCandidates) > 0 && !historyNavMode {
 						fi.menuIndex++
 						if fi.menuIndex >= len(fi.menuCandidates) {
 							fi.menuIndex = 0
 						}
 						fi.redrawLine(line, pos)
 					} else if historySize > 0 && fi.historyIndex < historySize {
+						historyNavMode = true
 						// next history
 						fi.historyIndex++
 						if fi.historyIndex == historySize {
 							// Restore saved line
 							line = []rune(savedLine)
+							historyNavMode = false
 						} else {
 							fi.mu.Lock()
 							line = []rune(fi.history[fi.historyIndex])
@@ -276,6 +287,7 @@ func (fi *FixedInput) ReadLine() (string, error) {
 					}
 
 				case 'C': // Right arrow
+					historyNavMode = false
 					if pos < len(line) {
 						pos++
 						fi.redrawLine(line, pos)
@@ -299,16 +311,19 @@ func (fi *FixedInput) ReadLine() (string, error) {
 					}
 
 				case 'D': // Left arrow
+					historyNavMode = false
 					if pos > 0 {
 						pos--
 						fi.redrawLine(line, pos)
 					}
 
 				case 'H': // Home
+					historyNavMode = false
 					pos = 0
 					fi.redrawLine(line, pos)
 
 				case 'F': // End
+					historyNavMode = false
 					pos = len(line)
 					fi.redrawLine(line, pos)
 
@@ -319,6 +334,7 @@ func (fi *FixedInput) ReadLine() (string, error) {
 						continue
 					}
 					if extra[0] == '~' && pos < len(line) {
+						historyNavMode = false
 						line = append(line[:pos], line[pos+1:]...)
 						fi.redrawLine(line, pos)
 					}
@@ -326,6 +342,7 @@ func (fi *FixedInput) ReadLine() (string, error) {
 			}
 
 		case 0x09: // Tab — auto-complete
+			historyNavMode = false
 			if fi.menuActive && fi.menuIndex >= 0 && fi.menuIndex < len(fi.menuCandidates) {
 				// Accept currently highlighted menu option
 				line = []rune(fi.menuCandidates[fi.menuIndex].Text)
@@ -354,6 +371,7 @@ func (fi *FixedInput) ReadLine() (string, error) {
 		default:
 			// Regular character
 			if b[0] >= 32 && b[0] < 127 {
+				historyNavMode = false
 				// Insert character at position
 				line = append(line[:pos], append([]rune{rune(b[0])}, line[pos:]...)...)
 				pos++
