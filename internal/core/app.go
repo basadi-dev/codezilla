@@ -203,8 +203,18 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			case "todo_update":
 				task, _ := params["task_id"].(string)
 				status, _ := params["status"].(string)
+				content, _ := params["content"].(string)
 				if task != "" {
-					detail = fmt.Sprintf("%s -> %s", task, status)
+					display := task
+					if content != "" {
+						display = content
+					} else if strings.HasPrefix(task, "task_") {
+						parts := strings.Split(task, "_")
+						if len(parts) > 2 {
+							display = "Task " + parts[len(parts)-1]
+						}
+					}
+					detail = fmt.Sprintf("%s -> %s", display, status)
 				}
 			case "projectScanAnalyzer":
 				if dir, ok := params["directory"].(string); ok {

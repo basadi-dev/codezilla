@@ -680,6 +680,55 @@ func (fi *FixedInput) addHistory(line string) {
 	}()
 }
 
+// GetHistory returns the most recent n history entries (newest last).
+// If n <= 0, returns all entries.
+func (fi *FixedInput) GetHistory(n int) []string {
+	fi.mu.Lock()
+	defer fi.mu.Unlock()
+
+	if n <= 0 || n >= len(fi.history) {
+		result := make([]string, len(fi.history))
+		copy(result, fi.history)
+		return result
+	}
+
+	start := len(fi.history) - n
+	result := make([]string, n)
+	copy(result, fi.history[start:])
+	return result
+}
+
+// SearchHistory returns history entries that contain the query substring,
+// ordered newest last.
+func (fi *FixedInput) SearchHistory(query string) []string {
+	fi.mu.Lock()
+	defer fi.mu.Unlock()
+
+	var results []string
+	for _, entry := range fi.history {
+		if strings.Contains(entry, query) {
+			results = append(results, entry)
+		}
+	}
+	return results
+}
+
+// ClearHistory removes all history entries and deletes the history file.
+func (fi *FixedInput) ClearHistory() error {
+	fi.mu.Lock()
+	defer fi.mu.Unlock()
+
+	fi.history = fi.history[:0]
+	fi.historyIndex = 0
+
+	if fi.historyFile != "" {
+		if err := os.Remove(fi.historyFile); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetDefaultHistoryFilePath returns the default path for the command history file
 func GetDefaultHistoryFilePath() (string, error) {
 	homeDir, err := os.UserHomeDir()

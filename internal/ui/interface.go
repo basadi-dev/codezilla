@@ -96,5 +96,17 @@ type Completer interface {
 	SetCompleter(fn func(line string) []Completion)
 }
 
+// HistoryProvider is an optional interface that UI implementations may satisfy
+// to expose command history for viewing, searching, and clearing.
+type HistoryProvider interface {
+	// GetHistory returns the most recent N history entries (newest last).
+	// If n <= 0, returns all entries.
+	GetHistory(n int) []string
+	// SearchHistory returns history entries that contain the query substring.
+	SearchHistory(query string) []string
+	// ClearHistory removes all history entries and deletes the history file.
+	ClearHistory() error
+}
+
 // Factory function type for creating UI instances
 type Factory func(historyFile string) (UI, error)
