@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"codezilla/internal/agent"
@@ -712,7 +713,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		app.ui.HideThinking()
 
 		if agentErr == nil && finalResponse != "" {
-			app.ui.ShowResponse(finalResponse)
+			app.ui.ShowResponse(sanitizeAgentResponse(finalResponse))
 		}
 
 		if agentErr != nil {
@@ -737,6 +738,163 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		_ = finalResponse
 		return nil
 	}
+}
+
+// ─── Response sanitizer ──────────────────────────────────────────────────────
+
+var (
+	// runTogetherRe fixes sentences that run together without a space:
+	// "...task.I've" → "...task. I've"
+	runTogetherRe = regexp.MustCompile(`([.!?])([A-Z])`)
+
+	// cotPrefixes: sentence starters that indicate leaked chain-of-thought.
+	cotPrefixes = []string{
+		"the user asked", "the user wants", "the user said",
+		"the user requested", "the user has", "the user provided",
+		"the user mentioned", "the user would", "the user need",
+		"we need to", "we should ", "we created", "we have created",
+		"we will", "we can ", "we must", "we might", "we are ",
+		"i think", "i should", "i need to", "i am thinking",
+		"perhaps they", "perhaps the user",
+		"they didn't", "they want", "they haven't", "they need",
+		"now we ", "so we ", "now i ", "so i ",
+		"note: the user", "note: user",
+	}
+
+	// taskIDRowRe matches a table row that contains a task ID like t1, t2 …
+	taskIDRowRe = regexp.MustCompile(`(?i)\bt\d+\b`)
+)
+
+// sanitizeAgentResponse removes chain-of-thought leakage and redundant task
+// tables from the LLM response before it is shown to the user.
+func sanitizeAgentResponse(response string) string {
+	response = stripLeadingCoT(response)
+	response = stripTaskIDTables(response)
+	return strings.TrimSpace(response)
+}
+
+// stripLeadingCoT removes leading sentences that look like internal reasoning.
+func stripLeadingCoT(s string) string {
+	// Normalize run-together sentences so splitting works reliably.
+	normalized := runTogetherRe.ReplaceAllString(s, "$1 $2")
+	lines := strings.Split(normalized, "\n")
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Empty lines — keep scanning.
+		if trimmed == "" {
+			continue
+		}
+
+		// Markdown structure (heading, fence, quote, list) = real content, stop.
+		if strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "```") ||
+			strings.HasPrefix(trimmed, ">") ||
+			strings.HasPrefix(trimmed, "- ") ||
+			strings.HasPrefix(trimmed, "* ") {
+			return strings.Join(lines[i:], "\n")
+		}
+
+		// Split this line into sentences (separated by ". ", "! ", "? ").
+		sentRe := regexp.MustCompile(`[.!?]+\s+`)
+		parts := sentRe.Split(trimmed, -1)
+
+		var realParts []string
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			lower := strings.ToLower(part)
+			isCoT := false
+			for _, prefix := range cotPrefixes {
+				if strings.HasPrefix(lower, prefix) {
+					isCoT = true
+					break
+				}
+			}
+			if !isCoT {
+				realParts = append(realParts, part)
+			}
+		}
+
+		if len(realParts) == 0 {
+			// Entire line is CoT — skip it and keep scanning.
+			continue
+		}
+
+		// This line has real content. Reconstruct: real parts + remainder of response.
+		lines[i] = strings.Join(realParts, " ")
+		return strings.Join(lines[i:], "\n")
+	}
+
+	// Everything looked like CoT — return original to be safe.
+	return s
+}
+
+// stripTaskIDTables removes markdown or glamour-style tables whose rows contain
+// task IDs (t1, t2 …) — these duplicate the todoCreate checklist already shown.
+func stripTaskIDTables(s string) string {
+	lines := strings.Split(s, "\n")
+	result := make([]string, 0, len(lines))
+
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Detect start of a table (lines beginning with │ | or separator chars).
+		if isTableHeaderLine(trimmed) {
+			// Collect all lines that belong to this table.
+			tableLines := []string{line}
+			j := i + 1
+			hasTaskIDs := taskIDRowRe.MatchString(line)
+			for j < len(lines) {
+				nxt := strings.TrimSpace(lines[j])
+				if nxt == "" || isTableBodyLine(nxt) {
+					if taskIDRowRe.MatchString(lines[j]) {
+						hasTaskIDs = true
+					}
+					tableLines = append(tableLines, lines[j])
+					j++
+				} else {
+					break
+				}
+			}
+			if hasTaskIDs {
+				// Drop the whole table.
+				i = j
+				continue
+			}
+			// Not a task-ID table — keep it.
+			result = append(result, tableLines...)
+			i = j
+			continue
+		}
+
+		result = append(result, line)
+		i++
+	}
+	return strings.Join(result, "\n")
+}
+
+func isTableHeaderLine(s string) bool {
+	return strings.HasPrefix(s, "|") ||
+		strings.HasPrefix(s, "│") ||
+		strings.HasPrefix(s, "╭") ||
+		strings.HasPrefix(s, "┌")
+}
+
+func isTableBodyLine(s string) bool {
+	return strings.HasPrefix(s, "|") ||
+		strings.HasPrefix(s, "│") ||
+		strings.HasPrefix(s, "├") ||
+		strings.HasPrefix(s, "╰") ||
+		strings.HasPrefix(s, "└") ||
+		strings.HasPrefix(s, "─") ||
+		strings.HasPrefix(s, "-") && strings.ContainsAny(s, "|") ||
+		strings.HasPrefix(s, " ") && (strings.Contains(s, "│") || strings.Contains(s, "|"))
 }
 
 // handleCommand processes commands
