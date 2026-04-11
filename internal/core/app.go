@@ -124,21 +124,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	// Register tools after permission manager is configured
 	registerTools(toolRegistry, llmClient, cfg, log, permissionMgr)
 
-	// Initialize agent
-	agentConfig := &agent.Config{
-		Model:         cfg.LLM.Models.Default,
-		PlannerModel:  cfg.LLM.Models.Planner,
-		Provider:      cfg.LLM.Provider,
-		SystemPrompt:  cfg.SystemPrompt,
-		Temperature:   float64(cfg.Temperature),
-		MaxTokens:     cfg.MaxTokens,
-		MaxIterations: cfg.MaxIterations,
-		Logger:        log,
-		LLMClient:     llmClient,
-		ToolRegistry:  toolRegistry,
-		PermissionMgr: permissionMgr,
-		AutoPlan:      false, // disabled by default; users can opt-in via config
-		OnToolExecution: func(toolName string, params map[string]interface{}) {
+	onToolExec := func(toolName string, params map[string]interface{}) {
 			// Clear spinner before printing so messages don't collide on the same line
 			ui.HideThinking()
 
@@ -239,7 +225,65 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 			// Resume spinner after printing
 			ui.ShowThinking()
-		},
+	}
+
+	// Add sub-agent tool
+	launcher := func(ctx context.Context, task string) (string, error) {
+		ui.Info("\n🤖 Launching Sub-Agent...")
+		ui.Info("   Task: %s\n", task)
+		subCfg := *cfg
+		subCfg.MaxIterations = 15
+
+		subRegistry := tools.NewToolRegistry()
+		for _, t := range toolRegistry.ListTools() {
+			if t.Name() != "subAgent" {
+				subRegistry.RegisterTool(t)
+			}
+		}
+
+		subAgentConfig := &agent.Config{
+			Model:         subCfg.LLM.Models.Default,
+			PlannerModel:  subCfg.LLM.Models.Planner,
+			Provider:      subCfg.LLM.Provider,
+			SystemPrompt:  "You are a sub-agent. Your goal is to solve the specific task provided by the parent agent. Use tools as necessary. Return a clear and concise summary of your findings and completed actions. Task: " + task,
+			Temperature:   float64(subCfg.Temperature),
+			MaxTokens:     subCfg.MaxTokens,
+			MaxIterations: subCfg.MaxIterations,
+			Logger:        log,
+			LLMClient:     llmClient,
+			ToolRegistry:  subRegistry,
+			PermissionMgr: permissionMgr,
+			OnToolExecution: onToolExec,
+		}
+
+		subAgent := agent.NewAgent(subAgentConfig)
+		result, err := subAgent.ProcessMessage(ctx, "Execute this task: "+task)
+		if err != nil {
+			return "", fmt.Errorf("sub-agent execution failed: %w", err)
+		}
+
+		ui.Success("🤖 Sub-Agent completed task\n")
+		return result, nil
+	}
+
+	toolRegistry.RegisterTool(tools.NewSubAgentTool(launcher))
+	permissionMgr.SetDefaultPermissionLevel("subAgent", tools.AlwaysAsk)
+
+	// Initialize agent
+	agentConfig := &agent.Config{
+		Model:         cfg.LLM.Models.Default,
+		PlannerModel:  cfg.LLM.Models.Planner,
+		Provider:      cfg.LLM.Provider,
+		SystemPrompt:  cfg.SystemPrompt,
+		Temperature:   float64(cfg.Temperature),
+		MaxTokens:     cfg.MaxTokens,
+		MaxIterations: cfg.MaxIterations,
+		Logger:        log,
+		LLMClient:     llmClient,
+		ToolRegistry:  toolRegistry,
+		PermissionMgr: permissionMgr,
+		AutoPlan:      false, // disabled by default; users can opt-in via config
+		OnToolExecution: onToolExec,
 	}
 	agentInstance := agent.NewAgent(agentConfig)
 
