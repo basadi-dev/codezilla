@@ -173,6 +173,43 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				if u, ok := params["url"].(string); ok {
 					detail = u
 				}
+			case "grepSearch":
+				if dp, ok := params["search_path"].(string); ok {
+					if q, ok := params["query"].(string); ok {
+						detail = fmt.Sprintf(`"%s" in %s`, q, dp)
+					} else {
+						detail = dp
+					}
+				}
+			case "fileEdit":
+				if fp, ok := params["target_file"].(string); ok {
+					detail = fp
+				}
+			case "fileManage":
+				op, _ := params["operation"].(string)
+				src, _ := params["source_path"].(string)
+				dst, _ := params["destination_path"].(string)
+				if op != "" {
+					if dst != "" {
+						detail = fmt.Sprintf("%s: %s -> %s", op, src, dst)
+					} else {
+						detail = fmt.Sprintf("%s: %s", op, src)
+					}
+				}
+			case "todo_create":
+				if name, ok := params["name"].(string); ok {
+					detail = name
+				}
+			case "todo_update":
+				task, _ := params["task_id"].(string)
+				status, _ := params["status"].(string)
+				if task != "" {
+					detail = fmt.Sprintf("%s -> %s", task, status)
+				}
+			case "projectScanAnalyzer":
+				if dir, ok := params["directory"].(string); ok {
+					detail = dir
+				}
 			}
 
 			var desc string
