@@ -1292,13 +1292,15 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	// Register the analyzer (formerly V2)
 	registry.RegisterTool(analyzerFactory.CreateProjectScanAnalyzer())
 
-	// Set default permissions for safe read-only tools
-	permissionMgr.SetDefaultPermissionLevel("projectScanAnalyzer", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("grepSearch", tools.NeverAsk)
-	
-	// Modifying tools default to asking (they'll be managed by user configs usually)
+	// All tools are auto-approved (NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("fileRead", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("fileWrite", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("listFiles", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("fileEdit", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("grepSearch", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("projectScanAnalyzer", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("execute", tools.NeverAsk)
 
 	registry.RegisterTool(tools.NewExecuteTool(30))
 
