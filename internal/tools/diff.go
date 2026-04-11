@@ -2,12 +2,14 @@ package tools
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"codezilla/pkg/style"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sergi/go-diff/diffmatchpatch"
+	"golang.org/x/term"
 )
 
 // GenerateDiff creates a smart diff output between the two content strings
@@ -119,6 +121,16 @@ func GenerateDiff(contentA, contentB string, contextLines int) string {
 	var outputLines []string
 	wasShowing := false
 	
+	width, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || width <= 0 {
+		width = 120 // fallback width
+	}
+	
+	maxTextWidth := width - (lineNumWidth*2 + 10)
+	if maxTextWidth < 20 {
+		maxTextWidth = 20
+	}
+	
 	for i, dl := range allLines {
 		if !showMap[i] {
 			if wasShowing {
@@ -129,19 +141,22 @@ func GenerateDiff(contentA, contentB string, contextLines int) string {
 		}
 		wasShowing = true
 
+		// Truncate to avoid breaking the surrounding lipgloss border
+		text := truncateRight(dl.Text, maxTextWidth-1)
+
 		if dl.Type == diffmatchpatch.DiffEqual {
 			lnA := styleLineNum.Render(formatLineNum(dl.LineNumA))
 			lnB := styleLineNum.Render(formatLineNum(dl.LineNumB))
-			outputLines = append(outputLines, fmt.Sprintf("%s │ %s │ %s", lnA, lnB, styleDim.Render(dl.Text)))
+			outputLines = append(outputLines, fmt.Sprintf("%s │ %s │ %s", lnA, lnB, styleDim.Render(" "+text)))
 		} else if dl.Type == diffmatchpatch.DiffDelete {
 			lnA := styleLineNum.Render(formatLineNum(dl.LineNumA))
 			lnB := styleLineNum.Render(formatLineNum(0))
-			styledText := styleRed.Render("-" + dl.Text)
+			styledText := styleRed.Render("-" + text)
 			outputLines = append(outputLines, fmt.Sprintf("%s │ %s │ %s", lnA, lnB, styledText))
 		} else if dl.Type == diffmatchpatch.DiffInsert {
 			lnA := styleLineNum.Render(formatLineNum(0))
 			lnB := styleLineNum.Render(formatLineNum(dl.LineNumB))
-			styledText := styleGreen.Render("+" + dl.Text)
+			styledText := styleGreen.Render("+" + text)
 			outputLines = append(outputLines, fmt.Sprintf("%s │ %s │ %s", lnA, lnB, styledText))
 		}
 	}
@@ -171,4 +186,18 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func truncateRight(s string, max int) string {
+	if max <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max > 3 {
+		return string(runes[:max-3]) + "..."
+	}
+	return string(runes[:max])
 }
