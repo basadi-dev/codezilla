@@ -12,7 +12,8 @@ import (
 
 // MinimalUI implements a minimal UI with no colors or fancy formatting
 type MinimalUI struct {
-	reader *FixedInput
+	reader       *FixedInput
+	currentModel string
 }
 
 // NewMinimalUI creates a minimal UI implementation
@@ -72,8 +73,16 @@ func (ui *MinimalUI) Info(format string, args ...interface{}) {
 	fmt.Printf("[INFO] "+format+"\n", args...)
 }
 
+func (ui *MinimalUI) SetModel(model string) {
+	ui.currentModel = model
+}
+
 func (ui *MinimalUI) ShowThinking() {
-	fmt.Print("Thinking...")
+	if ui.currentModel != "" {
+		fmt.Printf("Thinking · %s...", ui.currentModel)
+	} else {
+		fmt.Print("Thinking...")
+	}
 }
 
 func (ui *MinimalUI) HideThinking() {
@@ -81,7 +90,11 @@ func (ui *MinimalUI) HideThinking() {
 }
 
 func (ui *MinimalUI) ShowResponse(response string) {
-	fmt.Println("\nAssistant:")
+	if ui.currentModel != "" {
+		fmt.Printf("\nAssistant [%s]:\n", ui.currentModel)
+	} else {
+		fmt.Println("\nAssistant:")
+	}
 	fmt.Println(response)
 	fmt.Println()
 }

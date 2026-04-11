@@ -20,6 +20,7 @@ type BaseUI struct {
 	spinnerStop  chan bool
 	spinnerMutex sync.Mutex
 	width        int
+	currentModel string
 }
 
 // NewBaseUI creates a new base UI
@@ -76,6 +77,11 @@ func (ui *BaseUI) ShowBanner() {
 	separator := ui.theme.StyleDim.Render(strings.Repeat("─", ui.width))
 	fmt.Fprintln(ui.writer, separator)
 	ui.writer.Flush()
+}
+
+// SetModel sets the active model name shown in the UI.
+func (ui *BaseUI) SetModel(model string) {
+	ui.currentModel = model
 }
 
 // ShowWelcome displays the welcome message

@@ -210,10 +210,15 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 				// Title line
 				titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#1E66F5", Dark: "#7AA2F7"})
+				plannerModel := cfg.LLM.Models.Planner
+				if plannerModel == "" {
+					plannerModel = cfg.LLM.Models.Default
+				}
+				modelSuffix := lipgloss.NewStyle().Faint(true).Render(" · via " + plannerModel)
 				if name != "" {
-					lines = append(lines, titleStyle.Render("📋 "+name))
+					lines = append(lines, titleStyle.Render("📋 "+name)+modelSuffix)
 				} else {
-					lines = append(lines, titleStyle.Render("📋 New Plan"))
+					lines = append(lines, titleStyle.Render("📋 New Plan")+modelSuffix)
 				}
 				if desc != "" {
 					lines = append(lines, theme.StyleDim.Render(desc))
@@ -377,7 +382,8 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 	// Add sub-agent tool
 	launcher := func(ctx context.Context, task string) (string, error) {
-		ui.Info("\n🤖 Launching Sub-Agent...")
+		subModel := cfg.LLM.Models.Default
+		ui.Info("\n🤖 Launching Sub-Agent... %s", lipgloss.NewStyle().Faint(true).Render("· "+subModel))
 		ui.Info("   Task: %s\n", task)
 		subCfg := *cfg
 		subCfg.MaxIterations = 15
@@ -635,6 +641,7 @@ func (app *App) Run(ctx context.Context) error {
 		connStr = app.config.LLM.Ollama.BaseURL
 	}
 	app.ui.ShowWelcome(app.config.LLM.Models.Default, connStr, app.config.RetainContext)
+	app.ui.SetModel(app.config.LLM.Models.Default)
 
 	// Main loop
 	for {
@@ -713,6 +720,8 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		app.ui.HideThinking()
 
 		if agentErr == nil && finalResponse != "" {
+			modelLabel := app.config.LLM.Models.Default
+			app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
 			app.ui.ShowResponse(sanitizeAgentResponse(finalResponse))
 		}
 
@@ -1108,6 +1117,7 @@ func (app *App) changeModel(ctx context.Context, modelName string) {
 
 	app.config.LLM.Models.Default = modelName
 	app.agent.SetModel(modelName)
+	app.ui.SetModel(modelName)
 	app.ui.Success("Switched to model: %s", modelName)
 }
 

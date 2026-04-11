@@ -73,6 +73,7 @@ type UI interface {
 	// Theme management
 	GetTheme() Theme
 	SetTheme(theme Theme)
+	SetModel(model string)
 	DisableColors()
 }
 

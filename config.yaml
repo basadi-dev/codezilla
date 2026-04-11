@@ -9,6 +9,7 @@ llm:
 
   models:
     default: "gpt-oss:20b"
+    planner: "glm-5.1"
     # Recommended models by provider:
     #   ollama cloud: qwen3-coder:480b, deepseek-v3.2, gpt-oss:120b
     #   ollama local: devstral-small-2:24b, qwen3-coder-next, ministral-3:14b

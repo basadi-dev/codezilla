@@ -139,19 +139,24 @@ func (ui *FancyUI) ShowThinking() {
 	go func() {
 		defer ui.spinnerWg.Done()
 
+		modelTag := ""
+		if ui.currentModel != "" {
+			modelTag = " · " + ui.currentModel
+		}
+
 		frames := []string{
-			"🤔 Thinking",
-			"🤔 Thinking.",
-			"🤔 Thinking..",
-			"🤔 Thinking...",
-			"💭 Processing",
-			"💭 Processing.",
-			"💭 Processing..",
-			"💭 Processing...",
-			"🧠 Analyzing",
-			"🧠 Analyzing.",
-			"🧠 Analyzing..",
-			"🧠 Analyzing...",
+			"🤔 Thinking" + modelTag,
+			"🤔 Thinking." + modelTag,
+			"🤔 Thinking.." + modelTag,
+			"🤔 Thinking..." + modelTag,
+			"💭 Processing" + modelTag,
+			"💭 Processing." + modelTag,
+			"💭 Processing.." + modelTag,
+			"💭 Processing..." + modelTag,
+			"🧠 Analyzing" + modelTag,
+			"🧠 Analyzing." + modelTag,
+			"🧠 Analyzing.." + modelTag,
+			"🧠 Analyzing..." + modelTag,
 		}
 
 		i := 0
