@@ -151,6 +151,12 @@ func (ui *MinimalUI) ReadLine() (string, error) {
 	return ui.reader.ReadLine()
 }
 
+// SetCompleter wires a Tab-completion callback into the underlying input reader.
+// MinimalUI satisfies the ui.Completer interface.
+func (ui *MinimalUI) SetCompleter(fn func(line string) []Completion) {
+	ui.reader.SetCompleter(fn)
+}
+
 func (ui *MinimalUI) ReadPassword(prompt string) (string, error) {
 	fmt.Print(prompt)
 	// Try to read password securely

@@ -19,13 +19,14 @@ import (
 
 // App represents the core application logic, independent of UI
 type App struct {
-	config    *config.Config
-	logger    *logger.Logger
-	agent     agent.Agent
-	llmClient *llm.Client
-	tools     tools.ToolRegistry
-	ui        ui.UI
-	skillReg  *skills.Registry
+	config       *config.Config
+	logger       *logger.Logger
+	agent        agent.Agent
+	llmClient    *llm.Client
+	tools        tools.ToolRegistry
+	ui           ui.UI
+	skillReg     *skills.Registry
+	cachedModels []string // updated by /models, used for Tab completion
 }
 
 // NewApp creates a new application instance
@@ -193,6 +194,159 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	}, nil
 }
 
+// wireCompleter builds and installs the Tab-completion callback if the UI
+// implements the ui.Completer interface.
+func (app *App) wireCompleter() {
+	c, ok := app.ui.(ui.Completer)
+	if !ok {
+		return
+	}
+
+	type aliasDef struct {
+		Primary string
+		Aliases []string
+		Desc    string
+	}
+	
+	// Static top-level slash commands
+	staticCmds := []aliasDef{
+		{Primary: "/help", Aliases: []string{"/h"}, Desc: "Show this help"},
+		{Primary: "/exit", Aliases: []string{"/quit", "/q"}, Desc: "Exit the application"},
+		{Primary: "/clear", Aliases: []string{"/c"}, Desc: "Clear the screen"},
+		{Primary: "/model ", Desc: "Manage or list models [ls|<name>]"},
+		{Primary: "/context ", Desc: "Manage context [on|off|clear|show]"},
+		{Primary: "/tools", Desc: "Show available tools"},
+		{Primary: "/skill ", Aliases: []string{"/skills "}, Desc: "Manage skills"},
+		{Primary: "/reset", Desc: "Reset conversation"},
+		{Primary: "/save ", Desc: "Save conversation to JSON file"},
+		{Primary: "/load ", Desc: "Load conversation from JSON file"},
+	}
+
+	c.SetCompleter(func(line string) []ui.Completion {
+		if !strings.HasPrefix(line, "/") {
+			return nil
+		}
+
+		// /context <sub>
+		if strings.HasPrefix(line, "/context ") {
+			sub := line[len("/context "):]
+			opts := []ui.Completion{
+				{Text: "on", Description: "Enable context retention"},
+				{Text: "off", Description: "Disable and clear context"},
+				{Text: "clear", Description: "Clear current context"},
+				{Text: "show", Description: "Show current context"},
+			}
+			return filterPrefix("/context ", opts, sub)
+		}
+
+		// /model arg
+		if strings.HasPrefix(line, "/model ") || strings.HasPrefix(line, "/models ") {
+            prefix := "/model "
+            if strings.HasPrefix(line, "/models ") { prefix = "/models " }
+			sub := line[len(prefix):]
+			
+			opts := make([]ui.Completion, len(app.cachedModels) + 2)
+			opts[0] = ui.Completion{Text: "ls", Description: "List all available models"}
+			opts[1] = ui.Completion{Text: "list", Description: "List all available models"}
+			for i, m := range app.cachedModels {
+				opts[i+2] = ui.Completion{Text: m}
+			}
+			return filterPrefix(prefix, opts, sub)
+		}
+
+		// /skill <sub> or /skills <sub>
+		skillPrefix := ""
+		if strings.HasPrefix(line, "/skill ") {
+			skillPrefix = "/skill "
+		} else if strings.HasPrefix(line, "/skills ") {
+			skillPrefix = "/skills "
+		}
+		if skillPrefix != "" {
+			sub := line[len(skillPrefix):]
+			// /skill info <name> or /skill off <name>
+			if strings.HasPrefix(sub, "info ") {
+				name := sub[len("info "):]
+				return filterPrefix(skillPrefix+"info ", app.skillCompletions(false), name)
+			}
+			if strings.HasPrefix(sub, "off ") {
+				name := sub[len("off "):]
+				return filterPrefix(skillPrefix+"off ", app.skillCompletions(true), name)
+			}
+			// Sub-commands + skill names
+			opts := []ui.Completion{
+				{Text: "list", Description: "List all available skills"},
+				{Text: "reset", Description: "Deactivate all skills"},
+				{Text: "info ", Description: "Show skill details"},
+				{Text: "off ", Description: "Deactivate a specific skill"},
+			}
+			opts = append(opts, app.skillCompletions(false)...)
+			return filterPrefix(skillPrefix, opts, sub)
+		}
+
+		// Top-level — match static commands by prefix
+		var matches []ui.Completion
+		for _, cmd := range staticCmds {
+			matched := strings.HasPrefix(cmd.Primary, line)
+			if !matched {
+				for _, a := range cmd.Aliases {
+					if strings.HasPrefix(a, line) {
+						matched = true
+						break
+					}
+				}
+			}
+
+			if matched {
+				display := cmd.Primary
+				if len(cmd.Aliases) > 0 {
+					display = cmd.Primary + ", " + strings.Join(cmd.Aliases, ", ")
+				}
+				matches = append(matches, ui.Completion{
+					Text:        cmd.Primary,
+					Display:     display,
+					Description: cmd.Desc,
+				})
+			}
+		}
+		return matches
+	})
+}
+
+// filterPrefix filters opts by sub-prefix and prepends commandPrefix to each result.
+func filterPrefix(commandPrefix string, opts []ui.Completion, sub string) []ui.Completion {
+	var out []ui.Completion
+	for _, o := range opts {
+		if strings.HasPrefix(o.Text, sub) {
+			out = append(out, ui.Completion{
+				Text:        commandPrefix + o.Text,
+				Description: o.Description,
+			})
+		}
+	}
+	return out
+}
+
+// skillCompletions returns the names and descriptions of skills. 
+// If activeOnly is true, it only returns active skills.
+func (app *App) skillCompletions(activeOnly bool) []ui.Completion {
+	all := app.skillReg.List()
+	comps := make([]ui.Completion, 0, len(all))
+	for _, s := range all {
+		if activeOnly && !app.skillReg.IsActive(s.Name) {
+			continue
+		}
+		desc := s.Description
+		if s.Trigger != "" {
+			desc += " (trigger: " + s.Trigger + ")"
+		}
+		comps = append(comps, ui.Completion{
+			Text:        s.Name,
+			Description: desc,
+		})
+	}
+	return comps
+}
+
 // Close cleans up application resources
 func (app *App) Close() error {
 	if app.logger != nil {
@@ -206,7 +360,10 @@ func (app *App) Run(ctx context.Context) error {
 	// Show UI elements
 	app.ui.Clear()
 	app.ui.ShowBanner()
-	
+
+	// Wire Tab auto-complete now that skill registry is populated
+	app.wireCompleter()
+
 	connStr := app.config.LLM.Provider
 	if app.config.LLM.Provider == "ollama" {
 		connStr = app.config.LLM.Ollama.BaseURL
@@ -336,14 +493,21 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 		app.ui.Clear()
 		app.ui.ShowBanner()
 
-	case "/models":
-		app.showModels(ctx)
-
-	case "/model":
+	case "/model", "/models":
 		if len(parts) > 1 {
-			app.changeModel(ctx, strings.Join(parts[1:], " "))
+			arg := strings.ToLower(parts[1])
+			if arg == "ls" || arg == "list" {
+				app.showModels(ctx)
+			} else {
+				app.changeModel(ctx, strings.Join(parts[1:], " "))
+			}
 		} else {
-			app.ui.Info("Current model: %s", app.config.LLM.Models.Default)
+			if parts[0] == "/models" {
+				app.showModels(ctx)
+			} else {
+				app.ui.Info("Current model: %s", app.config.LLM.Models.Default)
+				app.ui.Info("Type '/model ls' to see available models")
+			}
 		}
 
 	case "/context":
@@ -475,6 +639,9 @@ func (app *App) showModels(ctx context.Context) {
 		app.ui.Error("Failed to list models: %v", err)
 		return
 	}
+
+	// Cache for Tab completion
+	app.cachedModels = models
 
 	app.ui.ShowModels(models, app.config.LLM.Models.Default)
 }

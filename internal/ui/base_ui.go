@@ -336,6 +336,12 @@ func (ui *BaseUI) ReadLine() (string, error) {
 	return ui.reader.ReadLine()
 }
 
+// SetCompleter wires a Tab-completion callback into the underlying input reader.
+// BaseUI satisfies the ui.Completer interface.
+func (ui *BaseUI) SetCompleter(fn func(line string) []Completion) {
+	ui.reader.SetCompleter(fn)
+}
+
 // ReadPassword reads a password without echoing
 func (ui *BaseUI) ReadPassword(prompt string) (string, error) {
 	ui.Print("%s", prompt)

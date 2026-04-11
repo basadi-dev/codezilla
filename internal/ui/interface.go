@@ -70,5 +70,18 @@ type ToolInfo struct {
 	Permission  string
 }
 
+// Completion represents an auto-complete candidate with an optional description
+type Completion struct {
+	Text        string // The literal text inserted into the input line
+	Display     string // Optional display presentation (e.g. "/help, /h")
+	Description string
+}
+
+// Completer is an optional interface that UI implementations may satisfy to
+// support Tab auto-completion. App uses a type assertion to wire completions.
+type Completer interface {
+	SetCompleter(fn func(line string) []Completion)
+}
+
 // Factory function type for creating UI instances
 type Factory func(historyFile string) (UI, error)
