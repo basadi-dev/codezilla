@@ -48,7 +48,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	// Test connection
 	ctx := context.Background()
 	ui.Info("Connecting to %s…", cfg.LLM.Provider)
-	_, err = llmClient.ListModels(ctx, cfg.LLM.Provider)
+	models, err := llmClient.ListModels(ctx, cfg.LLM.Provider)
 	if err != nil {
 		ui.Error("Cannot connect to provider %s: %v", cfg.LLM.Provider, err)
 		return nil, fmt.Errorf("cannot connect to provider %s: %w", cfg.LLM.Provider, err)
@@ -171,10 +171,19 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				}
 			}
 
+			var desc string
+			if tool, ok := toolRegistry.GetTool(toolName); ok {
+				desc = tool.Description()
+			}
+
 			if detail != "" {
-				ui.Info("🔧 Using tool: %s (%s)", toolName, detail)
+				ui.Info("🛠  %s (%s)", toolName, detail)
 			} else {
-				ui.Info("🔧 Using tool: %s", toolName)
+				ui.Info("🛠  %s", toolName)
+			}
+			
+			if desc != "" {
+				ui.Info("   ↳ %s", ui.GetTheme().StyleDim.Render(desc))
 			}
 
 			// Resume spinner after printing
@@ -186,11 +195,12 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	return &App{
 		config:    cfg,
 		logger:    log,
-		agent:     agentInstance,
-		llmClient: llmClient,
-		tools:     toolRegistry,
-		ui:        ui,
-		skillReg:  skillRegistry,
+		agent:        agentInstance,
+		llmClient:    llmClient,
+		tools:        toolRegistry,
+		ui:           ui,
+		skillReg:     skillRegistry,
+		cachedModels: models,
 	}, nil
 }
 

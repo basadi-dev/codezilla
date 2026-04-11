@@ -99,9 +99,14 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 	if items, ok := params["items"].([]interface{}); ok {
 		for i, item := range items {
 			if itemMap, ok := item.(map[string]interface{}); ok {
+				contentStr := "Untitled Task"
+				if content, ok := itemMap["content"].(string); ok {
+					contentStr = content
+				}
+
 				todoItem := TodoItem{
 					ID:        fmt.Sprintf("task_%d_%d", time.Now().UnixNano(), i),
-					Content:   itemMap["content"].(string),
+					Content:   contentStr,
 					Status:    "pending",
 					Priority:  "medium",
 					CreatedAt: time.Now(),
