@@ -22,6 +22,7 @@ type Agent interface {
 	ProcessMessageStream(ctx context.Context, message string, onToken func(string)) (string, error)
 	ExecuteTool(ctx context.Context, toolName string, params map[string]interface{}) (interface{}, error)
 	AddSystemMessage(message string)
+	ReplaceSystemMessage(message string)
 	AddUserMessage(message string)
 	AddAssistantMessage(message string)
 	GetMessages() []Message
@@ -170,6 +171,10 @@ func (a *agent) ExecuteTool(ctx context.Context, toolName string, params map[str
 
 func (a *agent) AddSystemMessage(message string) {
 	a.context.AddSystemMessage(message)
+}
+
+func (a *agent) ReplaceSystemMessage(message string) {
+	a.context.ReplaceSystemMessage(message)
 }
 
 func (a *agent) AddUserMessage(message string) {

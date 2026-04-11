@@ -48,6 +48,9 @@ type Config struct {
 
 	// Analyzer settings
 	AnalyzerSettings AnalyzerSettings `json:"analyzer_settings" yaml:"analyzer_settings"`
+
+	// Skills system
+	Skills SkillsConfig `json:"skills" yaml:"skills"`
 }
 
 // MetasearchSettings configures the embedded metasearch engine.
@@ -56,6 +59,14 @@ type MetasearchSettings struct {
 	TimeoutSeconds int  `json:"timeout_seconds" yaml:"timeout_seconds"`     // Per-backend timeout in seconds
 	MaxResults     int  `json:"max_results" yaml:"max_results"`             // Default number of results to return
 	JitterMs       int  `json:"jitter_ms" yaml:"jitter_ms"`                 // Random delay per request in ms (0 = off)
+}
+
+// SkillsConfig configures the skills system.
+type SkillsConfig struct {
+	// Dir is the directory to scan for skill markdown files.
+	Dir string `json:"dir" yaml:"dir"`
+	// ActiveSkills lists skill names to activate automatically at startup.
+	ActiveSkills []string `json:"active_skills" yaml:"active_skills"`
 }
 
 // AnalyzerSettings contains configuration for the file analyzer
@@ -172,6 +183,10 @@ func DefaultConfig() *Config {
 			RelevanceThreshold: 0.3,
 			AnalysisTimeout:    30,
 			MaxFileSize:        1024 * 1024, // 1MB
+		},
+		Skills: SkillsConfig{
+			Dir:          "./skills",
+			ActiveSkills: []string{},
 		},
 	}
 }

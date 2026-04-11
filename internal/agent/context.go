@@ -107,6 +107,30 @@ func (c *Context) AddSystemMessage(content string) {
 	})
 }
 
+// ReplaceSystemMessage replaces the first system message in context with new content.
+// If no system message exists, adds one. Used to inject skill instructions dynamically.
+func (c *Context) ReplaceSystemMessage(content string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, msg := range c.Messages {
+		if msg.Role == RoleSystem {
+			oldTokens := estimateTokens(c.Messages[i].Content)
+			newTokens := estimateTokens(content)
+			c.Messages[i].Content = content
+			c.Messages[i].Timestamp = time.Now()
+			c.CurrentTokens = c.CurrentTokens - oldTokens + newTokens
+			return
+		}
+	}
+	// No system message found — add one
+	c.Messages = append([]Message{{
+		Role:      RoleSystem,
+		Content:   content,
+		Timestamp: time.Now(),
+	}}, c.Messages...)
+	c.CurrentTokens += estimateTokens(content)
+}
+
 func (c *Context) AddUserMessage(content string) {
 	c.AddMessage(Message{
 		Role:      RoleUser,

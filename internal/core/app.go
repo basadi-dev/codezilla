@@ -11,6 +11,7 @@ import (
 	"codezilla/internal/agent"
 	"codezilla/internal/config"
 	"codezilla/internal/core/llm"
+	"codezilla/internal/skills"
 	"codezilla/internal/tools"
 	"codezilla/internal/ui"
 	"codezilla/pkg/logger"
@@ -24,6 +25,7 @@ type App struct {
 	llmClient *llm.Client
 	tools     tools.ToolRegistry
 	ui        ui.UI
+	skillReg  *skills.Registry
 }
 
 // NewApp creates a new application instance
@@ -54,6 +56,14 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 	// Initialize tool registry
 	toolRegistry := tools.NewToolRegistry()
+
+	// Initialize skills registry
+	skillRegistry := skills.NewRegistry()
+	if err := skillRegistry.LoadFromDir(cfg.Skills.Dir); err != nil {
+		// Non-fatal: log and continue
+		log.Warn("Skills load warning", "error", err)
+	}
+	skillRegistry.AutoActivate(cfg.Skills.ActiveSkills)
 
 	// Create permission manager with interactive callback
 	permissionMgr := tools.NewPermissionManager(func(ctx context.Context, request tools.PermissionRequest) (tools.PermissionResponse, error) {
@@ -179,6 +189,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		llmClient: llmClient,
 		tools:     toolRegistry,
 		ui:        ui,
+		skillReg:  skillRegistry,
 	}, nil
 }
 
@@ -222,6 +233,14 @@ func (app *App) Run(ctx context.Context) error {
 
 			// Handle commands
 			if strings.HasPrefix(input, "/") {
+				// Check if input matches a skill trigger (exact slash command, no extra text)
+				fields := strings.Fields(input)
+				if len(fields) == 1 {
+					if skill := app.skillReg.FindByTrigger(fields[0]); skill != nil {
+						app.handleSkillTrigger(skill)
+						continue
+					}
+				}
 				if app.handleCommand(ctx, input) {
 					return nil
 				}
@@ -251,6 +270,9 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		var finalResponse string
 		var agentErr error
 		done := make(chan struct{})
+
+		// Inject active skill instructions into agent system prompt
+		app.updateAgentSystemPrompt()
 
 		go func() {
 			defer close(done)
@@ -329,6 +351,9 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 
 	case "/tools":
 		app.showTools()
+
+	case "/skill", "/skills":
+		app.handleSkillCommand(parts)
 
 	case "/reset":
 		app.agent.ClearContext()
@@ -539,6 +564,106 @@ func (app *App) showTools() {
 	}
 
 	app.ui.ShowTools(toolInfos)
+}
+
+// updateAgentSystemPrompt rebuilds the agent's system prompt by appending
+// instructions from all currently active skills. Called before each LLM request
+// so mid-session skill activation/deactivation takes effect immediately.
+func (app *App) updateAgentSystemPrompt() {
+	instructions := app.skillReg.ActiveInstructions()
+	basePrompt := app.config.SystemPrompt
+
+	prompt := basePrompt
+	if instructions != "" {
+		prompt = basePrompt + "\n\n## Active Skills\n\n" + instructions
+	}
+	app.agent.ReplaceSystemMessage(prompt)
+}
+
+// handleSkillTrigger toggles a skill that matched a slash trigger command.
+func (app *App) handleSkillTrigger(skill *skills.Skill) {
+	if app.skillReg.IsActive(skill.Name) {
+		app.skillReg.Deactivate(skill.Name)
+		app.ui.Info("Skill deactivated: %s", skill.Name)
+	} else {
+		_ = app.skillReg.Activate(skill.Name)
+		app.ui.Success("Skill activated: %s", skill.Name)
+		if skill.Description != "" {
+			app.ui.Info("%s", skill.Description)
+		}
+	}
+}
+
+// handleSkillCommand handles the /skill subcommands.
+func (app *App) handleSkillCommand(parts []string) {
+	if len(parts) < 2 {
+		app.ui.Warning("Usage: /skill [list|info <name>|<name>|off <name>|reset]")
+		return
+	}
+
+	sub := parts[1]
+	switch sub {
+	case "list":
+		allSkills := app.skillReg.List()
+		if len(allSkills) == 0 {
+			app.ui.Info("No skills loaded. Add .md files to %s", app.config.Skills.Dir)
+			return
+		}
+		app.ui.Println("\n%s", "Available Skills:")
+		for _, s := range allSkills {
+			status := "inactive"
+			if app.skillReg.IsActive(s.Name) {
+				status = "active"
+			}
+			trigger := ""
+			if s.Trigger != "" {
+				trigger = " (trigger: " + s.Trigger + ")"
+			}
+			app.ui.Println("  %-20s [%s]%s — %s", s.Name, status, trigger, s.Description)
+		}
+		app.ui.Println("")
+
+	case "off":
+		if len(parts) < 3 {
+			app.ui.Warning("Usage: /skill off <name>")
+			return
+		}
+		name := parts[2]
+		app.skillReg.Deactivate(name)
+		app.ui.Success("Skill deactivated: %s", name)
+
+	case "reset":
+		app.skillReg.DeactivateAll()
+		app.ui.Success("All skills deactivated")
+
+	case "info":
+		if len(parts) < 3 {
+			app.ui.Warning("Usage: /skill info <name>")
+			return
+		}
+		name := parts[2]
+		s := app.skillReg.Get(name)
+		if s == nil {
+			app.ui.Error("Skill not found: %s", name)
+			return
+		}
+		app.ui.Println("\n%s — %s", s.Name, s.Description)
+		if s.Trigger != "" {
+			app.ui.Println("Trigger: %s", s.Trigger)
+		}
+		app.ui.Println("Always-on: %v", s.AlwaysOn)
+		app.ui.Println("\nInstructions:\n%s\n", s.Instructions)
+
+	default:
+		// Treat as skill name to activate/toggle
+		name := sub
+		s := app.skillReg.Get(name)
+		if s == nil {
+			app.ui.Warning("Unknown skill: %s. Use /skill list to see available skills.", name)
+			return
+		}
+		app.handleSkillTrigger(s)
+	}
 }
 
 // registerTools registers all available tools
