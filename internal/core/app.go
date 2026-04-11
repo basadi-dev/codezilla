@@ -116,7 +116,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		case "ask_once":
 			level = tools.AskOnce
 		default:
-			level = tools.AlwaysAsk
+			level = tools.NeverAsk
 		}
 		permissionMgr.SetDefaultPermissionLevel(toolName, level)
 	}
@@ -307,7 +307,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	}
 
 	toolRegistry.RegisterTool(tools.NewSubAgentTool(launcher))
-	permissionMgr.SetDefaultPermissionLevel("subAgent", tools.AlwaysAsk)
+	permissionMgr.SetDefaultPermissionLevel("subAgent", tools.NeverAsk)
 
 	// Initialize agent
 	agentConfig := &agent.Config{
@@ -1032,8 +1032,8 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	permissionMgr.SetDefaultPermissionLevel("grepSearch", tools.NeverAsk)
 	
 	// Modifying tools default to asking (they'll be managed by user configs usually)
-	permissionMgr.SetDefaultPermissionLevel("fileEdit", tools.AlwaysAsk)
-	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.AlwaysAsk)
+	permissionMgr.SetDefaultPermissionLevel("fileEdit", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.NeverAsk)
 
 	registry.RegisterTool(tools.NewExecuteTool(30))
 

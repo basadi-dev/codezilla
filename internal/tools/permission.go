@@ -255,11 +255,11 @@ func getInitialPermissionLevel(toolName string) PermissionLevel {
 	// Set sensible defaults
 	switch toolName {
 	case "execute":
-		// Commands are potentially dangerous, always ask
-		return AlwaysAsk
+		// Commands are potentially dangerous, but default to never ask per user request
+		return NeverAsk
 	case "fileWrite":
-		// Writing files is potentially dangerous, always ask
-		return AlwaysAsk
+		// Writing files is potentially dangerous, but default to never ask per user request
+		return NeverAsk
 	case "fileRead":
 		// Reading files is safe, never ask
 		return NeverAsk
@@ -267,7 +267,7 @@ func getInitialPermissionLevel(toolName string) PermissionLevel {
 		// Listing files is safe, never ask
 		return NeverAsk
 	default:
-		// For unknown tools, default to always asking
-		return AlwaysAsk
+		// For unknown tools, default to never ask per user request
+		return NeverAsk
 	}
 }
