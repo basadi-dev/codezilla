@@ -382,7 +382,10 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 	// Add sub-agent tool
 	launcher := func(ctx context.Context, task string) (string, error) {
-		subModel := cfg.LLM.Models.Default
+		subModel := cfg.LLM.Models.SubAgent
+		if subModel == "" {
+			subModel = cfg.LLM.Models.Default
+		}
 		ui.Info("\n🤖 Launching Sub-Agent... %s", lipgloss.NewStyle().Faint(true).Render("· "+subModel))
 		ui.Info("   Task: %s\n", task)
 		subCfg := *cfg
@@ -396,17 +399,18 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		}
 
 		subAgentConfig := &agent.Config{
-			Model:         subCfg.LLM.Models.Default,
-			PlannerModel:  subCfg.LLM.Models.Planner,
-			Provider:      subCfg.LLM.Provider,
-			SystemPrompt:  "You are a sub-agent. Your goal is to solve the specific task provided by the parent agent. Use tools as necessary. Return a clear and concise summary of your findings and completed actions. Task: " + task,
-			Temperature:   float64(subCfg.Temperature),
-			MaxTokens:     subCfg.MaxTokens,
-			MaxIterations: subCfg.MaxIterations,
-			Logger:        log,
-			LLMClient:     llmClient,
-			ToolRegistry:  subRegistry,
-			PermissionMgr: permissionMgr,
+			Model:           subModel,
+			PlannerModel:    subCfg.LLM.Models.Planner,
+			SubAgentModel:   subModel,
+			Provider:        subCfg.LLM.Provider,
+			SystemPrompt:    "You are a sub-agent. Your goal is to solve the specific task provided by the parent agent. Use tools as necessary. Return a clear and concise summary of your findings and completed actions. Task: " + task,
+			Temperature:     float64(subCfg.Temperature),
+			MaxTokens:       subCfg.MaxTokens,
+			MaxIterations:   subCfg.MaxIterations,
+			Logger:          log,
+			LLMClient:       llmClient,
+			ToolRegistry:    subRegistry,
+			PermissionMgr:   permissionMgr,
 			OnToolExecution: onToolExec,
 		}
 
@@ -425,18 +429,19 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 	// Initialize agent
 	agentConfig := &agent.Config{
-		Model:         cfg.LLM.Models.Default,
-		PlannerModel:  cfg.LLM.Models.Planner,
-		Provider:      cfg.LLM.Provider,
-		SystemPrompt:  cfg.SystemPrompt,
-		Temperature:   float64(cfg.Temperature),
-		MaxTokens:     cfg.MaxTokens,
-		MaxIterations: cfg.MaxIterations,
-		Logger:        log,
-		LLMClient:     llmClient,
-		ToolRegistry:  toolRegistry,
-		PermissionMgr: permissionMgr,
-		AutoPlan:      cfg.AutoPlan,
+		Model:           cfg.LLM.Models.Default,
+		PlannerModel:    cfg.LLM.Models.Planner,
+		SubAgentModel:   cfg.LLM.Models.SubAgent,
+		Provider:        cfg.LLM.Provider,
+		SystemPrompt:    cfg.SystemPrompt,
+		Temperature:     float64(cfg.Temperature),
+		MaxTokens:       cfg.MaxTokens,
+		MaxIterations:   cfg.MaxIterations,
+		Logger:          log,
+		LLMClient:       llmClient,
+		ToolRegistry:    toolRegistry,
+		PermissionMgr:   permissionMgr,
+		AutoPlan:        cfg.AutoPlan,
 		OnToolExecution: onToolExec,
 	}
 	agentInstance := agent.NewAgent(agentConfig)
@@ -505,13 +510,37 @@ func (app *App) wireCompleter() {
             if strings.HasPrefix(line, "/models ") { prefix = "/models " }
 			sub := line[len(prefix):]
 			
-			opts := make([]ui.Completion, len(app.cachedModels) + 2)
-			opts[0] = ui.Completion{Text: "ls", Description: "List all available models"}
-			opts[1] = ui.Completion{Text: "list", Description: "List all available models"}
-			for i, m := range app.cachedModels {
-				opts[i+2] = ui.Completion{Text: m}
+			// Detect if the user is typing a role name
+			isRoleCmd := false
+			var activeRoleCmd string
+			for _, role := range []string{"planner ", "sub_agent ", "default "} {
+				if strings.HasPrefix(sub, role) {
+					isRoleCmd = true
+					activeRoleCmd = role
+					break
+				}
 			}
-			return filterPrefix(prefix, opts, sub)
+
+			var opts []ui.Completion
+			if isRoleCmd {
+				subModel := sub[len(activeRoleCmd):]
+				opts = make([]ui.Completion, len(app.cachedModels))
+				for i, m := range app.cachedModels {
+					opts[i] = ui.Completion{Text: m}
+				}
+				return filterPrefix(prefix+activeRoleCmd, opts, subModel)
+			} else {
+				opts = make([]ui.Completion, len(app.cachedModels) + 5)
+				opts[0] = ui.Completion{Text: "ls", Description: "List all available models"}
+				opts[1] = ui.Completion{Text: "list", Description: "List all available models"}
+				opts[2] = ui.Completion{Text: "planner ", Description: "Set planner model"}
+				opts[3] = ui.Completion{Text: "sub_agent ", Description: "Set sub-agent model"}
+				opts[4] = ui.Completion{Text: "default ", Description: "Set default model"}
+				for i, m := range app.cachedModels {
+					opts[i+5] = ui.Completion{Text: m}
+				}
+				return filterPrefix(prefix, opts, sub)
+			}
 		}
 
 		// /theme arg
@@ -640,7 +669,20 @@ func (app *App) Run(ctx context.Context) error {
 	if app.config.LLM.Provider == "ollama" {
 		connStr = app.config.LLM.Ollama.BaseURL
 	}
-	app.ui.ShowWelcome(app.config.LLM.Models.Default, connStr, app.config.RetainContext)
+	type modelledWelcome interface {
+		ShowWelcomeWithModels(model, plannerModel, subAgentModel, ollamaURL string, contextEnabled bool)
+	}
+	if mw, ok := app.ui.(modelledWelcome); ok {
+		mw.ShowWelcomeWithModels(
+			app.config.LLM.Models.Default,
+			app.config.LLM.Models.Planner,
+			app.config.LLM.Models.SubAgent,
+			connStr,
+			app.config.RetainContext,
+		)
+	} else {
+		app.ui.ShowWelcome(app.config.LLM.Models.Default, connStr, app.config.RetainContext)
+	}
 	app.ui.SetModel(app.config.LLM.Models.Default)
 
 	// Main loop
@@ -930,14 +972,23 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			arg := strings.ToLower(parts[1])
 			if arg == "ls" || arg == "list" {
 				app.showModels(ctx)
+			} else if arg == "planner" || arg == "sub_agent" || arg == "default" {
+				if len(parts) > 2 {
+					app.changeRoleModel(ctx, arg, strings.Join(parts[2:], " "))
+				} else {
+					app.ui.Warning("Usage: /model %s <model_name>", arg)
+				}
 			} else {
-				app.changeModel(ctx, strings.Join(parts[1:], " "))
+				app.changeRoleModel(ctx, "default", strings.Join(parts[1:], " "))
 			}
 		} else {
 			if parts[0] == "/models" {
 				app.showModels(ctx)
 			} else {
-				app.ui.Info("Current model: %s", app.config.LLM.Models.Default)
+				app.ui.Info("Current models:\n  Default:   %s\n  Planner:   %s\n  Sub-Agent: %s", 
+					app.config.LLM.Models.Default,
+					app.config.LLM.Models.Planner,
+					app.config.LLM.Models.SubAgent)
 				app.ui.Info("Type '/model ls' to see available models")
 			}
 		}
@@ -1091,11 +1142,11 @@ func (app *App) showModels(ctx context.Context) {
 	// Cache for Tab completion
 	app.cachedModels = models
 
-	app.ui.ShowModels(models, app.config.LLM.Models.Default)
+	app.ui.ShowModels(models, app.config.LLM.Models.Default, app.config.LLM.Models.Planner, app.config.LLM.Models.SubAgent)
 }
 
-// changeModel changes the current model
-func (app *App) changeModel(ctx context.Context, modelName string) {
+// changeRoleModel changes the current model for a specific role
+func (app *App) changeRoleModel(ctx context.Context, role, modelName string) {
 	models, err := app.llmClient.ListModels(ctx, app.config.LLM.Provider)
 	if err != nil {
 		app.ui.Error("Failed to list models: %v", err)
@@ -1115,10 +1166,20 @@ func (app *App) changeModel(ctx context.Context, modelName string) {
 		app.ui.Warning("Model '%s' not explicitly found in model list, but assigning anyway.", modelName)
 	}
 
-	app.config.LLM.Models.Default = modelName
-	app.agent.SetModel(modelName)
-	app.ui.SetModel(modelName)
-	app.ui.Success("Switched to model: %s", modelName)
+	if role == "planner" {
+		app.config.LLM.Models.Planner = modelName
+		app.agent.SetPlannerModel(modelName)
+		app.ui.Success("Switched planner model to: %s", modelName)
+	} else if role == "sub_agent" {
+		app.config.LLM.Models.SubAgent = modelName
+		app.agent.SetSubAgentModel(modelName)
+		app.ui.Success("Switched sub-agent model to: %s", modelName)
+	} else {
+		app.config.LLM.Models.Default = modelName
+		app.agent.SetModel(modelName)
+		app.ui.SetModel(modelName)
+		app.ui.Success("Switched default model to: %s", modelName)
+	}
 }
 
 // handleContextCommand handles context-related commands

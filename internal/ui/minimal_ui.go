@@ -130,11 +130,22 @@ func (ui *MinimalUI) ShowHelp() {
 	fmt.Println()
 }
 
-func (ui *MinimalUI) ShowModels(models []string, current string) {
+func (ui *MinimalUI) ShowModels(models []string, current, planner, subAgent string) {
 	fmt.Println("\nModels:")
 	for _, model := range models {
+		var tags []string
 		if model == current {
-			fmt.Printf("  * %s\n", model)
+			tags = append(tags, "default")
+		}
+		if model == planner {
+			tags = append(tags, "planner")
+		}
+		if model == subAgent {
+			tags = append(tags, "sub-agent")
+		}
+		
+		if len(tags) > 0 {
+			fmt.Printf("  * %s (%s)\n", model, strings.Join(tags, ", "))
 		} else {
 			fmt.Printf("    %s\n", model)
 		}

@@ -84,6 +84,7 @@ type AnalyzerSettings struct {
 type LLMModelsConfig struct {
 	Default  string `json:"default" yaml:"default"`
 	Planner  string `json:"planner,omitempty" yaml:"planner,omitempty"`
+	SubAgent string `json:"sub_agent,omitempty" yaml:"sub_agent,omitempty"`
 	Analyzer string `json:"analyzer,omitempty" yaml:"analyzer,omitempty"`
 }
 

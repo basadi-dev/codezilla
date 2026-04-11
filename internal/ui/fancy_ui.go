@@ -124,6 +124,41 @@ func (ui *FancyUI) ShowWelcome(model, ollamaURL string, contextEnabled bool) {
 		ui.theme.StyleYellow.Render("/help"))
 }
 
+// ShowWelcomeWithModels displays an enhanced welcome message including per-role model overrides.
+func (ui *FancyUI) ShowWelcomeWithModels(model, plannerModel, subAgentModel, ollamaURL string, contextEnabled bool) {
+	// Type-writer animation on the welcome text as a whole styled string
+	welcome := "Welcome to Codezilla!"
+	for i := 1; i <= len(welcome); i++ {
+		ui.Print("\r%s", ui.theme.StyleBold.Foreground(lipgloss.Color("#FFD700")).Render(welcome[:i]))
+		time.Sleep(28 * time.Millisecond)
+	}
+	ui.Println("")
+
+	// Status info panel
+	keyStyle := ui.theme.StyleDim.Width(22)
+
+	ui.Print("%s %s\n", keyStyle.Render("  🧠 Model:"), ui.theme.StyleYellow.Render(model))
+	if plannerModel != "" && plannerModel != model {
+		ui.Print("%s %s\n", keyStyle.Render("  📋 Planner:"), ui.theme.StyleYellow.Render(plannerModel))
+	}
+	if subAgentModel != "" && subAgentModel != model {
+		ui.Print("%s %s\n", keyStyle.Render("  🤖 Sub-Agent:"), ui.theme.StyleYellow.Render(subAgentModel))
+	}
+	ui.Print("%s %s\n", keyStyle.Render("  🔌 Provider:"), ui.theme.StyleDim.Render(ollamaURL))
+
+	contextVal := ui.theme.StyleRed.Render("Disabled")
+	if contextEnabled {
+		contextVal = ui.theme.StyleGreen.Render("Enabled ✓")
+	}
+	ui.Print("%s %s\n", keyStyle.Render("  💾 Context:"), contextVal)
+
+	cwd, _ := os.Getwd()
+	ui.Print("%s %s\n", keyStyle.Render("  📁 Directory:"), ui.theme.StyleCyan.Render(cwd))
+
+	ui.Print("\n  Type %s for commands or just start chatting.\n\n",
+		ui.theme.StyleYellow.Render("/help"))
+}
+
 // ShowThinking shows an enhanced thinking animation
 func (ui *FancyUI) ShowThinking() {
 	ui.spinnerMutex.Lock()

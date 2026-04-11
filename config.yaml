@@ -8,8 +8,12 @@ llm:
   provider: "ollama"
 
   models:
+    # Main conversational model
     default: "gpt-oss:20b"
+    # Planner model — used for auto-generating todo plans (falls back to default if unset)
     planner: "glm-5.1"
+    # Sub-agent model — used when spinning up sub-agents for delegated tasks (falls back to default if unset)
+    # sub_agent: "qwen3-coder:8b"
     # Recommended models by provider:
     #   ollama cloud: qwen3-coder:480b, deepseek-v3.2, gpt-oss:120b
     #   ollama local: devstral-small-2:24b, qwen3-coder-next, ministral-3:14b

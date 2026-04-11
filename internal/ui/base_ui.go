@@ -268,14 +268,26 @@ func (ui *BaseUI) ShowHelp() {
 }
 
 // ShowModels displays available models
-func (ui *BaseUI) ShowModels(models []string, current string) {
+func (ui *BaseUI) ShowModels(models []string, current, planner, subAgent string) {
 	ui.Println("\n%s", ui.theme.StyleBold.Render("Available Models:"))
 
 	for _, model := range models {
+		var tags []string
 		if model == current {
+			tags = append(tags, "default")
+		}
+		if model == planner {
+			tags = append(tags, "planner")
+		}
+		if model == subAgent {
+			tags = append(tags, "sub-agent")
+		}
+
+		if len(tags) > 0 {
+			tagStr := strings.Join(tags, ", ")
 			ui.Println("  %s %s",
 				ui.theme.StyleGreen.Render("●"),
-				ui.theme.StyleGreen.Bold(true).Render(model+" (active)"))
+				ui.theme.StyleGreen.Bold(true).Render(model+" ("+tagStr+")"))
 		} else {
 			ui.Println("  %s %s", ui.theme.StyleDim.Render("○"), ui.theme.StyleDim.Render(model))
 		}

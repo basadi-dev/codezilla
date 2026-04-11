@@ -29,6 +29,8 @@ type Agent interface {
 	ClearContext()
 	ClearLastUserMessage()
 	SetModel(model string)
+	SetPlannerModel(model string)
+	SetSubAgentModel(model string)
 	SetTemperature(temperature float64)
 	SetMaxTokens(maxTokens int)
 }
@@ -36,6 +38,7 @@ type Agent interface {
 type Config struct {
 	Model           string
 	PlannerModel    string
+	SubAgentModel   string
 	Provider        string
 	MaxTokens       int
 	MaxIterations   int
@@ -201,6 +204,16 @@ func (a *agent) ClearLastUserMessage() {
 func (a *agent) SetModel(model string) {
 	a.logger.Info("Changing model", "from", a.config.Model, "to", model)
 	a.config.Model = model
+}
+
+func (a *agent) SetPlannerModel(model string) {
+	a.logger.Info("Changing planner model", "from", a.config.PlannerModel, "to", model)
+	a.config.PlannerModel = model
+}
+
+func (a *agent) SetSubAgentModel(model string) {
+	a.logger.Info("Changing sub-agent model", "from", a.config.SubAgentModel, "to", model)
+	a.config.SubAgentModel = model
 }
 
 func (a *agent) SetTemperature(temperature float64) {
