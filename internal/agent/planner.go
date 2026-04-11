@@ -51,7 +51,7 @@ func (a *agent) createAutomaticTodoPlan(ctx context.Context, message string) (st
 
 "%s"
 
-Use the todo_create tool with these exact parameters:
+Use the todoCreate tool with these exact parameters:
 - name: A descriptive name for the plan
 - description: What this plan aims to achieve
 - items: An array of task objects, each with:
@@ -61,7 +61,7 @@ Use the todo_create tool with these exact parameters:
 
 Example format:
 <tool>
-  <name>todo_create</name>
+  <name>todoCreate</name>
   <params>
     <name>Feature Implementation Plan</name>
     <description>Plan for implementing the new user feature</description>
@@ -93,10 +93,10 @@ Example format:
 
 	_, toolCalls := ParseLLMResponse(response, a.logger)
 	for _, tc := range toolCalls {
-		if tc.Function.Name == "todo_create" {
+		if tc.Function.Name == "todoCreate" {
 			var params map[string]interface{}
 			_ = json.Unmarshal([]byte(tc.Function.Arguments), &params)
-			result, err := a.ExecuteTool(ctx, "todo_create", params)
+			result, err := a.ExecuteTool(ctx, "todoCreate", params)
 			if err != nil {
 				return "", err
 			}
@@ -109,7 +109,7 @@ Example format:
 
 // checkAndSuggestNextTodoSteps analyzes current todo progress and suggests next steps
 func (a *agent) checkAndSuggestNextTodoSteps(ctx context.Context) {
-	result, err := a.ExecuteTool(ctx, "todo_analyze", map[string]interface{}{})
+	result, err := a.ExecuteTool(ctx, "todoAnalyze", map[string]interface{}{})
 	if err != nil {
 		a.logger.Error("Failed to analyze todo progress", "error", err)
 		return

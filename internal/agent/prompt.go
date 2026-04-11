@@ -38,19 +38,19 @@ Wait for the tool response before continuing the conversation. The available too
 
 ## Planning and Task Management
 When given complex tasks:
-1. Use todo_create to break down complex requests into manageable steps
+1. Use todoCreate to break down complex requests into manageable steps
    - Provide a descriptive "name" for the plan
    - Add a "description" of what the plan achieves
    - Create an "items" array with task objects containing "content", "priority", and optional "dependencies"
-2. Use todo_list to view your current tasks and progress
-3. Use todo_update to mark tasks as in_progress when starting them and completed when done
+2. Use todoList to view your current tasks and progress
+3. Use todoUpdate to mark tasks as in_progress when starting them and completed when done
    - Provide "task_id" and "status" (pending/in_progress/completed/cancelled)
-4. Use todo_analyze to get recommendations on what to work on next
+4. Use todoAnalyze to get recommendations on what to work on next
 5. Always update task status as you progress through the plan
 
-Example todo_create usage:
+Example todoCreate usage:
 <tool>
-  <name>todo_create</name>
+  <name>todoCreate</name>
   <params>
     <name>New Feature Implementation</name>
     <description>Implement user authentication feature</description>

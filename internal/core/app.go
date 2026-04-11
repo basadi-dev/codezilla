@@ -139,11 +139,10 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 					detail = fp
 				}
 			case "listFiles":
-				if dir, ok := params["directory"].(string); ok {
-					detail = dir
-				} else if dir, ok := params["path"].(string); ok {
-					detail = dir
-				}
+				dir, _ := params["dir"].(string)
+				if dir == "" { dir, _ = params["directory"].(string) }
+				if dir == "" { dir, _ = params["path"].(string) }
+				detail = dir
 			case "execute":
 				if cmd, ok := params["command"].(string); ok {
 					if len(cmd) > 60 {
@@ -160,20 +159,33 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 					detail = u
 				}
 			case "grepSearch":
-				if dp, ok := params["search_path"].(string); ok {
+				dp, ok := params["path"].(string)
+				if !ok {
+					dp, _ = params["search_path"].(string) 
+				}
+				if dp != "" {
 					if q, ok := params["query"].(string); ok {
 						detail = fmt.Sprintf(`"%s" in %s`, q, dp)
 					} else {
 						detail = dp
 					}
 				}
-			case "fileEdit":
-				if fp, ok := params["target_file"].(string); ok {
-					detail = fp
+			case "subAgent":
+				if taskStr, ok := params["task"].(string); ok {
+					detail = taskStr
+					if len(detail) > 40 {
+						detail = detail[:37] + "..."
+					}
 				}
+			case "fileEdit":
+				fp, _ := params["file_path"].(string)
+				if fp == "" { fp, _ = params["target_file"].(string) }
+				detail = fp
 			case "fileManage":
-				op, _ := params["operation"].(string)
-				src, _ := params["source_path"].(string)
+				op, _ := params["action"].(string)
+				if op == "" { op, _ = params["operation"].(string) }
+				src, _ := params["path"].(string)
+				if src == "" { src, _ = params["source_path"].(string) }
 				dst, _ := params["destination_path"].(string)
 				if op != "" {
 					if dst != "" {
@@ -182,11 +194,11 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 						detail = fmt.Sprintf("%s: %s", op, src)
 					}
 				}
-			case "todo_create":
+			case "todoCreate":
 				if name, ok := params["name"].(string); ok {
 					detail = name
 				}
-			case "todo_update":
+			case "todoUpdate":
 				task, _ := params["task_id"].(string)
 				status, _ := params["status"].(string)
 				content, _ := params["content"].(string)
@@ -203,7 +215,16 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 					detail = fmt.Sprintf("%s -> %s", display, status)
 				}
 			case "projectScanAnalyzer":
-				if dir, ok := params["directory"].(string); ok {
+				dir, _ := params["dir"].(string)
+				if dir == "" { dir, _ = params["directory"].(string) }
+				uq, _ := params["userQuery"].(string)
+				if uq != "" {
+					if dir != "" {
+						detail = fmt.Sprintf(`"%s" in %s`, uq, dir)
+					} else {
+						detail = fmt.Sprintf(`"%s"`, uq)
+					}
+				} else {
 					detail = dir
 				}
 			}
@@ -213,10 +234,29 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				desc = tool.Description()
 			}
 
+			displayName := toolName
+			switch toolName {
+			case "fileRead": displayName = "📄 Read File"
+			case "fileWrite": displayName = "📝 Write File"
+			case "listFiles": displayName = "📂 List Files"
+			case "execute": displayName = "💻 Run Command"
+			case "webSearch": displayName = "🌐 Web Search"
+			case "fetchURL": displayName = "📥 Fetch URL"
+			case "grepSearch": displayName = "🔎 Search Code"
+			case "subAgent": displayName = "🤖 Sub-Agent"
+			case "fileEdit": displayName = "✏️ Edit File"
+			case "fileManage": displayName = "🏗️ Manage Files"
+			case "todoCreate": displayName = "📋 Create Task Plan"
+			case "todoUpdate": displayName = "✅ Update Task"
+			case "todoList": displayName = "📃 List Tasks"
+			case "todoAnalyze": displayName = "🧠 Analyze Tasks"
+			case "projectScanAnalyzer": displayName = "🔍 Analyze Project"
+			}
+
 			if detail != "" {
-				ui.Info("🛠  %s (%s)", toolName, detail)
+				ui.Info("🛠  %s (%s)", displayName, detail)
 			} else {
-				ui.Info("🛠  %s", toolName)
+				ui.Info("🛠  %s", displayName)
 			}
 			
 			if desc != "" {

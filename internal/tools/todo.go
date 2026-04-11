@@ -48,7 +48,7 @@ func NewTodoManager() *TodoManager {
 type TodoCreateTool struct{ mgr *TodoManager }
 
 func (t TodoCreateTool) Name() string {
-	return "todo_create"
+	return "todoCreate"
 }
 
 func (t TodoCreateTool) Description() string {
@@ -144,7 +144,7 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 type TodoUpdateTool struct{ mgr *TodoManager }
 
 func (t TodoUpdateTool) Name() string {
-	return "todo_update"
+	return "todoUpdate"
 }
 
 func (t TodoUpdateTool) Description() string {
@@ -208,7 +208,7 @@ func (t TodoUpdateTool) Execute(ctx context.Context, params map[string]interface
 type TodoListTool struct{ mgr *TodoManager }
 
 func (t TodoListTool) Name() string {
-	return "todo_list"
+	return "todoList"
 }
 
 func (t TodoListTool) Description() string {
@@ -330,7 +330,7 @@ func formatPlan(plan *TodoPlan, statusFilter string) string {
 type TodoAnalyzeTool struct{ mgr *TodoManager }
 
 func (t TodoAnalyzeTool) Name() string {
-	return "todo_analyze"
+	return "todoAnalyze"
 }
 
 func (t TodoAnalyzeTool) Description() string {
