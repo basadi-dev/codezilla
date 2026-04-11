@@ -110,10 +110,10 @@ func (t *FileEditTool) Execute(ctx context.Context, params map[string]interface{
 	diffOutput := GenerateDiff(content, newContent, 3)
 
 	// Print the diff directly to stderr for immediate visibility
-	fmt.Fprintf(os.Stderr, "\n==== FILE EDIT DIFF ====\n")
+	fmt.Fprintf(os.Stderr, "\nFILE EDIT DIFF\n")
 	fmt.Fprintf(os.Stderr, "File: %s\n", filePath)
 	fmt.Fprintf(os.Stderr, "%s\n", diffOutput)
-	fmt.Fprintf(os.Stderr, "======================\n\n")
+	fmt.Fprintf(os.Stderr, "\n")
 
 	// Get original file permissions
 	var fileMode os.FileMode = 0644

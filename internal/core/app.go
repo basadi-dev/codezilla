@@ -430,7 +430,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		LLMClient:     llmClient,
 		ToolRegistry:  toolRegistry,
 		PermissionMgr: permissionMgr,
-		AutoPlan:      false, // disabled by default; users can opt-in via config
+		AutoPlan:      cfg.AutoPlan,
 		OnToolExecution: onToolExec,
 	}
 	agentInstance := agent.NewAgent(agentConfig)

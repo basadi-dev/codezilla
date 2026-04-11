@@ -68,15 +68,13 @@ log_silent: false
 retain_context: true
 max_context_chars: 50000
 
+# Auto-planning: automatically create a todo plan for complex multi-step requests
+auto_plan: true
+
 # Safety Configuration
 dangerous_tools_warn: true
 always_ask_permission: false
-tool_permissions:
-    execute: always_ask
-    fileRead: never_ask
-    fileWrite: always_ask
-    listFiles: never_ask
-    projectScanAnalyzer: never_ask
+tool_permissions: {}
 
 # Appearance
 force_color: false

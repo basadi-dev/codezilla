@@ -31,6 +31,9 @@ type Config struct {
 	MaxContextChars int    `json:"max_context_chars" yaml:"max_context_chars"`
 	HistoryFile     string `json:"history_file" yaml:"history_file"`
 
+	// Agent behavior
+	AutoPlan bool `json:"auto_plan" yaml:"auto_plan"`
+
 	// Embedded metasearch settings (no API keys required)
 	Metasearch MetasearchSettings `json:"metasearch" yaml:"metasearch"`
 
@@ -159,6 +162,7 @@ func DefaultConfig() *Config {
 		RetainContext:       true,
 		MaxContextChars:     50000,
 		HistoryFile:         filepath.Join(getConfigDir(), "history"),
+		AutoPlan:            false,
 		DangerousToolsWarn:  true,
 		AlwaysAskPermission: false,
 		ToolPermissions: map[string]string{
