@@ -67,7 +67,8 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	skillRegistry.AutoActivate(cfg.Skills.ActiveSkills)
 
 	// Create permission manager with interactive callback
-	permissionMgr := tools.NewPermissionManager(func(ctx context.Context, request tools.PermissionRequest) (tools.PermissionResponse, error) {
+	var permissionMgr tools.ToolPermissionManager
+	permissionMgr = tools.NewPermissionManager(func(ctx context.Context, request tools.PermissionRequest) (tools.PermissionResponse, error) {
 		// Hide thinking indicator before showing permission request
 		ui.HideThinking()
 
@@ -77,27 +78,30 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		ui.Print("   Description: %s\n", request.Description)
 		ui.Print("\n")
 
-		// Ask for permission with a simple prompt
-		ui.Print("   Allow? (y/n/always): ")
-		// Read response directly without the usual prompt
 		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
-			return tools.PermissionResponse{Granted: false}, fmt.Errorf("failed to read response")
-		}
-		response := scanner.Text()
+		for {
+			// Ask for permission with a simple prompt
+			ui.Print("   Allow? (y/n/always): ")
+			if !scanner.Scan() {
+				return tools.PermissionResponse{Granted: false}, fmt.Errorf("failed to read response")
+			}
+			response := strings.ToLower(strings.TrimSpace(scanner.Text()))
 
-		response = strings.ToLower(strings.TrimSpace(response))
-
-		// Show thinking indicator again after permission
-		ui.ShowThinking()
-
-		switch response {
-		case "y", "yes":
-			return tools.PermissionResponse{Granted: true, RememberMe: false}, nil
-		case "always", "a":
-			return tools.PermissionResponse{Granted: true, RememberMe: true}, nil
-		default:
-			return tools.PermissionResponse{Granted: false, RememberMe: false}, nil
+			if response == "y" || response == "yes" {
+				ui.ShowThinking()
+				return tools.PermissionResponse{Granted: true, RememberMe: false}, nil
+			} else if response == "n" || response == "no" {
+				ui.ShowThinking()
+				return tools.PermissionResponse{Granted: false, RememberMe: false}, nil
+			} else if response == "a" || strings.HasPrefix(response, "always") {
+				ui.ShowThinking()
+				if permissionMgr != nil {
+					permissionMgr.SetDefaultPermissionLevel(request.ToolContext.ToolName, tools.NeverAsk)
+				}
+				return tools.PermissionResponse{Granted: true, RememberMe: true}, nil
+			}
+			
+			ui.Warning("Please answer 'y', 'n', or 'always'")
 		}
 	})
 
