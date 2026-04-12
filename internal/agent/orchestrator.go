@@ -37,6 +37,14 @@ func newLoopDetector(window, maxRepeat int) *loopDetector {
 // record adds a tool call key and returns the loop-detected tool name if a loop
 // is found, or empty string if all is well.
 func (d *loopDetector) record(toolName, argsJSON string) string {
+	// Canonicalize JSON to ignore whitespace or key ordering differences
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &m); err == nil {
+		if canonical, err := json.Marshal(m); err == nil {
+			argsJSON = string(canonical)
+		}
+	}
+
 	h := md5.Sum([]byte(argsJSON)) //nolint:gosec // not crypto use
 	key := fmt.Sprintf("%s:%x", toolName, h)
 
