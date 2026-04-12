@@ -57,6 +57,9 @@ type Config struct {
 	// OnLLMCall is called before each LLM request with the call number (1-based).
 	// Use this to update UI indicators with iteration context.
 	OnLLMCall func(callNum int)
+	// OnToolPreparing is called during streaming when a tool call name is first detected,
+	// before the tool actually executes. Use this to update the spinner with the tool name.
+	OnToolPreparing func(toolName string)
 
 	// Loop detection: stops the run loop if a tool is called with identical args consecutively.
 	// 0 = use defaults (window=10, max_repeat=3).

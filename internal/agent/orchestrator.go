@@ -268,7 +268,11 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				continue
 			}
 
-			fullResp, nativeTools, streamErr := o.tracker.ProcessChannel(ctx, streamCh, errCh, onToken)
+			fullResp, nativeTools, streamErr := o.tracker.ProcessChannel(ctx, streamCh, errCh, onToken, func(toolName string) {
+				if o.agent.config.OnToolPreparing != nil {
+					o.agent.config.OnToolPreparing(toolName)
+				}
+			})
 
 			if streamErr != nil {
 				currentLLMError = streamErr

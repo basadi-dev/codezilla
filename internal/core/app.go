@@ -592,6 +592,42 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			ui.UpdateThinkingStatus(label)
 			ui.RestartThinking()
 		},
+		OnToolPreparing: func(toolName string) {
+			display := toolName
+			switch toolName {
+			case "fileRead":
+				display = "📄 Read File"
+			case "fileWrite":
+				display = "📝 Write File"
+			case "listFiles":
+				display = "📂 List Files"
+			case "execute":
+				display = "💻 Run Command"
+			case "webSearch":
+				display = "🌐 Web Search"
+			case "fetchURL":
+				display = "📥 Fetch URL"
+			case "grepSearch":
+				display = "🔎 Search Code"
+			case "subAgent":
+				display = "🤖 Sub-Agent"
+			case "fileEdit":
+				display = "✏️ Edit File"
+			case "fileManage":
+				display = "🏗️ Manage Files"
+			case "todoCreate":
+				display = "📋 Plan"
+			case "todoUpdate":
+				display = "📋 Update Plan"
+			case "todoList":
+				display = "📃 Tasks"
+			case "todoAnalyze":
+				display = "🧠 Analyze Tasks"
+			case "projectScanAnalyzer":
+				display = "🔍 Analyze Project"
+			}
+			ui.UpdateThinkingStatus(fmt.Sprintf("preparing %s", display))
+		},
 		SessionRecorder: sessionRecord,
 	}
 	agentInstance := agent.NewAgent(agentConfig)

@@ -16,12 +16,15 @@ func NewStreamProcessor(logger *logger.Logger) *StreamProcessor {
 	return &StreamProcessor{logger: logger}
 }
 
-// ProcessChannel reads streams and fires events. It returns the raw concatenated text and/or extracted native tools
+// ProcessChannel reads streams and fires events. It returns the raw concatenated text and/or extracted native tools.
+// onToolPreparing is called the first time each distinct tool name appears in the stream,
+// so the caller can update a spinner/status with what's being invoked.
 func (sp *StreamProcessor) ProcessChannel(
 	ctx context.Context,
 	streamCh <-chan anyllm.ChatCompletionChunk,
 	errCh <-chan error,
 	onTextToken func(string),
+	onToolPreparing func(toolName string),
 ) (string, []anyllm.ToolCall, error) {
 
 	var fullResponse string
@@ -30,6 +33,7 @@ func (sp *StreamProcessor) ProcessChannel(
 	var totalChunks, contentChunks, reasoningChunks int
 	var inReasoning bool
 	var sentFirstTool bool
+	seenToolNames := map[string]bool{}
 
 	// Loop until channels are closed
 	for {
@@ -54,7 +58,9 @@ func (sp *StreamProcessor) ProcessChannel(
 					if delta.Content != "" {
 						contentChunks++
 						fullResponse += delta.Content
-						if onTextToken != nil {
+						// Don't forward content to UI once tool calls have started;
+						// such content is usually LLM preamble noise.
+						if onTextToken != nil && !sentFirstTool {
 							onTextToken(delta.Content)
 						}
 					} else if delta.Reasoning != nil && delta.Reasoning.Content != "" {
@@ -71,11 +77,14 @@ func (sp *StreamProcessor) ProcessChannel(
 							onTextToken(delta.Reasoning.Content)
 						}
 					} else if len(delta.ToolCalls) > 0 {
-						if !sentFirstTool && onTextToken != nil {
-							sentFirstTool = true
-							// Send a synthetic think block so the UI knows streaming started and shows it's working
-							onTextToken("<think>\n🔧 Preparing tool invocation...\n</think>\n")
-							// Note: We deliberately don't add this to fullResponse so it isn't part of the final markdown
+						sentFirstTool = true
+						for _, tc := range delta.ToolCalls {
+							if tc.Function.Name != "" && !seenToolNames[tc.Function.Name] {
+								seenToolNames[tc.Function.Name] = true
+								if onToolPreparing != nil {
+									onToolPreparing(tc.Function.Name)
+								}
+							}
 						}
 						streamedToolCalls = append(streamedToolCalls, delta.ToolCalls...)
 					}
