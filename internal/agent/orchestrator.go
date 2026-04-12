@@ -261,37 +261,30 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				msgs = append([]anyllm.Message{{Role: "system", Content: sysPrompt}}, msgs...)
 			}
 
-			if o.agent.config.OnLLMCall != nil {
-				// Approximate token count: sum content lengths / 4
-				totalChars := 0
-				for _, m := range msgs {
-					if s, ok := m.Content.(string); ok {
-						totalChars += len(s)
-					}
+			var toolNames []string
+			for _, t := range llmTools {
+				toolNames = append(toolNames, t.Function.Name)
+			}
+
+			// Compute context size for logging and session recording
+			ctxChars := 0
+			for _, m := range msgs {
+				if s, ok := m.Content.(string); ok {
+					ctxChars += len(s)
 				}
-				o.agent.config.OnLLMCall(iter, len(msgs), totalChars/4)
+			}
+
+			if o.agent.config.OnLLMCall != nil {
+				o.agent.config.OnLLMCall(iter, len(msgs), ctxChars/4)
 			}
 
 			if o.agent.config.SessionRecorder != nil {
 				o.agent.config.SessionRecorder.Record(session.EventLLMRequest, map[string]interface{}{
 					"provider": o.agent.config.Provider,
 					"model":    o.agent.config.Model,
-					"messages": msgs,
-					"tools":    llmTools,
+					"messages": len(msgs),
+					"~tokens":  ctxChars / 4,
 				})
-			}
-
-			var toolNames []string
-			for _, t := range llmTools {
-				toolNames = append(toolNames, t.Function.Name)
-			}
-
-			// Compute context size for logging
-			ctxChars := 0
-			for _, m := range msgs {
-				if s, ok := m.Content.(string); ok {
-					ctxChars += len(s)
-				}
 			}
 
 			o.logger.Info("LLM request (stream)",

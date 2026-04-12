@@ -351,7 +351,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			ui.Print("\n")
 			ui.ShowThinking()
 			return
-		case "todoUpdate":
+		case "todoManage":
 			theme := ui.GetTheme()
 			statusIcons := map[string]string{
 				"pending":     "○",
@@ -360,9 +360,12 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				"cancelled":   "⊘",
 			}
 
-			if plan := todoMgr.CurrentPlan(); plan != nil {
-				// Re-render the whole list so the user sees live progress
-				ui.Print("\n")
+			// For todoManage, we only want special interactive rendering for "update" actions
+			// other actions (list/analyze) return regular text blocks
+			if action, _ := params["action"].(string); action == "update" {
+				if plan := todoMgr.CurrentPlan(); plan != nil {
+					// Re-render the whole list so the user sees live progress
+					ui.Print("\n")
 				for _, item := range plan.Items {
 					icon := statusIcons[item.Status]
 					var iconStyle lipgloss.Style
@@ -388,10 +391,11 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 					}
 					ui.Print("  %s  %s\n", iconStyle.Render(icon), lineStyle.Render(content))
 				}
+				}
 				ui.Print("\n")
+				ui.ShowThinking()
+				return
 			}
-			ui.ShowThinking()
-			return
 		case "projectScanAnalyzer":
 			dir, _ := params["dir"].(string)
 			if dir == "" {
@@ -412,7 +416,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		// Only show tool description for non-obvious tools (skip todo/file noise)
 		showDesc := true
 		switch toolName {
-		case "todoCreate", "todoUpdate", "todoList", "todoAnalyze",
+		case "todoCreate", "todoManage",
 			"fileRead", "fileWrite", "fileEdit", "fileManage", "listFiles":
 			showDesc = false
 		}
@@ -447,12 +451,18 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			displayName = "🏗️ Manage Files"
 		case "todoCreate":
 			displayName = "📋 Plan"
-		case "todoUpdate":
-			displayName = "" // detail carries full info
-		case "todoList":
-			displayName = "📃 Tasks"
-		case "todoAnalyze":
-			displayName = "🧠 Analyze Tasks"
+		case "todoManage":
+			action, _ := params["action"].(string)
+			switch action {
+			case "update":
+				displayName = "" // detail carries full info
+			case "list":
+				displayName = "📃 Tasks"
+			case "analyze":
+				displayName = "🧠 Analyze Tasks"
+			default:
+				displayName = "📋 Manage Plan"
+			}
 		case "projectScanAnalyzer":
 			displayName = "🔍 Analyze Project"
 		}
@@ -609,12 +619,8 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				display = "🏗️ Manage Files"
 			case "todoCreate":
 				display = "📋 Plan"
-			case "todoUpdate":
-				display = "📋 Update Plan"
-			case "todoList":
-				display = "📃 Tasks"
-			case "todoAnalyze":
-				display = "🧠 Analyze Tasks"
+			case "todoManage":
+				display = "📋 Manage Plan"
 			case "projectScanAnalyzer":
 				display = "🔍 Analyze Project"
 			}
@@ -958,7 +964,10 @@ func (app *App) Run(ctx context.Context) error {
 			// Read input (single-line, Enter submits immediately)
 			input, err := app.ui.ReadLine()
 			if err != nil {
-				app.ui.Info("Goodbye!")
+				app.ui.Info("\n💡 Goodbye!")
+				if sid := app.SessionID(); sid != "" {
+					app.ui.Info("  To resume: codezilla -session %s", sid)
+				}
 				return nil
 			}
 
@@ -1386,6 +1395,9 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 
 	case "/exit", "/quit", "/q":
 		app.ui.Success("Goodbye!")
+		if sid := app.SessionID(); sid != "" {
+			app.ui.Info("  To resume: codezilla -session %s", sid)
+		}
 		return true
 
 	case "/clear", "/c":

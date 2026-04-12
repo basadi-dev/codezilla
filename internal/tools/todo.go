@@ -197,45 +197,59 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 	return result, nil
 }
 
-// TodoUpdateTool updates todo item status
-type TodoUpdateTool struct{ mgr *TodoManager }
+// TodoManageTool combines update, list, analyze, and set_current operations.
+type TodoManageTool struct{ mgr *TodoManager }
 
-func (t TodoUpdateTool) Name() string {
-	return "todoUpdate"
+func (t TodoManageTool) Name() string { return "todoManage" }
+func (t TodoManageTool) Description() string {
+	return "Manage todo plans: update status, list items, analyze, or set active plan"
 }
 
-func (t TodoUpdateTool) Description() string {
-	return "Update the status of todo items"
-}
-
-func (t TodoUpdateTool) ParameterSchema() JSONSchema {
+func (t TodoManageTool) ParameterSchema() JSONSchema {
 	return JSONSchema{
 		Type: "object",
 		Properties: map[string]JSONSchema{
-			"plan_id":   {Type: "string", Description: "Plan ID (optional, uses current plan if not specified)"},
-			"task_id":   {Type: "string", Description: "Task ID to update"},
-			"status":    {Type: "string", Enum: []interface{}{"pending", "in_progress", "completed", "cancelled"}},
-			"task_name": {Type: "string", Description: "The name of the task, for displaying in the terminal. Does NOT rename the task."},
-			"content":   {Type: "string", Description: "Updated task content (optional)"},
+			"action":        {Type: "string", Description: "Action to perform", Enum: []interface{}{"update", "list", "analyze", "set_current"}},
+			"plan_id":       {Type: "string", Description: "Plan ID (optional, uses current plan)"},
+			"task_id":       {Type: "string", Description: "Task ID to update (for action=update)"},
+			"status":        {Type: "string", Description: "New status (for action=update)", Enum: []interface{}{"pending", "in_progress", "completed", "cancelled"}},
+			"task_name":     {Type: "string", Description: "Task name for display (for action=update)"},
+			"content":       {Type: "string", Description: "Updated task content (optional, for action=update)"},
+			"status_filter": {Type: "string", Description: "Filter by status (for action=list)", Enum: []interface{}{"all", "pending", "in_progress", "completed", "cancelled"}},
 		},
-		Required: []string{"task_id", "status", "task_name"},
+		Required: []string{"action"},
 	}
 }
 
-func (t TodoUpdateTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+func (t TodoManageTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+	action, _ := params["action"].(string)
+	switch action {
+	case "update":
+		return t.execUpdate(params)
+	case "list":
+		return t.execList(params)
+	case "analyze":
+		return t.execAnalyze(params)
+	case "set_current":
+		return t.execSetCurrent(params)
+	default:
+		return nil, fmt.Errorf("unknown action: %s (valid: update, list, analyze, set_current)", action)
+	}
+}
+
+func (t TodoManageTool) execUpdate(params map[string]interface{}) (interface{}, error) {
 	taskID, _ := params["task_id"].(string)
 	status, _ := params["status"].(string)
 
-	globalTodoManager := t.mgr
-	globalTodoManager.mu.Lock()
-	defer globalTodoManager.mu.Unlock()
+	t.mgr.mu.Lock()
+	defer t.mgr.mu.Unlock()
 
-	planID := globalTodoManager.currentPlanID
+	planID := t.mgr.currentPlanID
 	if pid, ok := params["plan_id"].(string); ok {
 		planID = pid
 	}
 
-	plan, exists := globalTodoManager.plans[planID]
+	plan, exists := t.mgr.plans[planID]
 	if !exists {
 		return "", fmt.Errorf("plan not found: %s", planID)
 	}
@@ -272,31 +286,9 @@ func (t TodoUpdateTool) Execute(ctx context.Context, params map[string]interface
 	return "", fmt.Errorf("task not found: %s", taskID)
 }
 
-// TodoListTool lists current todo plans and items
-type TodoListTool struct{ mgr *TodoManager }
-
-func (t TodoListTool) Name() string {
-	return "todoList"
-}
-
-func (t TodoListTool) Description() string {
-	return "List todo plans and their items"
-}
-
-func (t TodoListTool) ParameterSchema() JSONSchema {
-	return JSONSchema{
-		Type: "object",
-		Properties: map[string]JSONSchema{
-			"plan_id":       {Type: "string", Description: "Specific plan ID to list (optional)"},
-			"status_filter": {Type: "string", Enum: []interface{}{"all", "pending", "in_progress", "completed", "cancelled"}, Default: "all"},
-		},
-	}
-}
-
-func (t TodoListTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-	globalTodoManager := t.mgr
-	globalTodoManager.mu.RLock()
-	defer globalTodoManager.mu.RUnlock()
+func (t TodoManageTool) execList(params map[string]interface{}) (interface{}, error) {
+	t.mgr.mu.RLock()
+	defer t.mgr.mu.RUnlock()
 
 	statusFilter := "all"
 	if filter, ok := params["status_filter"].(string); ok {
@@ -306,20 +298,18 @@ func (t TodoListTool) Execute(ctx context.Context, params map[string]interface{}
 	var output string
 
 	if planID, ok := params["plan_id"].(string); ok {
-		// List specific plan
-		plan, exists := globalTodoManager.plans[planID]
+		plan, exists := t.mgr.plans[planID]
 		if !exists {
 			return "", fmt.Errorf("plan not found: %s", planID)
 		}
 		output = formatPlan(plan, statusFilter)
 	} else {
-		// List all plans
-		if len(globalTodoManager.plans) == 0 {
+		if len(t.mgr.plans) == 0 {
 			return "No todo plans created yet.", nil
 		}
 
 		output = "# Todo Plans\n\n"
-		for _, plan := range globalTodoManager.plans {
+		for _, plan := range t.mgr.plans {
 			output += formatPlan(plan, statusFilter) + "\n---\n\n"
 		}
 	}
@@ -381,37 +371,16 @@ func formatPlan(plan *TodoPlan, statusFilter string) string {
 	return output
 }
 
-// TodoAnalyzeTool analyzes the current plan and suggests next actions
-type TodoAnalyzeTool struct{ mgr *TodoManager }
+func (t TodoManageTool) execAnalyze(params map[string]interface{}) (interface{}, error) {
+	t.mgr.mu.RLock()
+	defer t.mgr.mu.RUnlock()
 
-func (t TodoAnalyzeTool) Name() string {
-	return "todoAnalyze"
-}
-
-func (t TodoAnalyzeTool) Description() string {
-	return "Analyze todo plan and suggest next actions based on dependencies and priorities"
-}
-
-func (t TodoAnalyzeTool) ParameterSchema() JSONSchema {
-	return JSONSchema{
-		Type: "object",
-		Properties: map[string]JSONSchema{
-			"plan_id": {Type: "string", Description: "Plan ID to analyze (optional, uses current plan)"},
-		},
-	}
-}
-
-func (t TodoAnalyzeTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-	globalTodoManager := t.mgr
-	globalTodoManager.mu.RLock()
-	defer globalTodoManager.mu.RUnlock()
-
-	planID := globalTodoManager.currentPlanID
+	planID := t.mgr.currentPlanID
 	if pid, ok := params["plan_id"].(string); ok {
 		planID = pid
 	}
 
-	plan, exists := globalTodoManager.plans[planID]
+	plan, exists := t.mgr.plans[planID]
 	if !exists {
 		return "", fmt.Errorf("plan not found: %s", planID)
 	}
@@ -482,13 +451,11 @@ func (t TodoAnalyzeTool) Execute(ctx context.Context, params map[string]interfac
 	}
 
 	if len(actionable) > 0 {
-		output += "## ✅ Ready to Start\n"
-		output += "These tasks have no blocking dependencies:\n\n"
+		output += "## ✅ Ready to Start\nThese tasks have no blocking dependencies:\n\n"
 		for _, item := range actionable {
 			priorityIcon := map[string]string{"high": "🔴", "medium": "🟡", "low": "🟢"}[item.Priority]
 			output += fmt.Sprintf("- %s %s (ID: %s)\n", priorityIcon, item.Content, item.ID)
 
-			// Show what tasks this will unlock
 			if deps := depMap[item.ID]; len(deps) > 0 {
 				output += "  Completing this will unlock:\n"
 				for _, depID := range deps {
@@ -521,7 +488,7 @@ func (t TodoAnalyzeTool) Execute(ctx context.Context, params map[string]interfac
 		output += "1. Focus on completing the in-progress tasks first\n"
 	}
 	if len(actionable) > 0 {
-		if len(actionable) > 0 && actionable[0].Priority == "high" {
+		if actionable[0].Priority == "high" {
 			output += fmt.Sprintf("2. Start with high-priority task: %s (ID: %s)\n",
 				actionable[0].Content, actionable[0].ID)
 		} else {
@@ -536,30 +503,14 @@ func (t TodoAnalyzeTool) Execute(ctx context.Context, params map[string]interfac
 	return output, nil
 }
 
-type TodoSetCurrentTool struct{ mgr *TodoManager }
-
-func (t TodoSetCurrentTool) Name() string { return "todoSetCurrent" }
-func (t TodoSetCurrentTool) Description() string {
-	return "Set an existing todo plan as the current active plan"
-}
-func (t TodoSetCurrentTool) ParameterSchema() JSONSchema {
-	return JSONSchema{
-		Type: "object",
-		Properties: map[string]JSONSchema{
-			"plan_id": {Type: "string", Description: "ID of the plan to set as current"},
-		},
-		Required: []string{"plan_id"},
-	}
-}
-func (t TodoSetCurrentTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+func (t TodoManageTool) execSetCurrent(params map[string]interface{}) (interface{}, error) {
 	planID, _ := params["plan_id"].(string)
-	globalTodoManager := t.mgr
-	globalTodoManager.mu.Lock()
-	defer globalTodoManager.mu.Unlock()
-	if _, ok := globalTodoManager.plans[planID]; !ok {
+	t.mgr.mu.Lock()
+	defer t.mgr.mu.Unlock()
+	if _, ok := t.mgr.plans[planID]; !ok {
 		return "", fmt.Errorf("plan not found: %s", planID)
 	}
-	globalTodoManager.currentPlanID = planID
+	t.mgr.currentPlanID = planID
 	return fmt.Sprintf("Current plan set to %s", planID), nil
 }
 
@@ -567,9 +518,6 @@ func (t TodoSetCurrentTool) Execute(ctx context.Context, params map[string]inter
 func GetTodoTools(mgr *TodoManager) []Tool {
 	return []Tool{
 		TodoCreateTool{mgr: mgr},
-		TodoUpdateTool{mgr: mgr},
-		TodoListTool{mgr: mgr},
-		TodoAnalyzeTool{mgr: mgr},
-		TodoSetCurrentTool{mgr: mgr},
+		TodoManageTool{mgr: mgr},
 	}
 }
