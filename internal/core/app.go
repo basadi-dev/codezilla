@@ -771,14 +771,15 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		var streamingStarted bool
 		var thinkBuffer string
 		var inThink bool
-		var generatingIndicatorShown bool
 		var thinkStyle = app.ui.GetTheme().StyleDim.Italic(true)
 		
 		var (
-			thinkLinesPrinted int
-			thinkCharsPrinted int
-			currentLineLen    int
-			consoleWidth      int
+			thinkLinesPrinted    int
+			thinkCharsPrinted    int
+			markdownLinesPrinted int
+			markdownCharsPrinted int
+			currentLineLen       int
+			consoleWidth         int
 		)
 		consoleWidth, _, _ = term.GetSize(int(os.Stdout.Fd()))
 		if consoleWidth <= 0 {
@@ -797,6 +798,23 @@ func (app *App) processInput(ctx context.Context, input string) error {
 					currentLineLen++
 					if currentLineLen >= consoleWidth {
 						thinkLinesPrinted++
+						currentLineLen = 0
+					}
+				}
+			}
+		}
+
+		printMarkdown := func(s string) {
+			app.ui.Print("%s", s)
+			markdownCharsPrinted += len(s)
+			for _, r := range s {
+				if r == '\n' {
+					markdownLinesPrinted++
+					currentLineLen = 0
+				} else {
+					currentLineLen++
+					if currentLineLen >= consoleWidth {
+						markdownLinesPrinted++
 						currentLineLen = 0
 					}
 				}
@@ -853,10 +871,8 @@ func (app *App) processInput(ctx context.Context, input string) error {
 							app.ui.Print("\n\n")
 						}
 
-						// Show spinner for markdown generation
-						app.ui.UpdateThinkingStatus("Generating Markdown...")
-						app.ui.ShowThinking()
-						generatingIndicatorShown = true
+						// Ensure spinner is hidden while markdown streams
+						app.ui.HideThinking()
 
 						// Keep remainder
 						thinkBuffer = thinkBuffer[idx+len("</think>"):]
@@ -870,14 +886,10 @@ func (app *App) processInput(ctx context.Context, input string) error {
 					}
 				} else {
 					// Outside think block, safe to flush buffer if we leave enough for "<think>"
-					// We don't print the non-think text here so we only show the final rendered markdown later.
 					if len(thinkBuffer) > 8 {
-						if !generatingIndicatorShown {
-							generatingIndicatorShown = true
-							app.ui.UpdateThinkingStatus("Generating Markdown...")
-							app.ui.ShowThinking()
-						}
+						app.ui.HideThinking() // ensure no spinner hides text
 						safeLen := len(thinkBuffer) - 8
+						printMarkdown(thinkBuffer[:safeLen])
 						thinkBuffer = thinkBuffer[safeLen:]
 					}
 				}
@@ -886,8 +898,10 @@ func (app *App) processInput(ctx context.Context, input string) error {
 			// Flush any remaining buffer
 			if thinkBuffer != "" {
 				if inThink {
-					app.ui.Print("%s", thinkStyle.Render(thinkBuffer))
+					printThink(thinkBuffer)
 					app.ui.Print("\n\n")
+				} else {
+					printMarkdown(thinkBuffer)
 				}
 			}
 
@@ -907,9 +921,10 @@ func (app *App) processInput(ctx context.Context, input string) error {
 			// Add a clear separator if we streamed raw text, then render the
 			// full final response with Glamour for proper markdown formatting.
 			if streamingStarted {
-				app.ui.Print("\n")
-				separator := lipgloss.NewStyle().Foreground(lipgloss.Color("#8be9fd")).Italic(true).Render("✨ Final Rendered Markdown:")
-				app.ui.Print("%s\n", separator)
+				// Wipe the raw markdown stream, so Glamour can clean replace it without duplicate text.
+				if markdownLinesPrinted > 0 {
+					app.ui.Print("\033[%dA\033[0J", markdownLinesPrinted)
+				}
 			} else {
 				// Non-streaming path: render full response normally.
 				modelLabel := app.config.LLM.Models.Default
