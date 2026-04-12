@@ -72,7 +72,7 @@ log_silent: false
 
 retain_context: true
 max_context_chars: 50000
-session_events_dir: "sessions"
+session_events_dir: "logs/sessions"
 
 # Auto-planning: automatically create a todo plan for complex multi-step requests
 auto_plan: true

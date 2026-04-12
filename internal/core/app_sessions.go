@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"codezilla/internal/session"
+	"codezilla/internal/ui"
 	"github.com/charmbracelet/lipgloss"
 )
 
 func (app *App) handleSessionCommand(ctx context.Context, parts []string) {
 	if len(parts) < 2 {
-		app.ui.Warning("Usage: /session [ls | play <filename>]")
+		app.listSessions()
 		return
 	}
 	sub := strings.ToLower(parts[1])
@@ -165,4 +166,34 @@ func (app *App) playSessionCtx(ctx context.Context, sessionID string) {
 		}
 	}
 	app.ui.Success("\n\n--- Playback finished.")
+}
+
+// sessionCompletions returns a list of completion candidates for active session files
+func (app *App) sessionCompletions() []ui.Completion {
+	dir := app.config.SessionEventsDir
+	if dir == "" {
+		return nil
+	}
+	
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var opts []ui.Completion
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+			continue
+		}
+		opts = append(opts, ui.Completion{
+			Text: f.Name(),
+		})
+	}
+	
+	// Better to sort them descending (newest first) but since file string is date we can just sort descending
+	sort.Slice(opts, func(i, j int) bool {
+		return opts[i].Text > opts[j].Text
+	})
+	
+	return opts
 }

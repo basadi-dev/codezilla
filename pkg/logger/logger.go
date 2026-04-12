@@ -1,11 +1,12 @@
 package logger
 
 import (
-	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Logger wraps slog.Logger with additional functionality
@@ -105,18 +106,20 @@ func (l *Logger) Debug(msg string, args ...any) {
 	l.slogger.Debug(msg, args...)
 }
 
-// DumpJSON explicitly writes a nicely indented JSON block bypassing structural single-line quoting
-func (l *Logger) DumpJSON(msg string, data any) {
+// DumpPretty explicitly writes a nicely indented block using YAML for human readability bypassing structural single-line quoting
+func (l *Logger) DumpPretty(msg string, data any) {
 	if l.level > slog.LevelDebug {
 		return
 	}
 	l.slogger.Debug(msg)
-	b, err := json.MarshalIndent(data, "", "  ")
+	b, err := yaml.Marshal(data)
 	if err == nil {
+		out := append([]byte("\n--- "+msg+" ---\n"), b...)
+		out = append(out, '\n')
 		if l.file != nil {
-			_, _ = l.file.Write(append(b, '\n'))
+			_, _ = l.file.Write(out)
 		} else if l.writer != nil && !l.silent {
-			_, _ = l.writer.Write(append(b, '\n'))
+			_, _ = l.writer.Write(out)
 		}
 	}
 }

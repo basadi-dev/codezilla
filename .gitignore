@@ -23,6 +23,7 @@ go.work
 # Log files
 logs/*.log
 *.log
+logs/sessions/
 
 # OS specific files
 .DS_Store

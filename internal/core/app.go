@@ -5,12 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/term"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 
 	"codezilla/internal/agent"
 	"codezilla/internal/config"
@@ -580,6 +581,7 @@ func (app *App) wireCompleter() {
 		{Primary: "/theme ", Desc: "Change UI color theme [tokyonight|dracula|catppuccin]"},
 		{Primary: "/tools", Desc: "Show available tools"},
 		{Primary: "/skill ", Desc: "Manage skills"},
+		{Primary: "/session ", Desc: "Manage sessions [ls|play <id>]"},
 		{Primary: "/reset", Desc: "Reset conversation"},
 		{Primary: "/save ", Desc: "Save conversation to JSON file"},
 		{Primary: "/load ", Desc: "Load conversation from JSON file"},
@@ -684,6 +686,31 @@ func (app *App) wireCompleter() {
 			}
 			opts = append(opts, app.skillCompletions(false)...)
 			return filterPrefix(skillPrefix, opts, sub)
+		}
+
+		// /session <sub> or /sessions <sub>
+		sessionPrefix := ""
+		if strings.HasPrefix(line, "/session ") {
+			sessionPrefix = "/session "
+		} else if strings.HasPrefix(line, "/sessions ") {
+			sessionPrefix = "/sessions "
+		}
+		if sessionPrefix != "" {
+			sub := line[len(sessionPrefix):]
+			
+			// /session play <name>
+			if strings.HasPrefix(sub, "play ") {
+				name := sub[len("play "):]
+				return filterPrefix(sessionPrefix+"play ", app.sessionCompletions(), name)
+			}
+			
+			opts := []ui.Completion{
+				{Text: "ls", Description: "List all available sessions"},
+				{Text: "list", Description: "List all available sessions"},
+				{Text: "play ", Description: "Replay a session file"},
+				{Text: "replay ", Description: "Replay a session file"},
+			}
+			return filterPrefix(sessionPrefix, opts, sub)
 		}
 
 		// Top-level — match static commands by prefix

@@ -162,10 +162,15 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				})
 			}
 
-			o.logger.DumpJSON("Sending LLM Request (Prompting)", map[string]any{
+			var toolNames []string
+			for _, t := range llmTools {
+				toolNames = append(toolNames, t.Function.Name)
+			}
+
+			o.logger.DumpPretty("Sending LLM Request (Prompting)", map[string]any{
 				"provider": o.agent.config.Provider,
 				"model":    o.agent.config.Model,
-				"tools":    llmTools,
+				"tools":    toolNames,
 			})
 
 			completion, err := o.agent.generateCompletion(ctx, "", llmTools)
@@ -205,6 +210,11 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					onToken(text)
 				}
 
+				o.logger.DumpPretty("Received LLM Response (Prompting)", map[string]any{
+					"content":     finalResponse,
+					"tools_count": len(msg.ToolCalls),
+				})
+
 				if len(msg.ToolCalls) > 0 {
 					toolsToExecute = msg.ToolCalls
 					state = StateExecutingTools
@@ -237,11 +247,16 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				})
 			}
 
-			o.logger.DumpJSON("Sending LLM Request (Streaming)", map[string]any{
+			var toolNames []string
+			for _, t := range llmTools {
+				toolNames = append(toolNames, t.Function.Name)
+			}
+
+			o.logger.DumpPretty("Sending LLM Request (Streaming)", map[string]any{
 				"provider": o.agent.config.Provider,
 				"model":    o.agent.config.Model,
 				"messages": msgs,
-				"tools":    llmTools,
+				"tools":    toolNames,
 			})
 
 			streamCh, errCh, err := o.agent.llmClient.Stream(ctx, o.agent.config.Provider, o.agent.config.Model, msgs, o.agent.config.Temperature, llmTools)
@@ -281,6 +296,11 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					}
 				}
 			}
+
+			o.logger.DumpPretty("Received LLM Response (Streaming)", map[string]any{
+				"content":            finalResponse,
+				"native_tools_count": len(nativeTools),
+			})
 
 			if len(nativeTools) > 0 {
 				toolsToExecute = nativeTools
