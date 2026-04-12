@@ -178,6 +178,9 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	// analyzer's progress reporter can call ui.HideThinking / ui.ShowThinking
 	// and avoid interleaving with the spinner.
 
+	// lastToolSummary is read by OnLLMCall to show what the agent just did.
+	var lastToolSummary string
+
 	onToolExec := func(toolName string, params map[string]interface{}) {
 		// Record tool start in session log
 		if sessionRecord != nil {
@@ -483,6 +486,21 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			ui.Info("   ↳ %s", ui.GetTheme().StyleDim.Render(desc))
 		}
 
+		// Track a short summary for the spinner status (include detail for context)
+		name := displayName
+		if name == "" {
+			name = toolName
+		}
+		if detail != "" {
+			short := detail
+			if len(short) > 40 {
+				short = short[:37] + "..."
+			}
+			lastToolSummary = name + ": " + short
+		} else {
+			lastToolSummary = name
+		}
+
 		// Resume spinner after printing
 		ui.ShowThinking()
 	}
@@ -563,7 +581,15 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		LoopDetectMaxRepeat:    cfg.LoopDetectMaxRepeat,
 		ThinkCompressThreshold: cfg.ThinkCompressThreshold,
 		OnLLMCall: func(callNum int) {
-			ui.UpdateThinkingStatus(fmt.Sprintf("LLM call #%d", callNum))
+			var label string
+			if callNum == 1 {
+				label = "LLM call #1"
+			} else if lastToolSummary != "" {
+				label = fmt.Sprintf("LLM call #%d · after %s", callNum, lastToolSummary)
+			} else {
+				label = fmt.Sprintf("LLM call #%d", callNum)
+			}
+			ui.UpdateThinkingStatus(label)
 			ui.RestartThinking()
 		},
 		SessionRecorder: sessionRecord,
