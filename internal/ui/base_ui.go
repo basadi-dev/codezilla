@@ -14,13 +14,14 @@ import (
 
 // BaseUI implements the UI interface with a base interface
 type BaseUI struct {
-	theme        Theme
-	reader       *FixedInput
-	writer       *bufio.Writer
-	spinnerStop  chan bool
-	spinnerMutex sync.Mutex
-	width        int
-	currentModel string
+	theme          Theme
+	reader         *FixedInput
+	writer         *bufio.Writer
+	spinnerStop    chan bool
+	spinnerMutex   sync.Mutex
+	spinnerStatus  string // updated via UpdateThinkingStatus
+	width          int
+	currentModel   string
 }
 
 // NewBaseUI creates a new base UI
@@ -174,6 +175,14 @@ func (ui *BaseUI) ShowThinking() {
 			}
 		}
 	}()
+}
+
+// UpdateThinkingStatus updates the label shown in the active spinner.
+// BaseUI no-op; FancyUI overrides.
+func (ui *BaseUI) UpdateThinkingStatus(label string) {
+	ui.spinnerMutex.Lock()
+	ui.spinnerStatus = label
+	ui.spinnerMutex.Unlock()
 }
 
 // HideThinking hides the thinking indicator

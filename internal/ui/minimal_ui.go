@@ -89,6 +89,10 @@ func (ui *MinimalUI) HideThinking() {
 	fmt.Print("\r            \r")
 }
 
+func (ui *MinimalUI) UpdateThinkingStatus(_ string) {
+	// no-op for minimal UI
+}
+
 func (ui *MinimalUI) ShowResponse(response string) {
 	if ui.currentModel != "" {
 		fmt.Printf("\nAssistant [%s]:\n", ui.currentModel)

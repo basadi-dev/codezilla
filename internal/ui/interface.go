@@ -55,6 +55,9 @@ type UI interface {
 	// Formatted output
 	ShowThinking()
 	HideThinking()
+	// UpdateThinkingStatus updates the label shown in the active spinner without
+	// stopping it. No-op if the spinner is not running.
+	UpdateThinkingStatus(label string)
 	ShowResponse(response string)
 	ShowResponseStream(ch <-chan string)
 	ShowCode(language, code string)

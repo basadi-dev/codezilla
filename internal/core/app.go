@@ -404,21 +404,23 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		}
 
 		subAgentConfig := &agent.Config{
-			Model:               subModel,
-			PlannerModel:        subCfg.LLM.Models.Planner,
-			SubAgentModel:       subModel,
-			Provider:            subCfg.LLM.Provider,
-			SystemPrompt:        "You are a sub-agent. Your goal is to solve the specific task provided by the parent agent. Use tools as necessary. Return a clear and concise summary of your findings and completed actions. Task: " + task,
-			Temperature:         float64(subCfg.Temperature),
-			MaxTokens:           subCfg.MaxTokens,
-			MaxIterations:       subCfg.MaxIterations,
-			Logger:              log,
-			LLMClient:           llmClient,
-			ToolRegistry:        subRegistry,
-			PermissionMgr:       permissionMgr,
-			OnToolExecution:     onToolExec,
-			LoopDetectWindow:    subCfg.LoopDetectWindow,
-			LoopDetectMaxRepeat: subCfg.LoopDetectMaxRepeat,
+			Model:                  subModel,
+			PlannerModel:           subCfg.LLM.Models.Planner,
+			SubAgentModel:          subModel,
+			SummariserModel:        subCfg.LLM.Models.Summariser,
+			Provider:               subCfg.LLM.Provider,
+			SystemPrompt:           "You are a sub-agent. Your goal is to solve the specific task provided by the parent agent. Use tools as necessary. Return a clear and concise summary of your findings and completed actions. Task: " + task,
+			Temperature:            float64(subCfg.Temperature),
+			MaxTokens:              subCfg.MaxTokens,
+			MaxIterations:          subCfg.MaxIterations,
+			Logger:                 log,
+			LLMClient:              llmClient,
+			ToolRegistry:           subRegistry,
+			PermissionMgr:          permissionMgr,
+			OnToolExecution:        onToolExec,
+			LoopDetectWindow:       subCfg.LoopDetectWindow,
+			LoopDetectMaxRepeat:    subCfg.LoopDetectMaxRepeat,
+			ThinkCompressThreshold: subCfg.ThinkCompressThreshold,
 		}
 
 		subAgent := agent.NewAgent(subAgentConfig)
@@ -436,22 +438,27 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 	// Initialize agent
 	agentConfig := &agent.Config{
-		Model:               cfg.LLM.Models.Default,
-		PlannerModel:        cfg.LLM.Models.Planner,
-		SubAgentModel:       cfg.LLM.Models.SubAgent,
-		Provider:            cfg.LLM.Provider,
-		SystemPrompt:        cfg.SystemPrompt,
-		Temperature:         float64(cfg.Temperature),
-		MaxTokens:           cfg.MaxTokens,
-		MaxIterations:       cfg.MaxIterations,
-		Logger:              log,
-		LLMClient:           llmClient,
-		ToolRegistry:        toolRegistry,
-		PermissionMgr:       permissionMgr,
-		AutoPlan:            cfg.AutoPlan,
-		OnToolExecution:     onToolExec,
-		LoopDetectWindow:    cfg.LoopDetectWindow,
-		LoopDetectMaxRepeat: cfg.LoopDetectMaxRepeat,
+		Model:                  cfg.LLM.Models.Default,
+		PlannerModel:           cfg.LLM.Models.Planner,
+		SubAgentModel:          cfg.LLM.Models.SubAgent,
+		SummariserModel:        cfg.LLM.Models.Summariser,
+		Provider:               cfg.LLM.Provider,
+		SystemPrompt:           cfg.SystemPrompt,
+		Temperature:            float64(cfg.Temperature),
+		MaxTokens:              cfg.MaxTokens,
+		MaxIterations:          cfg.MaxIterations,
+		Logger:                 log,
+		LLMClient:              llmClient,
+		ToolRegistry:           toolRegistry,
+		PermissionMgr:          permissionMgr,
+		AutoPlan:               cfg.AutoPlan,
+		OnToolExecution:        onToolExec,
+		LoopDetectWindow:       cfg.LoopDetectWindow,
+		LoopDetectMaxRepeat:    cfg.LoopDetectMaxRepeat,
+		ThinkCompressThreshold: cfg.ThinkCompressThreshold,
+		OnLLMCall: func(callNum int) {
+			ui.UpdateThinkingStatus(fmt.Sprintf("LLM call #%d", callNum))
+		},
 	}
 	agentInstance := agent.NewAgent(agentConfig)
 
@@ -522,7 +529,7 @@ func (app *App) wireCompleter() {
 			// Detect if the user is typing a role name
 			isRoleCmd := false
 			var activeRoleCmd string
-			for _, role := range []string{"planner ", "sub_agent ", "default "} {
+			for _, role := range []string{"planner ", "sub_agent ", "summariser ", "default "} {
 				if strings.HasPrefix(sub, role) {
 					isRoleCmd = true
 					activeRoleCmd = role
@@ -539,14 +546,15 @@ func (app *App) wireCompleter() {
 				}
 				return filterPrefix(prefix+activeRoleCmd, opts, subModel)
 			} else {
-				opts = make([]ui.Completion, len(app.cachedModels) + 5)
+				opts = make([]ui.Completion, len(app.cachedModels) + 6)
 				opts[0] = ui.Completion{Text: "ls", Description: "List all available models"}
 				opts[1] = ui.Completion{Text: "list", Description: "List all available models"}
 				opts[2] = ui.Completion{Text: "planner ", Description: "Set planner model"}
 				opts[3] = ui.Completion{Text: "sub_agent ", Description: "Set sub-agent model"}
-				opts[4] = ui.Completion{Text: "default ", Description: "Set default model"}
+				opts[4] = ui.Completion{Text: "summariser ", Description: "Set summariser model"}
+				opts[5] = ui.Completion{Text: "default ", Description: "Set default model"}
 				for i, m := range app.cachedModels {
-					opts[i+5] = ui.Completion{Text: m}
+					opts[i+6] = ui.Completion{Text: m}
 				}
 				return filterPrefix(prefix, opts, sub)
 			}
@@ -739,7 +747,9 @@ func (app *App) Run(ctx context.Context) error {
 // processInput processes user input with the AI using streaming.
 func (app *App) processInput(ctx context.Context, input string) error {
 	for {
-		// Show thinking indicator while the connection is being established
+		// Show thinking indicator while the connection is being established.
+		// Clear any previous status label from the last turn.
+		app.ui.UpdateThinkingStatus("")
 		app.ui.ShowThinking()
 
 		// If context retention is disabled, clear previous conversation
@@ -755,25 +765,118 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		// Inject active skill instructions into agent system prompt
 		app.updateAgentSystemPrompt()
 
+		var streamingStarted bool
+		var thinkBuffer string
+		var inThink bool
+		var generatingIndicatorShown bool
+		var thinkStyle = app.ui.GetTheme().StyleDim.Italic(true)
+
 		go func() {
 			defer close(done)
 
 			fr, err := app.agent.ProcessMessageStream(ctx, input, func(token string) {
-				// We consume the stream but do not display it since we require the
-				// full response to render markdown efficiently with glamour.
+				if token == "" {
+					return
+				}
+				if !streamingStarted {
+					streamingStarted = true
+					// Hide spinner and print the response header before first token.
+					app.ui.HideThinking()
+					modelLabel := app.config.LLM.Models.Default
+					app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
+					app.ui.Println("\n%s", app.ui.GetTheme().StyleGreen.Render("🤖 Assistant:"))
+					app.ui.Print("\n")
+				}
+
+				// Small state machine to strip/replace <think> tags dynamically
+				thinkBuffer += token
+
+				if !inThink {
+					if idx := strings.Index(thinkBuffer, "<think>"); idx != -1 {
+						// Enable think style
+						inThink = true
+						app.ui.HideThinking() // Ensure spinner is OFF when streaming thoughts
+						app.ui.Print("\n%s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Italic(true).Render("🤔 Thinking..."))
+						
+						// Keep remainder
+						thinkBuffer = thinkBuffer[idx+len("<think>"):]
+					}
+				}
+
+				if inThink {
+					if idx := strings.Index(thinkBuffer, "</think>"); idx != -1 {
+						// Print anything before </think> with style
+						if idx > 0 {
+							app.ui.Print("%s", thinkStyle.Render(thinkBuffer[:idx]))
+						}
+						// Disable think style
+						inThink = false
+						app.ui.Print("\n\n")
+
+						// Show spinner for markdown generation
+						app.ui.UpdateThinkingStatus("Generating Markdown...")
+						app.ui.ShowThinking()
+						generatingIndicatorShown = true
+
+						// Keep remainder
+						thinkBuffer = thinkBuffer[idx+len("</think>"):]
+					} else {
+						// Safe to print if we leave enough buffer to not split "</think>"
+						if len(thinkBuffer) > 9 {
+							safeLen := len(thinkBuffer) - 9
+							app.ui.Print("%s", thinkStyle.Render(thinkBuffer[:safeLen]))
+							thinkBuffer = thinkBuffer[safeLen:]
+						}
+					}
+				} else {
+					// Outside think block, safe to flush buffer if we leave enough for "<think>"
+					// We don't print the non-think text here so we only show the final rendered markdown later.
+					if len(thinkBuffer) > 8 {
+						if !generatingIndicatorShown {
+							generatingIndicatorShown = true
+							app.ui.UpdateThinkingStatus("Generating Markdown...")
+							app.ui.ShowThinking()
+						}
+						safeLen := len(thinkBuffer) - 8
+						thinkBuffer = thinkBuffer[safeLen:]
+					}
+				}
 			})
+			
+			// Flush any remaining buffer
+			if thinkBuffer != "" {
+				if inThink {
+					app.ui.Print("%s", thinkStyle.Render(thinkBuffer))
+					app.ui.Print("\n\n")
+				}
+			}
+
 			finalResponse = fr
 			agentErr = err
 		}()
 
 		// Wait for agent to finish
 		<-done
-		app.ui.HideThinking()
+
+		if !streamingStarted {
+			// Spinner still running — no tokens were streamed (non-streaming path or error).
+			app.ui.HideThinking()
+		}
 
 		if agentErr == nil && finalResponse != "" {
-			modelLabel := app.config.LLM.Models.Default
-			app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
+			// Add a clear separator if we streamed raw text, then render the
+			// full final response with Glamour for proper markdown formatting.
+			if streamingStarted {
+				app.ui.Print("\n")
+				separator := lipgloss.NewStyle().Foreground(lipgloss.Color("#8be9fd")).Italic(true).Render("✨ Final Rendered Markdown:")
+				app.ui.Print("%s\n", separator)
+			} else {
+				// Non-streaming path: render full response normally.
+				modelLabel := app.config.LLM.Models.Default
+				app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
+			}
 			app.ui.ShowResponse(sanitizeAgentResponse(finalResponse))
+			app.ui.Print("\n") // breathing room at bottom
 		}
 
 		if agentErr != nil {

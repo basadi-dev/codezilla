@@ -51,11 +51,17 @@ type Config struct {
 	PermissionMgr   tools.ToolPermissionManager
 	AutoPlan        bool
 	OnToolExecution func(toolName string, params map[string]interface{})
+	// OnLLMCall is called before each LLM request with the call number (1-based).
+	// Use this to update UI indicators with iteration context.
+	OnLLMCall func(callNum int)
 
 	// Loop detection: stops the run loop if a tool is called with identical args consecutively.
 	// 0 = use defaults (window=10, max_repeat=3).
 	LoopDetectWindow    int
 	LoopDetectMaxRepeat int
+
+	SummariserModel        string
+	ThinkCompressThreshold int
 }
 
 func DefaultConfig() *Config {

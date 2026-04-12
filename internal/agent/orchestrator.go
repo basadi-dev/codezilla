@@ -121,6 +121,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			}
 			iter++
 			// blocking complete
+				if o.agent.config.OnLLMCall != nil {
+					o.agent.config.OnLLMCall(iter)
+				}
 				llmTools := o.agent.buildLLMTools()
 				completion, err := o.agent.generateCompletion(ctx, "", llmTools)
 				if err != nil {
@@ -138,6 +141,23 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					}
 
 					finalResponse = text
+
+					// Think compression logic
+					if threshold := o.agent.config.ThinkCompressThreshold; threshold > 0 {
+						startIdx := strings.Index(finalResponse, "<think>")
+						endIdx := strings.Index(finalResponse, "</think>")
+						if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+							thinkContent := finalResponse[startIdx+7 : endIdx]
+							if len(thinkContent) > threshold {
+								summary := o.summarizeThink(ctx, thinkContent)
+								if summary != "" {
+									finalResponse = finalResponse[:startIdx+7] + "\n[Thought Process Summarized]\n" + summary + "\n" + finalResponse[endIdx:]
+									o.logger.Info("Compressed <think> block", "original_len", len(thinkContent), "summary_len", len(summary))
+								}
+							}
+						}
+					}
+
 					if onToken != nil && text != "" {
 						onToken(text)
 					}
@@ -155,6 +175,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 		case StateStreaming:
 			iter++
+			if o.agent.config.OnLLMCall != nil {
+				o.agent.config.OnLLMCall(iter)
+			}
 			llmTools := o.agent.buildLLMTools()
 			msgs := o.agent.buildChatMessages()
 			sysPrompt := o.agent.buildSystemPrompt()
@@ -181,6 +204,24 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 			fullResp = strings.TrimPrefix(strings.TrimSpace(fullResp), "Assistant:")
 			finalResponse = strings.TrimSpace(fullResp)
+
+			// Think compression logic
+			if threshold := o.agent.config.ThinkCompressThreshold; threshold > 0 {
+				startIdx := strings.Index(finalResponse, "<think>")
+				endIdx := strings.Index(finalResponse, "</think>")
+				if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+					thinkContent := finalResponse[startIdx+7 : endIdx]
+					if len(thinkContent) > threshold {
+						// Summarize the think block to save memory context
+						summary := o.summarizeThink(ctx, thinkContent)
+						if summary != "" {
+							// Replace the large block with the summary
+							finalResponse = finalResponse[:startIdx+7] + "\n[Thought Process Summarized]\n" + summary + "\n" + finalResponse[endIdx:]
+							o.logger.Info("Compressed <think> block", "original_len", len(thinkContent), "summary_len", len(summary))
+						}
+					}
+				}
+			}
 
 			if len(nativeTools) > 0 {
 				toolsToExecute = nativeTools
@@ -256,4 +297,31 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			return finalResponse, nil
 		}
 	}
+}
+
+// summarizeThink creates a condensed version of a large <think> block using the Summariser model.
+func (o *AgentOrchestrator) summarizeThink(ctx context.Context, thinkText string) string {
+	summariserModel := o.agent.config.SummariserModel
+	if summariserModel == "" {
+		summariserModel = o.agent.config.Model // fallback
+	}
+
+	msgs := []anyllm.Message{
+		{Role: "system", Content: "You are an internal summariser. You receive the raw internal thinking of an AI agent. Your job is to concisely summarize the core logical steps and decisions it made. Be extremely brief (2-4 sentences max), focusing on the reasoning that matters for the next steps."},
+		{Role: "user", Content: thinkText},
+	}
+
+	o.logger.Debug("Summarizing deep thought", "model", summariserModel, "chars", len(thinkText))
+	
+	// Create a fast, no-tool completion call. Low temperature for factuality.
+	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.3, nil)
+	if err != nil {
+		o.logger.Warn("Think summarize failed", "error", err)
+		return ""
+	}
+
+	if len(comp.Choices) > 0 {
+		return strings.TrimSpace(comp.Choices[0].Message.ContentString())
+	}
+	return ""
 }

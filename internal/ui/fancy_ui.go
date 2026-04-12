@@ -159,7 +159,7 @@ func (ui *FancyUI) ShowWelcomeWithModels(model, plannerModel, subAgentModel, oll
 		ui.theme.StyleYellow.Render("/help"))
 }
 
-// ShowThinking shows an enhanced thinking animation
+// ShowThinking shows a stable waiting indicator with an elapsed timer.
 func (ui *FancyUI) ShowThinking() {
 	ui.spinnerMutex.Lock()
 	if ui.spinnerStop != nil {
@@ -179,48 +179,61 @@ func (ui *FancyUI) ShowThinking() {
 			modelTag = " · " + ui.currentModel
 		}
 
-		frames := []string{
-			"🤔 Thinking" + modelTag,
-			"🤔 Thinking." + modelTag,
-			"🤔 Thinking.." + modelTag,
-			"🤔 Thinking..." + modelTag,
-			"💭 Processing" + modelTag,
-			"💭 Processing." + modelTag,
-			"💭 Processing.." + modelTag,
-			"💭 Processing..." + modelTag,
-			"🧠 Analyzing" + modelTag,
-			"🧠 Analyzing." + modelTag,
-			"🧠 Analyzing.." + modelTag,
-			"🧠 Analyzing..." + modelTag,
+		// Dot animation cycles through 4 states, elapsed timer counts up every second.
+		dots := []string{"", ".", "..", "..."}
+		dotTick := 0
+		start := time.Now()
+
+		render := func() string {
+			elapsed := int(time.Since(start).Seconds())
+			dot := dots[dotTick%len(dots)]
+
+			// Read status label under lock (set by UpdateThinkingStatus).
+			ui.spinnerMutex.Lock()
+			status := ui.spinnerStatus
+			ui.spinnerMutex.Unlock()
+
+			statusTag := ""
+			if status != "" {
+				statusTag = " · " + status
+			}
+
+			var msg string
+			if elapsed < 2 {
+				msg = "⏳ Waiting" + dot + statusTag + modelTag
+			} else {
+				msg = fmt.Sprintf("⏳ Waiting%s%s%s · %ds", dot, statusTag, modelTag, elapsed)
+			}
+			return ui.theme.StyleCyan.Render(msg) + "\033[K"
 		}
 
-		renderFrame := func(f string) string {
-			// \033[K clears from cursor to end of line — handles emoji widths correctly.
-			return ui.theme.StyleCyan.Render(f) + "\033[K"
-		}
-
-		i := 0
-		ticker := time.NewTicker(150 * time.Millisecond)
+		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
 
-		// Print initial frame
-		ui.Print("\r%s", renderFrame(frames[0]))
+		ui.Print("\r%s", render())
 		ui.writer.Flush()
 
 		for {
 			select {
 			case <-ui.spinnerStop:
-				// Clear the entire line
-				ui.Print("\r\033[K") // ANSI escape code to clear line
+				ui.Print("\r\033[K")
 				ui.writer.Flush()
 				return
 			case <-ticker.C:
-				i++
-				ui.Print("\r%s", renderFrame(frames[i%len(frames)]))
+				dotTick++
+				ui.Print("\r%s", render())
 				ui.writer.Flush()
 			}
 		}
 	}()
+}
+
+// UpdateThinkingStatus updates the status label shown inside the active spinner.
+// Safe to call from any goroutine; no-op if spinner is not running.
+func (ui *FancyUI) UpdateThinkingStatus(label string) {
+	ui.spinnerMutex.Lock()
+	ui.spinnerStatus = label
+	ui.spinnerMutex.Unlock()
 }
 
 // HideThinking hides the thinking indicator and clears the line

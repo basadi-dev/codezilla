@@ -26,6 +26,9 @@ type Config struct {
 	LoopDetectWindow    int `json:"loop_detect_window" yaml:"loop_detect_window"`
 	LoopDetectMaxRepeat int `json:"loop_detect_max_repeat" yaml:"loop_detect_max_repeat"`
 
+	// Think compression
+	ThinkCompressThreshold int `json:"think_compress_threshold" yaml:"think_compress_threshold"`
+
 	// Log configuration
 	LogFile   string `json:"log_file" yaml:"log_file"`
 	LogLevel  string `json:"log_level" yaml:"log_level"`
@@ -87,10 +90,11 @@ type AnalyzerSettings struct {
 }
 
 type LLMModelsConfig struct {
-	Default  string `json:"default" yaml:"default"`
-	Planner  string `json:"planner,omitempty" yaml:"planner,omitempty"`
-	SubAgent string `json:"sub_agent,omitempty" yaml:"sub_agent,omitempty"`
-	Analyzer string `json:"analyzer,omitempty" yaml:"analyzer,omitempty"`
+	Default    string `json:"default" yaml:"default"`
+	Planner    string `json:"planner,omitempty" yaml:"planner,omitempty"`
+	SubAgent   string `json:"sub_agent,omitempty" yaml:"sub_agent,omitempty"`
+	Analyzer   string `json:"analyzer,omitempty" yaml:"analyzer,omitempty"`
+	Summariser string `json:"summariser,omitempty" yaml:"summariser,omitempty"`
 }
 
 type LLMAPIKeysConfig struct {
@@ -152,23 +156,25 @@ func DefaultConfig() *Config {
 		LLM: LLMConfig{
 			Provider: "ollama",
 			Models: LLMModelsConfig{
-				Default: "qwen3-coder:480b", // Best open-weight coder
+				Default:    "qwen3-coder:480b", // Best open-weight coder
+				Summariser: "gemma3:12b",
 			},
 			Ollama: OllamaConfig{
 				BaseURL: "http://localhost:11434",
 			},
 		},
-		Temperature:         0.7,
-		MaxTokens:           1024 * 32,
-		MaxIterations:       0, // 0 = unlimited tool iterations
-		SystemPrompt:        defaultSystemPrompt(cwd),
-		LogFile:             filepath.Join("logs", "codezilla.log"),
-		LogLevel:            "info",
-		LogSilent:           false,
-		RetainContext:       true,
-		MaxContextChars:     50000,
-		HistoryFile:         filepath.Join(getConfigDir(), "history"),
-		AutoPlan:            false,
+		Temperature:            0.7,
+		MaxTokens:              1024 * 32,
+		MaxIterations:          0, // 0 = unlimited tool iterations
+		SystemPrompt:           defaultSystemPrompt(cwd),
+		LogFile:                filepath.Join("logs", "codezilla.log"),
+		LogLevel:               "info",
+		LogSilent:              false,
+		RetainContext:          true,
+		MaxContextChars:        50000,
+		HistoryFile:            filepath.Join(getConfigDir(), "history"),
+		AutoPlan:               false,
+		ThinkCompressThreshold: 2000,
 		DangerousToolsWarn:  true,
 		AlwaysAskPermission: false,
 		ToolPermissions: map[string]string{
