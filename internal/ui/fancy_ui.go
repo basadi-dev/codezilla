@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/glamour"
@@ -14,8 +13,8 @@ import (
 
 // FancyUI implements a fancy UI with animations and extra visual elements
 type FancyUI struct {
-	*BaseUI   // Embed BaseUI and override specific methods
-	spinnerWg sync.WaitGroup
+	*BaseUI // Embed BaseUI and override specific methods
+	spinnerDone chan bool
 }
 
 // NewFancyUI creates a fancy UI implementation
@@ -174,11 +173,12 @@ func (ui *FancyUI) ShowThinking() {
 	}
 
 	ui.spinnerStop = make(chan bool, 1) // Buffered channel
-	ui.spinnerWg.Add(1)
+	ui.spinnerDone = make(chan bool)
+	doneChan := ui.spinnerDone
 	ui.spinnerMutex.Unlock()
 
 	go func() {
-		defer ui.spinnerWg.Done()
+		defer close(doneChan)
 
 		modelTag := ""
 		if ui.currentModel != "" {
@@ -266,10 +266,15 @@ func (ui *FancyUI) HideThinking() {
 		}
 		close(ui.spinnerStop)
 		ui.spinnerStop = nil
+		
+		doneChan := ui.spinnerDone
+		ui.spinnerDone = nil
 		ui.spinnerMutex.Unlock()
 
-		// Wait for the goroutine to finish cleaning up
-		ui.spinnerWg.Wait()
+		// Wait for the goroutine to finish cleaning up using the captured done channel
+		if doneChan != nil {
+			<-doneChan
+		}
 
 		// Extra insurance - clear the line again
 		ui.Print("\r\033[K")
