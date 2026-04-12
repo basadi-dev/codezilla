@@ -22,6 +22,7 @@ func main() {
 		noColors    = flag.Bool("no-colors", false, "Disable colored output")
 		provider    = flag.String("provider", "", "Override LLM provider (ollama, openai, anthropic, gemini)")
 		model       = flag.String("model", "", "Override default model")
+		sessionID   = flag.String("session", "", "Session ID to resume")
 		ollamaURL   = flag.String("ollama-url", "", "Override Ollama API URL")
 		temperature = flag.Float64("temperature", -1, "Override temperature (0.0-1.0)")
 		maxTokens   = flag.Int("max-tokens", 0, "Override max tokens")
@@ -60,6 +61,9 @@ func main() {
 	}
 	if *model != "" {
 		cfg.LLM.Models.Default = *model
+	}
+	if *sessionID != "" {
+		cfg.ResumeSessionID = *sessionID
 	}
 	if *ollamaURL != "" {
 		cfg.LLM.Ollama.BaseURL = *ollamaURL
@@ -116,6 +120,7 @@ func main() {
 	go func() {
 		<-sigChan
 		appUI.Info("\nShutting down...")
+		appUI.Info("To resume this session, run: codezilla -session %s\n", app.SessionID())
 		cancel()
 	}()
 
@@ -146,6 +151,7 @@ Options:
   -ollama-url string   Override Ollama API URL (e.g., "http://localhost:11434")
   -temperature float   Override temperature (0.0-1.0)
   -max-tokens int      Override max tokens
+  -session string      Session ID to resume
   -ui string           UI type: fancy (default) or minimal
   -no-colors           Disable colored output
   -version             Show version information

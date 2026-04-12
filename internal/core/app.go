@@ -60,28 +60,14 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	sessionPath := ""
 	isResuming := false
 	if cfg.SessionEventsDir != "" {
-		// Detect last session file (ReadDir returns sorted; last match = newest)
-		files, err := os.ReadDir(cfg.SessionEventsDir)
-		var lastFile os.DirEntry
-		if err == nil {
-			for _, f := range files {
-				if !f.IsDir() && strings.HasPrefix(f.Name(), "session_") && strings.HasSuffix(f.Name(), ".jsonl") {
-					lastFile = f
-				}
+		if cfg.ResumeSessionID != "" {
+			name := cfg.ResumeSessionID
+			if !strings.HasSuffix(name, ".jsonl") {
+				name += ".jsonl"
 			}
-		}
-
-		if lastFile != nil {
-			ui.Info("Found previous session: %s", lastFile.Name())
-			// Use the UI's Confirm so it goes through FixedInput, not a raw stdin scanner
-			if ok, _ := ui.Confirm("Resume session?"); ok {
-				sessionPath = filepath.Join(cfg.SessionEventsDir, lastFile.Name())
-				isResuming = true
-				ui.Success("Resuming session...")
-			}
-		}
-
-		if sessionPath == "" {
+			sessionPath = filepath.Join(cfg.SessionEventsDir, name)
+			isResuming = true
+		} else {
 			sessionPath = filepath.Join(cfg.SessionEventsDir, fmt.Sprintf("session_%s.jsonl", time.Now().Format("20060102_150405")))
 		}
 	}
@@ -906,6 +892,17 @@ func (app *App) skillCompletions(activeOnly bool) []ui.Completion {
 	return comps
 }
 
+// SessionID returns the ID of the current session.
+func (app *App) SessionID() string {
+	if app.sessionRecord != nil {
+		path := app.sessionRecord.Path()
+		if path != "" {
+			return filepath.Base(path)
+		}
+	}
+	return ""
+}
+
 // Close cleans up application resources
 func (app *App) Close() error {
 	if app.sessionRecord != nil {
@@ -947,6 +944,10 @@ func (app *App) Run(ctx context.Context) error {
 		app.ui.ShowWelcome(app.config.LLM.Models.Default, connStr, app.config.RetainContext)
 	}
 	app.ui.SetModel(app.config.LLM.Models.Default)
+
+	if sessionID := app.SessionID(); sessionID != "" {
+		app.ui.Info("  📝 Session:          %s", app.ui.GetTheme().StyleCyan.Render(sessionID))
+	}
 
 	// Main loop
 	for {

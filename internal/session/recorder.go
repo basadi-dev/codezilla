@@ -30,10 +30,11 @@ type Event struct {
 }
 
 type Recorder struct {
-	mu     sync.Mutex
-	file   *os.File
-	writer *bufio.Writer
-	logger *logger.Logger
+	mu       sync.Mutex
+	file     *os.File
+	filepath string
+	writer   *bufio.Writer
+	logger   *logger.Logger
 }
 
 func NewRecorder(filepath string, log *logger.Logger) (*Recorder, error) {
@@ -51,9 +52,10 @@ func NewRecorder(filepath string, log *logger.Logger) (*Recorder, error) {
 	}
 
 	r := &Recorder{
-		file:   f,
-		writer: bufio.NewWriter(f),
-		logger: log,
+		file:     f,
+		filepath: filepath,
+		writer:   bufio.NewWriter(f),
+		logger:   log,
 	}
 
 	// Only record session_start if the file is empty (new session)
@@ -102,6 +104,14 @@ func (r *Recorder) Close() error {
 		return err
 	}
 	return nil
+}
+
+// Path returns the path to the current session file.
+func (r *Recorder) Path() string {
+	if r == nil {
+		return ""
+	}
+	return r.filepath
 }
 
 // LoadEvents reads all events from a session file.

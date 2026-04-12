@@ -39,6 +39,7 @@ type Config struct {
 	MaxContextChars  int    `json:"max_context_chars" yaml:"max_context_chars"`
 	HistoryFile      string `json:"history_file" yaml:"history_file"`
 	SessionEventsDir string `json:"session_events_dir" yaml:"session_events_dir"`
+	ResumeSessionID  string `json:"resume_session_id" yaml:"resume_session_id"`
 
 	// Agent behavior
 	AutoPlan bool `json:"auto_plan" yaml:"auto_plan"`
