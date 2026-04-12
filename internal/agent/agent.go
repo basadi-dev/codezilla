@@ -25,6 +25,7 @@ type Agent interface {
 	ReplaceSystemMessage(message string)
 	AddUserMessage(message string)
 	AddAssistantMessage(message string)
+	AddMessage(msg Message)
 	GetMessages() []Message
 	ClearContext()
 	ClearLastUserMessage()
@@ -200,6 +201,10 @@ func (a *agent) AddUserMessage(message string) {
 
 func (a *agent) AddAssistantMessage(message string) {
 	a.context.AddAssistantMessage(message)
+}
+
+func (a *agent) AddMessage(msg Message) {
+	a.context.AddMessage(msg)
 }
 
 func (a *agent) GetMessages() []Message {

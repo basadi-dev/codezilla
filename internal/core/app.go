@@ -502,6 +502,7 @@ func (app *App) wireCompleter() {
 		{Primary: "/reset", Desc: "Reset conversation"},
 		{Primary: "/save ", Desc: "Save conversation to JSON file"},
 		{Primary: "/load ", Desc: "Load conversation from JSON file"},
+		{Primary: "/replay ", Desc: "Replay last user message from a loaded JSON file"},
 	}
 
 	c.SetCompleter(func(line string) []ui.Completion {
@@ -1204,6 +1205,13 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			app.loadConversation(parts[1])
 		}
 
+	case "/replay":
+		if len(parts) < 2 {
+			app.ui.Warning("Usage: /replay <filename>")
+		} else {
+			app.replayConversation(ctx, parts[1])
+		}
+
 	default:
 		app.ui.Warning("Unknown command: %s", parts[0])
 		app.ui.Info("Type /help for available commands")
@@ -1220,21 +1228,12 @@ func (app *App) saveConversation(filename string) {
 		return
 	}
 
-	// Build a serialisable structure from agent messages
-	type savedMessage struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-
-	saved := make([]savedMessage, 0, len(messages))
+	saved := make([]agent.Message, 0, len(messages))
 	for _, msg := range messages {
 		if msg.Role == agent.RoleSystem {
-			continue // Don't persist system prompts
+			continue // Don't persist system prompts natively so we can inject new ones on load
 		}
-		saved = append(saved, savedMessage{
-			Role:    string(msg.Role),
-			Content: msg.Content,
-		})
+		saved = append(saved, msg)
 	}
 
 	if len(saved) == 0 {
@@ -1264,12 +1263,7 @@ func (app *App) loadConversation(filename string) {
 		return
 	}
 
-	type savedMessage struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-
-	var messages []savedMessage
+	var messages []agent.Message
 	if err := json.Unmarshal(raw, &messages); err != nil {
 		// Try legacy format (flat conversation string)
 		var legacyData map[string]interface{}
@@ -1288,15 +1282,55 @@ func (app *App) loadConversation(filename string) {
 	// Reset context and replay messages
 	app.agent.ClearContext()
 	for _, msg := range messages {
-		switch agent.Role(msg.Role) {
-		case agent.RoleUser:
-			app.agent.AddUserMessage(msg.Content)
-		case agent.RoleAssistant:
-			app.agent.AddAssistantMessage(msg.Content)
-		}
+		app.agent.AddMessage(msg)
 	}
 
 	app.ui.Success("Conversation loaded from %s (%d messages)", filename, len(messages))
+}
+
+// replayConversation loads a history file, strips off any trailing agent/tool outputs,
+// and resubmits the last user prompt to re-evaluate the conversation dynamically.
+func (app *App) replayConversation(ctx context.Context, filename string) {
+	app.loadConversation(filename)
+	messages := app.agent.GetMessages()
+	
+	// Find the last user message
+	lastUserIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == agent.RoleUser {
+			lastUserIdx = i
+			break
+		}
+	}
+
+	if lastUserIdx == -1 {
+		app.ui.Warning("No user messages found in history to replay.")
+		return
+	}
+
+	// The prompt to replay is the last user message.
+	promptToReplay := messages[lastUserIdx].Content
+
+	// Clear out everything from the last user message onwards
+	app.agent.ClearLastUserMessage() // First clear the very last one explicitly to be safe
+	
+	// Get current context, and literally strip it back to exactly before the last user prompt
+	// By rebuilding it
+	app.agent.ClearContext()
+	for i := 0; i < lastUserIdx; i++ {
+		if messages[i].Role != agent.RoleSystem {
+			app.agent.AddMessage(messages[i])
+		}
+	}
+
+	app.ui.Info("Replaying prompt: %s", promptToReplay)
+	
+	// Re-run the processInput block asynchronously as if the user just typed it
+	go func() {
+		if err := app.processInput(ctx, promptToReplay); err != nil {
+			app.ui.Error("Failed to process replay: %v", err)
+		}
+	}()
 }
 
 // showModels displays available models
