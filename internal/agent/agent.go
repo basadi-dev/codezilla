@@ -54,9 +54,11 @@ type Config struct {
 	PermissionMgr   tools.ToolPermissionManager
 	AutoPlan        bool
 	OnToolExecution func(toolName string, params map[string]interface{})
-	// OnLLMCall is called before each LLM request with the call number (1-based).
-	// Use this to update UI indicators with iteration context.
-	OnLLMCall func(callNum int)
+	// OnLLMCall is called before each LLM request with:
+	//   callNum    – 1-based call counter
+	//   msgCount   – number of messages in the context
+	//   approxToks – rough token estimate (chars/4)
+	OnLLMCall func(callNum, msgCount, approxToks int)
 	// OnToolPreparing is called during streaming when a tool call name is first detected,
 	// before the tool actually executes. Use this to update the spinner with the tool name.
 	OnToolPreparing func(toolName string)

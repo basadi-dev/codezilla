@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"codezilla/internal/config"
 
@@ -182,7 +183,14 @@ func (c *Client) buildOllamaProvider() (anyllm.Provider, error) {
 			}
 		}
 
-		httpClient := &http.Client{Transport: transport}
+		httpClient := &http.Client{
+			Transport: transport,
+			// Upper-bound timeout. For streaming the SDK reads chunks
+			// incrementally, so 5 min guards against dead connections
+			// without killing long-running streams that are actively
+			// producing output.
+			Timeout: 5 * time.Minute,
+		}
 		opts = append(opts, anyllm.WithHTTPClient(httpClient))
 	}
 

@@ -580,14 +580,20 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		LoopDetectWindow:       cfg.LoopDetectWindow,
 		LoopDetectMaxRepeat:    cfg.LoopDetectMaxRepeat,
 		ThinkCompressThreshold: cfg.ThinkCompressThreshold,
-		OnLLMCall: func(callNum int) {
+		OnLLMCall: func(callNum, msgCount, approxToks int) {
+			// Format token count: "21K" or "800"
+			tokLabel := fmt.Sprintf("%d", approxToks)
+			if approxToks >= 1000 {
+				tokLabel = fmt.Sprintf("%.0fK", float64(approxToks)/1000)
+			}
+
 			var label string
 			if callNum == 1 {
-				label = "LLM call #1"
+				label = fmt.Sprintf("LLM call #1 · ~%s tokens", tokLabel)
 			} else if lastToolSummary != "" {
-				label = fmt.Sprintf("LLM call #%d · after %s", callNum, lastToolSummary)
+				label = fmt.Sprintf("LLM call #%d · ~%s tokens · after %s", callNum, tokLabel, lastToolSummary)
 			} else {
-				label = fmt.Sprintf("LLM call #%d", callNum)
+				label = fmt.Sprintf("LLM call #%d · ~%s tokens", callNum, tokLabel)
 			}
 			ui.UpdateThinkingStatus(label)
 			ui.RestartThinking()

@@ -150,35 +150,61 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			iter++
 			// blocking complete
 			if o.agent.config.OnLLMCall != nil {
-				o.agent.config.OnLLMCall(iter)
+				msgsForCount := o.agent.buildChatMessages()
+				totalChars := 0
+				for _, m := range msgsForCount {
+					if s, ok := m.Content.(string); ok {
+						totalChars += len(s)
+					}
+				}
+				o.agent.config.OnLLMCall(iter, len(msgsForCount), totalChars/4)
 			}
 			llmTools := o.agent.buildLLMTools()
-
-			if o.agent.config.SessionRecorder != nil {
-				o.agent.config.SessionRecorder.Record(session.EventLLMRequest, map[string]interface{}{
-					"provider": o.agent.config.Provider,
-					"model":    o.agent.config.Model,
-					"tools":    llmTools,
-				})
-			}
 
 			var toolNames []string
 			for _, t := range llmTools {
 				toolNames = append(toolNames, t.Function.Name)
 			}
 
-			o.logger.DumpPretty("Sending LLM Request (Prompting)", map[string]any{
+			msgsForLog := o.agent.buildChatMessages()
+			totalChars := 0
+			for _, m := range msgsForLog {
+				if s, ok := m.Content.(string); ok {
+					totalChars += len(s)
+				}
+			}
+			approxToks := totalChars / 4
+
+			o.logger.Info("LLM request (complete)",
+				"iter", iter,
+				"model", o.agent.config.Model,
+				"messages", len(msgsForLog),
+				"~tokens", approxToks,
+				"tools", len(toolNames))
+
+			o.logger.DumpPretty("LLM Request Detail (Prompting)", map[string]any{
 				"provider": o.agent.config.Provider,
 				"model":    o.agent.config.Model,
 				"tools":    toolNames,
 			})
 
+			llmStart := time.Now()
 			completion, err := o.agent.generateCompletion(ctx, "", llmTools)
+			llmDur := time.Since(llmStart)
+
 			if err != nil {
+				o.logger.Error("LLM complete failed",
+					"iter", iter,
+					"duration", llmDur.Round(time.Millisecond),
+					"error", err)
 				currentLLMError = err
 				state = StateErrorRecovery
 				continue
 			}
+
+			o.logger.Info("LLM response (complete)",
+				"iter", iter,
+				"duration", llmDur.Round(time.Millisecond))
 
 			if len(completion.Choices) > 0 {
 				msg := completion.Choices[0].Message
@@ -228,14 +254,22 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 		case StateStreaming:
 			iter++
-			if o.agent.config.OnLLMCall != nil {
-				o.agent.config.OnLLMCall(iter)
-			}
 			llmTools := o.agent.buildLLMTools()
 			msgs := o.agent.buildChatMessages()
 			sysPrompt := o.agent.buildSystemPrompt()
 			if len(msgs) > 0 && msgs[0].Role != "system" {
 				msgs = append([]anyllm.Message{{Role: "system", Content: sysPrompt}}, msgs...)
+			}
+
+			if o.agent.config.OnLLMCall != nil {
+				// Approximate token count: sum content lengths / 4
+				totalChars := 0
+				for _, m := range msgs {
+					if s, ok := m.Content.(string); ok {
+						totalChars += len(s)
+					}
+				}
+				o.agent.config.OnLLMCall(iter, len(msgs), totalChars/4)
 			}
 
 			if o.agent.config.SessionRecorder != nil {
@@ -252,17 +286,35 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				toolNames = append(toolNames, t.Function.Name)
 			}
 
-			o.logger.DumpPretty("Sending LLM Request (Streaming)", map[string]any{
+			// Compute context size for logging
+			ctxChars := 0
+			for _, m := range msgs {
+				if s, ok := m.Content.(string); ok {
+					ctxChars += len(s)
+				}
+			}
+
+			o.logger.Info("LLM request (stream)",
+				"iter", iter,
+				"model", o.agent.config.Model,
+				"messages", len(msgs),
+				"~tokens", ctxChars/4,
+				"tools", len(toolNames))
+
+			o.logger.DumpPretty("LLM Request Detail (Streaming)", map[string]any{
 				"provider": o.agent.config.Provider,
 				"model":    o.agent.config.Model,
-				"messages": msgs,
 				"tools":    toolNames,
 			})
 
+			llmStart := time.Now()
 			streamCh, errCh, err := o.agent.llmClient.Stream(ctx, o.agent.config.Provider, o.agent.config.Model, msgs, o.agent.config.Temperature, llmTools)
 
 			if err != nil {
-				o.logger.Warn("Streaming failed, falling back to complete", "error", err)
+				o.logger.Error("Stream init failed",
+					"iter", iter,
+					"duration", time.Since(llmStart).Round(time.Millisecond),
+					"error", err)
 				stream = false
 				state = StatePrompting
 				continue
@@ -273,12 +325,23 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					o.agent.config.OnToolPreparing(toolName)
 				}
 			})
+			llmDur := time.Since(llmStart)
 
 			if streamErr != nil {
+				o.logger.Error("LLM stream failed",
+					"iter", iter,
+					"duration", llmDur.Round(time.Millisecond),
+					"error", streamErr)
 				currentLLMError = streamErr
 				state = StateErrorRecovery
 				continue
 			}
+
+			o.logger.Info("LLM response (stream)",
+				"iter", iter,
+				"duration", llmDur.Round(time.Millisecond),
+				"resp_len", len(fullResp),
+				"native_tools", len(nativeTools))
 
 			fullResp = strings.TrimPrefix(strings.TrimSpace(fullResp), "Assistant:")
 			finalResponse = strings.TrimSpace(fullResp)
@@ -381,8 +444,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			state = StatePrompting
 
 		case StateErrorRecovery:
-			o.logger.Warn("LLM Error Recovery", "error", currentLLMError)
-			// Simple backoff or inject error and retry once
+			o.logger.Error("LLM Error Recovery",
+				"iter", iter,
+				"error", currentLLMError)
 			finalResponse = "I'm sorry, an error occurred communicating with the model: " + currentLLMError.Error()
 			state = StateComplete
 
