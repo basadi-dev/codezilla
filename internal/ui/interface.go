@@ -55,6 +55,10 @@ type UI interface {
 	// Formatted output
 	ShowThinking()
 	HideThinking()
+	// RestartThinking stops and restarts the spinner so the elapsed timer
+	// resets. Use this when a new LLM call begins so the counter reflects
+	// time since that call, not since the conversation started.
+	RestartThinking()
 	// UpdateThinkingStatus updates the label shown in the active spinner without
 	// stopping it. No-op if the spinner is not running.
 	UpdateThinkingStatus(label string)

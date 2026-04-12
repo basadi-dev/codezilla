@@ -539,6 +539,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		ThinkCompressThreshold: cfg.ThinkCompressThreshold,
 		OnLLMCall: func(callNum int) {
 			ui.UpdateThinkingStatus(fmt.Sprintf("LLM call #%d", callNum))
+			ui.RestartThinking()
 		},
 		SessionRecorder: sessionRecord,
 	}

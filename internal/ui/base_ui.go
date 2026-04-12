@@ -183,6 +183,12 @@ func (ui *BaseUI) UpdateThinkingStatus(label string) {
 	ui.spinnerMutex.Unlock()
 }
 
+// RestartThinking stops and restarts the spinner so the elapsed timer resets.
+func (ui *BaseUI) RestartThinking() {
+	ui.HideThinking()
+	ui.ShowThinking()
+}
+
 // HideThinking hides the thinking indicator
 func (ui *BaseUI) HideThinking() {
 	ui.spinnerMutex.Lock()

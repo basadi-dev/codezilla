@@ -242,6 +242,18 @@ func (ui *FancyUI) UpdateThinkingStatus(label string) {
 	ui.spinnerMutex.Unlock()
 }
 
+// RestartThinking stops and restarts the spinner so the elapsed timer resets.
+// The status label is preserved across the restart.
+func (ui *FancyUI) RestartThinking() {
+	ui.spinnerMutex.Lock()
+	savedStatus := ui.spinnerStatus
+	ui.spinnerMutex.Unlock()
+
+	ui.HideThinking()
+	ui.UpdateThinkingStatus(savedStatus)
+	ui.ShowThinking()
+}
+
 // HideThinking hides the thinking indicator and clears the line
 func (ui *FancyUI) HideThinking() {
 	ui.spinnerMutex.Lock()
