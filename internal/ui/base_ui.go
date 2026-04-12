@@ -22,6 +22,7 @@ type BaseUI struct {
 	spinnerStatus string // updated via UpdateThinkingStatus
 	width         int
 	currentModel  string
+	printMutex    sync.Mutex
 }
 
 // NewBaseUI creates a new base UI
@@ -112,12 +113,16 @@ func (ui *BaseUI) ShowPrompt() string {
 
 // Print outputs formatted text
 func (ui *BaseUI) Print(format string, args ...interface{}) {
+	ui.printMutex.Lock()
+	defer ui.printMutex.Unlock()
 	fmt.Fprintf(ui.writer, format, args...)
 	ui.writer.Flush()
 }
 
 // Println outputs formatted text with newline
 func (ui *BaseUI) Println(format string, args ...interface{}) {
+	ui.printMutex.Lock()
+	defer ui.printMutex.Unlock()
 	fmt.Fprintf(ui.writer, format+"\n", args...)
 	ui.writer.Flush()
 }
