@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"codezilla/internal/session"
@@ -396,39 +397,72 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			}
 			o.agent.context.AddToolCallsMessage(thinkContent, toolsToExecute)
 
-			for _, tc := range toolsToExecute {
-				var params map[string]interface{}
-				_ = json.Unmarshal([]byte(tc.Function.Arguments), &params)
+			type ToolResult struct {
+				ID     string
+				Result interface{}
+				Err    error
+				Dur    string
+				Name   string
+			}
+			results := make([]ToolResult, len(toolsToExecute))
+			var wg sync.WaitGroup
+			var loopErr string
 
-				// Loop detection: kill if same tool+args repeated too many consecutive times.
+			// Synchronous loop-detection check to prevent spinning up threads if trapped
+			for i, tc := range toolsToExecute {
+				results[i].ID = tc.ID
+				results[i].Name = tc.Function.Name
 				if looped := o.loops.record(tc.Function.Name, tc.Function.Arguments); looped != "" {
-					msg := fmt.Sprintf("Detected infinite loop: tool '%s' called with identical arguments %d times consecutively. Stopping.", looped, o.agent.config.LoopDetectMaxRepeat)
-					o.logger.Warn(msg)
-					return msg, nil
+					loopErr = fmt.Sprintf("Detected infinite loop: tool '%s' called with identical arguments %d times consecutively. Stopping.", looped, o.agent.config.LoopDetectMaxRepeat)
+					break
 				}
+			}
 
-				if o.agent.config.OnToolExecution != nil {
-					o.agent.config.OnToolExecution(tc.Function.Name, params)
-				}
+			if loopErr != "" {
+				o.logger.Warn(loopErr)
+				return loopErr, nil
+			}
 
-				start := time.Now()
-				result, err := o.agent.ExecuteTool(ctx, tc.Function.Name, params)
-				dur := time.Since(start).Round(time.Millisecond).String()
+			// Parallel Tool Execution
+			for i, tc := range toolsToExecute {
+				wg.Add(1)
+				go func(idx int, call anyllm.ToolCall) {
+					defer wg.Done()
+					var params map[string]interface{}
+					_ = json.Unmarshal([]byte(call.Function.Arguments), &params)
+
+					if o.agent.config.OnToolExecution != nil {
+						o.agent.config.OnToolExecution(call.Function.Name, params)
+					}
+
+					start := time.Now()
+					res, err := o.agent.ExecuteTool(ctx, call.Function.Name, params)
+					dur := time.Since(start).Round(time.Millisecond).String()
+
+					results[idx].Result = res
+					results[idx].Err = err
+					results[idx].Dur = dur
+				}(i, tc)
+			}
+			wg.Wait()
+
+			// Synchronous recording to maintain context order
+			for _, r := range results {
 				if o.agent.config.SessionRecorder != nil {
 					errStr := ""
-					if err != nil {
-						errStr = err.Error()
+					if r.Err != nil {
+						errStr = r.Err.Error()
 					}
 					o.agent.config.SessionRecorder.Record(session.EventToolResult, map[string]interface{}{
-						"tool":     tc.Function.Name,
-						"duration": dur,
+						"tool":     r.Name,
+						"duration": r.Dur,
 						"error":    errStr,
 					})
 				}
-				if err != nil {
-					o.agent.context.AddToolResultMessage(tc.ID, nil, err)
+				if r.Err != nil {
+					o.agent.context.AddToolResultMessage(r.ID, nil, r.Err)
 				} else {
-					o.agent.context.AddToolResultMessage(tc.ID, result, nil)
+					o.agent.context.AddToolResultMessage(r.ID, r.Result, nil)
 				}
 			}
 

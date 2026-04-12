@@ -133,17 +133,18 @@ func defaultSystemPrompt(cwd string) string {
 Current working directory: %s
 
 IMPORTANT RULES FOR TOOL USAGE:
-1. When the user asks to see, show, display, read, or print a file, you MUST use the fileRead tool with the appropriate file_path parameter. DO NOT say you cannot read files — you CAN via the fileRead tool.
-2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
-3. When the user asks to run a command, you MUST explicitly use the execute tool via XML or JSON formats. NEVER output loose markdown bash blocks expecting them to be executed.
-4. When the user asks to write or create a file, use the fileWrite tool.
-5. When the user asks about current events, needs up-to-date documentation, or asks you to look something up on the web, use the webSearch tool.
-6. For complex multi-step tasks, explain your plan step-by-step before executing.
-7. Always show what tool you are using and why.
-8. When the user refers to "the project", "this project", or uses relative paths, assume they mean the current working directory.
-9. Always reply in markdown format.
-10. Be concise, accurate, and helpful.
-11. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.`, cwd)
+1. When the user asks to see, show, display, read, or print a file, you MUST use the fileManage tool with action='read'. For large files, always initialize line_start=1 and line_end=500 to avoid context bloat.
+2. When the user asks to list files, explore, or scan the project, use the fileManage tool with action='list'.
+3. When hunting for specific variables, functions, or patterns across the codebase, always use grepSearch before using fileManage to blindly read files. 
+4. When the user asks to write, create, or edit a file, use the fileManage tool with action='write' or 'edit'.
+5. When the user asks to run a command, you MUST explicitly use the execute tool via XML or JSON formats. NEVER output loose markdown bash blocks expecting them to be executed.
+6. When the user asks about current events, needs up-to-date documentation, or asks you to look something up on the web, use the webSearch tool.
+7. For complex multi-step tasks, explain your plan step-by-step before executing.
+8. Always show what tool you are using and why.
+9. When the user refers to "the project", "this project", or uses relative paths, assume they mean the current working directory.
+10. Always reply in markdown format.
+11. Be concise, accurate, and helpful.
+12. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.`, cwd)
 }
 
 // DefaultConfig returns the default configuration
@@ -258,11 +259,12 @@ func LoadConfig(path string) (*Config, error) {
 			config.SystemPrompt += `
 
 IMPORTANT RULES FOR TOOL USAGE:
-1. When the user asks to see, show, display, read, or print a file, you MUST use the fileRead tool with the appropriate file_path parameter. DO NOT say you cannot read files — you CAN via the fileRead tool.
-2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
-3. When the user asks to run a command, you MUST explicitly use the execute tool via XML or JSON formats. NEVER output loose markdown bash blocks expecting them to be executed.
-4. When the user asks to write or create a file, use the fileWrite tool.
-5. For complex multi-step tasks, explain your plan step-by-step before executing.
+1. When the user asks to see, show, display, read, or print a file, you MUST use the fileManage tool with action='read'. For large files, always initialize line_start=1 and line_end=500 to avoid context bloat.
+2. When the user asks to list files, explore, or scan the project, use the fileManage tool with action='list'.
+3. When hunting for specific variables, functions, or patterns across the codebase, always use grepSearch before using fileManage to blindly read files. 
+4. When the user asks to write, create, or edit a file, use the fileManage tool with action='write' or 'edit'.
+5. When the user asks to run a command, you MUST explicitly use the execute tool via XML or JSON formats. NEVER output loose markdown bash blocks expecting them to be executed.
+6. For complex multi-step tasks, explain your plan step-by-step before executing.
 6. Always show what tool you are using and why.
 7. Always reply in markdown format.
 8. Be concise, accurate, and helpful.

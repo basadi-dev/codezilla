@@ -1823,13 +1823,9 @@ func (app *App) handleSkillCommand(parts []string) {
 
 // registerTools registers all available tools
 func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager, todoMgr *tools.TodoManager, appUI ui.UI) {
-	// File operation tools
-	registry.RegisterTool(tools.NewFileReadTool())
-	registry.RegisterTool(tools.NewFileWriteTool())
-	registry.RegisterTool(tools.NewListFilesTool())
-	registry.RegisterTool(tools.NewFileEditTool())
-	registry.RegisterTool(tools.NewGrepSearchTool())
+	// Unified File operation tool
 	registry.RegisterTool(tools.NewFileManageTool())
+	registry.RegisterTool(tools.NewGrepSearchTool())
 
 	// Create analyzer factory and register analyzer tool
 	analyzerModel := cfg.LLM.Models.Analyzer
@@ -1850,10 +1846,6 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	registry.RegisterTool(analyzerFactory.CreateProjectScanAnalyzerWithPrint(analyzerPrint))
 
 	// All tools are auto-approved (NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("fileRead", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("fileWrite", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("listFiles", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("fileEdit", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("grepSearch", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("projectScanAnalyzer", tools.NeverAsk)

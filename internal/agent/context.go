@@ -228,7 +228,31 @@ func (c *Context) TruncateIfNeeded() {
 		}
 
 		if newTokenCount+msgTokens > c.MaxTokens {
-			continue
+			// Try to compress large, old messages rather than dropping entirely
+			compressed := false
+			if msg.Role == RoleTool && msg.ToolResult != nil && msgTokens > 200 {
+				oldContent := ""
+				if msg.ToolResult.Result != nil {
+					oldContent = fmt.Sprintf("%v", msg.ToolResult.Result)
+				}
+				if len(oldContent) > 200 {
+					msg.ToolResult.Result = fmt.Sprintf("[TRUNCATED context limit: Tool originally returned %d chars]", len(oldContent))
+					msgTokens = estimateToolResultTokens(msg.ToolResult)
+					compressed = true
+				}
+			} else if msg.Role == RoleAssistant && len(msg.Content) > 400 {
+				msg.Content = fmt.Sprintf("[TRUNCATED context limit] %s...", msg.Content[:200])
+				msgTokens = estimateTokens(msg.Content)
+				if len(msg.ToolCalls) > 0 {
+					msgTokens += estimateToolCallsTokens(msg.ToolCalls)
+				}
+				compressed = true
+			}
+
+			// If compression didn't save enough space, drop it.
+			if !compressed || newTokenCount+msgTokens > c.MaxTokens {
+				continue
+			}
 		}
 
 		newMessages = append(newMessages, msg)
