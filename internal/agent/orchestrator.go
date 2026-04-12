@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"codezilla/internal/session"
 	"codezilla/pkg/logger"
 
 	anyllm "github.com/mozilla-ai/any-llm-go"
@@ -69,6 +71,25 @@ const (
 	StateComplete
 )
 
+func (s OrchestratorState) String() string {
+	switch s {
+	case StatePrompting:
+		return "StatePrompting"
+	case StateStreaming:
+		return "StateStreaming"
+	case StateParsing:
+		return "StateParsing"
+	case StateExecutingTools:
+		return "StateExecutingTools"
+	case StateErrorRecovery:
+		return "StateErrorRecovery"
+	case StateComplete:
+		return "StateComplete"
+	default:
+		return "UnknownState"
+	}
+}
+
 type AgentOrchestrator struct {
 	agent   *agent
 	logger  *logger.Logger
@@ -113,6 +134,13 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			return "Reached maximum tool execution iterations.", nil
 		}
 
+		if o.agent.config.SessionRecorder != nil {
+			o.agent.config.SessionRecorder.Record(session.EventStateChange, map[string]interface{}{
+				"state": state.String(),
+				"iter":  iter,
+			})
+		}
+
 		switch state {
 		case StatePrompting:
 			if stream {
@@ -121,57 +149,72 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			}
 			iter++
 			// blocking complete
-				if o.agent.config.OnLLMCall != nil {
-					o.agent.config.OnLLMCall(iter)
+			if o.agent.config.OnLLMCall != nil {
+				o.agent.config.OnLLMCall(iter)
+			}
+			llmTools := o.agent.buildLLMTools()
+
+			if o.agent.config.SessionRecorder != nil {
+				o.agent.config.SessionRecorder.Record(session.EventLLMRequest, map[string]interface{}{
+					"provider": o.agent.config.Provider,
+					"model":    o.agent.config.Model,
+					"tools":    llmTools,
+				})
+			}
+
+			o.logger.DumpJSON("Sending LLM Request (Prompting)", map[string]any{
+				"provider": o.agent.config.Provider,
+				"model":    o.agent.config.Model,
+				"tools":    llmTools,
+			})
+
+			completion, err := o.agent.generateCompletion(ctx, "", llmTools)
+			if err != nil {
+				currentLLMError = err
+				state = StateErrorRecovery
+				continue
+			}
+
+			if len(completion.Choices) > 0 {
+				msg := completion.Choices[0].Message
+
+				text := strings.TrimSpace(msg.ContentString())
+				if text == "" && msg.Reasoning != nil {
+					text = strings.TrimSpace(msg.Reasoning.Content)
 				}
-				llmTools := o.agent.buildLLMTools()
-				completion, err := o.agent.generateCompletion(ctx, "", llmTools)
-				if err != nil {
-					currentLLMError = err
-					state = StateErrorRecovery
-					continue
-				}
 
-				if len(completion.Choices) > 0 {
-					msg := completion.Choices[0].Message
+				finalResponse = text
 
-					text := strings.TrimSpace(msg.ContentString())
-					if text == "" && msg.Reasoning != nil {
-						text = strings.TrimSpace(msg.Reasoning.Content)
-					}
-
-					finalResponse = text
-
-					// Think compression logic
-					if threshold := o.agent.config.ThinkCompressThreshold; threshold > 0 {
-						startIdx := strings.Index(finalResponse, "<think>")
-						endIdx := strings.Index(finalResponse, "</think>")
-						if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
-							thinkContent := finalResponse[startIdx+7 : endIdx]
-							if len(thinkContent) > threshold {
-								summary := o.summarizeThink(ctx, thinkContent)
-								if summary != "" {
-									finalResponse = finalResponse[:startIdx+7] + "\n[Thought Process Summarized]\n" + summary + "\n" + finalResponse[endIdx:]
-									o.logger.Info("Compressed <think> block", "original_len", len(thinkContent), "summary_len", len(summary))
-								}
+				// Think compression logic
+				if threshold := o.agent.config.ThinkCompressThreshold; threshold > 0 {
+					startIdx := strings.Index(finalResponse, "<think>")
+					endIdx := strings.Index(finalResponse, "</think>")
+					if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+						thinkContent := finalResponse[startIdx+7 : endIdx]
+						if len(thinkContent) > threshold {
+							summary := o.summarizeThink(ctx, thinkContent)
+							if summary != "" {
+								finalResponse = finalResponse[:startIdx+7] + "\n[Thought Process Summarized]\n" + summary + "\n" + finalResponse[endIdx:]
+								o.logger.Info("Compressed <think> block", "original_len", len(thinkContent), "summary_len", len(summary))
 							}
 						}
 					}
-
-					if onToken != nil && text != "" {
-						onToken(text)
-					}
-
-					if len(msg.ToolCalls) > 0 {
-						toolsToExecute = msg.ToolCalls
-						state = StateExecutingTools
-					} else {
-						state = StateParsing
-					}
-				} else {
-					currentLLMError = fmt.Errorf("empty response")
-					state = StateErrorRecovery
 				}
+
+				if onToken != nil && text != "" {
+					onToken(text)
+				}
+
+				if len(msg.ToolCalls) > 0 {
+					toolsToExecute = msg.ToolCalls
+					state = StateExecutingTools
+				} else {
+					state = StateParsing
+				}
+			} else {
+				currentLLMError = fmt.Errorf("empty response")
+				state = StateErrorRecovery
+			}
 
 		case StateStreaming:
 			iter++
@@ -184,6 +227,22 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			if len(msgs) > 0 && msgs[0].Role != "system" {
 				msgs = append([]anyllm.Message{{Role: "system", Content: sysPrompt}}, msgs...)
 			}
+
+			if o.agent.config.SessionRecorder != nil {
+				o.agent.config.SessionRecorder.Record(session.EventLLMRequest, map[string]interface{}{
+					"provider": o.agent.config.Provider,
+					"model":    o.agent.config.Model,
+					"messages": msgs,
+					"tools":    llmTools,
+				})
+			}
+
+			o.logger.DumpJSON("Sending LLM Request (Streaming)", map[string]any{
+				"provider": o.agent.config.Provider,
+				"model":    o.agent.config.Model,
+				"messages": msgs,
+				"tools":    llmTools,
+			})
 
 			streamCh, errCh, err := o.agent.llmClient.Stream(ctx, o.agent.config.Provider, o.agent.config.Model, msgs, o.agent.config.Temperature, llmTools)
 
@@ -272,7 +331,20 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					o.agent.config.OnToolExecution(tc.Function.Name, params)
 				}
 
+				start := time.Now()
 				result, err := o.agent.ExecuteTool(ctx, tc.Function.Name, params)
+				dur := time.Since(start).Round(time.Millisecond).String()
+				if o.agent.config.SessionRecorder != nil {
+					errStr := ""
+					if err != nil {
+						errStr = err.Error()
+					}
+					o.agent.config.SessionRecorder.Record(session.EventToolResult, map[string]interface{}{
+						"tool":     tc.Function.Name,
+						"duration": dur,
+						"error":    errStr,
+					})
+				}
 				if err != nil {
 					o.agent.context.AddToolResultMessage(tc.ID, nil, err)
 				} else {
@@ -312,7 +384,7 @@ func (o *AgentOrchestrator) summarizeThink(ctx context.Context, thinkText string
 	}
 
 	o.logger.Debug("Summarizing deep thought", "model", summariserModel, "chars", len(thinkText))
-	
+
 	// Create a fast, no-tool completion call. Low temperature for factuality.
 	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.3, nil)
 	if err != nil {

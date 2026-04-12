@@ -8,20 +8,20 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/term"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 )
 
 // BaseUI implements the UI interface with a base interface
 type BaseUI struct {
-	theme          Theme
-	reader         *FixedInput
-	writer         *bufio.Writer
-	spinnerStop    chan bool
-	spinnerMutex   sync.Mutex
-	spinnerStatus  string // updated via UpdateThinkingStatus
-	width          int
-	currentModel   string
+	theme         Theme
+	reader        *FixedInput
+	writer        *bufio.Writer
+	spinnerStop   chan bool
+	spinnerMutex  sync.Mutex
+	spinnerStatus string // updated via UpdateThinkingStatus
+	width         int
+	currentModel  string
 }
 
 // NewBaseUI creates a new base UI
@@ -47,14 +47,12 @@ func NewBaseUI(historyFile string) (UI, error) {
 		writer: bufio.NewWriter(os.Stdout),
 		width:  width,
 	}
-	
+
 	// Apply initial theme to reader
 	ui.reader.SetTheme(ui.theme)
 
 	return ui, nil
 }
-
-
 
 // Clear clears the terminal screen
 func (ui *BaseUI) Clear() {

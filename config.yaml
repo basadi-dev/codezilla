@@ -67,11 +67,12 @@ system_prompt: |
 
 # Logging outputs
 log_file: "logs/codezilla.log"
-log_level: "info"
+log_level: "debug"
 log_silent: false
 
 retain_context: true
 max_context_chars: 50000
+session_events_dir: "sessions"
 
 # Auto-planning: automatically create a todo plan for complex multi-step requests
 auto_plan: true

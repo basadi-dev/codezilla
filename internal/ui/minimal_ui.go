@@ -150,7 +150,7 @@ func (ui *MinimalUI) ShowModels(models []string, current, planner, subAgent, sum
 		if model == summariser {
 			tags = append(tags, "summariser")
 		}
-		
+
 		if len(tags) > 0 {
 			fmt.Printf("  * %s (%s)\n", model, strings.Join(tags, ", "))
 		} else {

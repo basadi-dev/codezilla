@@ -77,7 +77,7 @@ func TestExtractToolCallFormats(t *testing.T) {
 				if tt.paramName != "" {
 					var params map[string]interface{}
 					_ = json.Unmarshal([]byte(toolCall.Function.Arguments), &params)
-					
+
 					val, ok := params[tt.paramName]
 					if !ok {
 						t.Errorf("Parameter %q not found, available params: %v", tt.paramName, params)
@@ -162,7 +162,6 @@ And also:
 </tool>`,
 			expectedTools: []string{"fileRead", "fileWrite"},
 		},
-
 	}
 
 	for _, tt := range tests {

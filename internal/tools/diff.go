@@ -115,26 +115,26 @@ func GenerateDiff(contentA, contentB string, contextLines int) string {
 	// Header
 	headerLeft := styleHeaderLeft.Render(" - ") + " Removed"
 	headerRight := styleHeaderRight.Render(" + ") + " Added"
-	
+
 	result.WriteString(fmt.Sprintf("%s   %s\n\n", headerLeft, headerRight))
 
 	var outputLines []string
 	wasShowing := false
-	
+
 	width, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || width <= 0 {
 		width = 120 // fallback width
 	}
-	
+
 	maxTextWidth := width - (lineNumWidth*2 + 10)
 	if maxTextWidth < 20 {
 		maxTextWidth = 20
 	}
-	
+
 	for i, dl := range allLines {
 		if !showMap[i] {
 			if wasShowing {
-				outputLines = append(outputLines, styleDim.Render(strings.Repeat("╌", lineNumWidth*2 + 5)))
+				outputLines = append(outputLines, styleDim.Render(strings.Repeat("╌", lineNumWidth*2+5)))
 			}
 			wasShowing = false
 			continue
@@ -162,7 +162,7 @@ func GenerateDiff(contentA, contentB string, contextLines int) string {
 	}
 
 	result.WriteString(strings.Join(outputLines, "\n"))
-	
+
 	return styleBorder.Render(result.String())
 }
 

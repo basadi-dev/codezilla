@@ -15,14 +15,14 @@ import (
 
 // FixedInput implements InputReader with simple, reliable single-line input
 type FixedInput struct {
-	prompt       string
-	reader       *bufio.Reader
-	historyFile  string
-	history      []string
-	historyIndex int
-	mu           sync.Mutex
-	rawMode      bool
-	fd           int
+	prompt         string
+	reader         *bufio.Reader
+	historyFile    string
+	history        []string
+	historyIndex   int
+	mu             sync.Mutex
+	rawMode        bool
+	fd             int
 	currentLines   int                            // Track how many lines the current prompt/input spans
 	completer      func(line string) []Completion // optional Tab-completion callback
 	menuActive     bool                           // whether the interactive dropdown is visible
@@ -405,7 +405,6 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 	}
 	fmt.Print("\r\033[J") // Clear line and everything below
 
-
 	// Print prompt
 	fmt.Print(fi.prompt)
 
@@ -461,14 +460,14 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 		endLine = (totalPrintedLen - 1) / termWidth
 	}
 	currentCursorY := endLine // This is our physical line drawn so far
-	
+
 	// Menu Drawing
 	menuDrawnLines := 0
 	if fi.menuActive {
 		fi.mu.Lock()
 		completerFn := fi.completer
 		fi.mu.Unlock()
-		
+
 		if completerFn != nil {
 			candidates := completerFn(text)
 			fi.menuCandidates = candidates
@@ -485,19 +484,23 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 				if drawCount > maxMenuLines {
 					drawCount = maxMenuLines
 				}
-				
+
 				windowStart := 0
 				if fi.menuIndex >= maxMenuLines {
 					windowStart = fi.menuIndex - maxMenuLines + 1
 				}
-				
+
 				fmt.Print("\r\n")
 				currentCursorY++
 
 				// Determine separator width
 				width := termWidth - 1
-				if width > 120 { width = 120 }
-				if width < 20 { width = 20 }
+				if width > 120 {
+					width = 120
+				}
+				if width < 20 {
+					width = 20
+				}
 
 				cmdStyle := fi.theme.ACTheme.Cmd
 				descStyle := fi.theme.ACTheme.Desc
@@ -505,16 +508,18 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 				hiDescStyle := fi.theme.ACTheme.HiDesc
 				hiPrefixStyle := fi.theme.ACTheme.HiPrefix
 				separator := fi.theme.ACTheme.Separator.Render(strings.Repeat("─", width))
-				
+
 				fmt.Print(separator + "\r\n")
 				currentCursorY++
 				menuDrawnLines += 2 // newline + separator
-				
+
 				// padding calculation (first column)
 				maxLen := 0
 				for _, c := range candidates {
 					disp := c.Display
-					if disp == "" { disp = c.Text }
+					if disp == "" {
+						disp = c.Text
+					}
 					if w := lipgloss.Width(disp); w > maxLen {
 						maxLen = w
 					}
@@ -523,7 +528,9 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 
 				for i := 0; i < drawCount; i++ {
 					idx := windowStart + i
-					if idx >= len(candidates) { break }
+					if idx >= len(candidates) {
+						break
+					}
 					c := candidates[idx]
 
 					isHighlighted := (idx == fi.menuIndex)
@@ -531,31 +538,39 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 					if isHighlighted {
 						prefixStr = hiPrefixStyle.Render(" ❯ ")
 					}
-					
+
 					cmdStr := c.Display
-					if cmdStr == "" { cmdStr = c.Text }
+					if cmdStr == "" {
+						cmdStr = c.Text
+					}
 					descStr := c.Description
 					if isHighlighted {
 						cmdStr = hiCmdStyle.Render(cmdStr)
-						if descStr != "" { descStr = hiDescStyle.Render(descStr) }
+						if descStr != "" {
+							descStr = hiDescStyle.Render(descStr)
+						}
 					} else {
 						cmdStr = cmdStyle.Render(cmdStr)
-						if descStr != "" { descStr = descStyle.Render(descStr) }
+						if descStr != "" {
+							descStr = descStyle.Render(descStr)
+						}
 					}
 
 					rawDisp := c.Display
-					if rawDisp == "" { rawDisp = c.Text }
+					if rawDisp == "" {
+						rawDisp = c.Text
+					}
 					visualWidth := lipgloss.Width(rawDisp)
 					spacing := ""
 					if pad > visualWidth {
 						spacing = strings.Repeat(" ", pad-visualWidth)
 					}
-					
+
 					fmt.Printf("%s%s%s %s\r\n", prefixStr, cmdStr, spacing, descStr)
 					currentCursorY++
 					menuDrawnLines++
 				}
-				
+
 				bottomSeparator := fi.theme.ACTheme.Separator.Render(strings.Repeat("─", width))
 				fmt.Print(bottomSeparator) // Bottom border without trailing newline
 			} else {
@@ -563,7 +578,7 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 			}
 		}
 	}
-	
+
 	fi.menuLines = menuDrawnLines
 
 	// Calculate target cursor position with wrapping
@@ -581,7 +596,7 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 	if targetCursorCol > 0 {
 		fmt.Printf("\033[%dC", targetCursorCol)
 	}
-	
+
 	// Update tracked cursor line offset so we know where we are purely relative to prompt
 	fi.cursorLine = targetCursorLine
 }

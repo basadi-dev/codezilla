@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"codezilla/internal/core/llm"
+	"codezilla/internal/session"
 	"codezilla/internal/tools"
 	"codezilla/pkg/logger"
 )
@@ -64,6 +65,7 @@ type Config struct {
 
 	SummariserModel        string
 	ThinkCompressThreshold int
+	SessionRecorder        *session.Recorder
 }
 
 func DefaultConfig() *Config {
@@ -174,13 +176,35 @@ func (a *agent) ExecuteTool(ctx context.Context, toolName string, params map[str
 		}
 	}
 
+	if a.config.SessionRecorder != nil {
+		a.config.SessionRecorder.Record(session.EventToolStart, map[string]interface{}{
+			"tool":   toolName,
+			"params": params,
+		})
+	}
+
 	startTime := time.Now()
 	result, err := tool.Execute(ctx, params)
 	duration := time.Since(startTime)
 
 	if err != nil {
+		if a.config.SessionRecorder != nil {
+			a.config.SessionRecorder.Record(session.EventToolResult, map[string]interface{}{
+				"tool":     toolName,
+				"error":    err.Error(),
+				"duration": duration.String(),
+			})
+		}
 		a.logger.Error("Tool execution failed", "tool", toolName, "error", err, "duration", duration.String())
 		return nil, fmt.Errorf("%w: %s: %v", ErrToolExecutionFailed, toolName, err)
+	}
+
+	if a.config.SessionRecorder != nil {
+		a.config.SessionRecorder.Record(session.EventToolResult, map[string]interface{}{
+			"tool":     toolName,
+			"result":   result,
+			"duration": duration.String(),
+		})
 	}
 
 	a.logger.Info("Tool executed successfully", "tool", toolName, "duration", duration.String())

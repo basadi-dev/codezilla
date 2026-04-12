@@ -124,12 +124,34 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 			if strItem, ok := item.(string); ok {
 				contentStr = strItem
 			} else if itemMap, ok := item.(map[string]interface{}); ok {
-				if c, ok := itemMap["content"].(string); ok && c != "" { contentStr = c }
-				if contentStr == "Untitled Task" { if c, ok := itemMap["name"].(string); ok && c != "" { contentStr = c } }
-				if contentStr == "Untitled Task" { if c, ok := itemMap["title"].(string); ok && c != "" { contentStr = c } }
-				if contentStr == "Untitled Task" { if c, ok := itemMap["item"].(string); ok && c != "" { contentStr = c } }
-				if contentStr == "Untitled Task" { if c, ok := itemMap["task"].(string); ok && c != "" { contentStr = c } }
-				if contentStr == "Untitled Task" { if c, ok := itemMap["description"].(string); ok && c != "" { contentStr = c } }
+				if c, ok := itemMap["content"].(string); ok && c != "" {
+					contentStr = c
+				}
+				if contentStr == "Untitled Task" {
+					if c, ok := itemMap["name"].(string); ok && c != "" {
+						contentStr = c
+					}
+				}
+				if contentStr == "Untitled Task" {
+					if c, ok := itemMap["title"].(string); ok && c != "" {
+						contentStr = c
+					}
+				}
+				if contentStr == "Untitled Task" {
+					if c, ok := itemMap["item"].(string); ok && c != "" {
+						contentStr = c
+					}
+				}
+				if contentStr == "Untitled Task" {
+					if c, ok := itemMap["task"].(string); ok && c != "" {
+						contentStr = c
+					}
+				}
+				if contentStr == "Untitled Task" {
+					if c, ok := itemMap["description"].(string); ok && c != "" {
+						contentStr = c
+					}
+				}
 
 				if p, ok := itemMap["priority"].(string); ok {
 					priorityStr = p
@@ -233,12 +255,15 @@ func (t TodoUpdateTool) Execute(ctx context.Context, params map[string]interface
 			}
 
 			plan.UpdatedAt = time.Now()
-			
+
 			statusIcon := "○"
 			switch status {
-			case "in_progress": statusIcon = "◐"
-			case "completed": statusIcon = "●"
-			case "cancelled": statusIcon = "⊘"
+			case "in_progress":
+				statusIcon = "◐"
+			case "completed":
+				statusIcon = "●"
+			case "cancelled":
+				statusIcon = "⊘"
 			}
 			return fmt.Sprintf("%s %s: %s", statusIcon, status, plan.Items[i].Content), nil
 		}
@@ -327,7 +352,7 @@ func formatPlan(plan *TodoPlan, statusFilter string) string {
 		}
 
 		icon := statusIcons[item.Status]
-		
+
 		priorityIcon := ""
 		switch item.Priority {
 		case "high":
@@ -514,26 +539,28 @@ func (t TodoAnalyzeTool) Execute(ctx context.Context, params map[string]interfac
 type TodoSetCurrentTool struct{ mgr *TodoManager }
 
 func (t TodoSetCurrentTool) Name() string { return "todoSetCurrent" }
-func (t TodoSetCurrentTool) Description() string { return "Set an existing todo plan as the current active plan" }
+func (t TodoSetCurrentTool) Description() string {
+	return "Set an existing todo plan as the current active plan"
+}
 func (t TodoSetCurrentTool) ParameterSchema() JSONSchema {
-    return JSONSchema{
-        Type: "object",
-        Properties: map[string]JSONSchema{
-            "plan_id": {Type: "string", Description: "ID of the plan to set as current"},
-        },
-        Required: []string{"plan_id"},
-    }
+	return JSONSchema{
+		Type: "object",
+		Properties: map[string]JSONSchema{
+			"plan_id": {Type: "string", Description: "ID of the plan to set as current"},
+		},
+		Required: []string{"plan_id"},
+	}
 }
 func (t TodoSetCurrentTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-    planID, _ := params["plan_id"].(string)
-    globalTodoManager := t.mgr
-    globalTodoManager.mu.Lock()
-    defer globalTodoManager.mu.Unlock()
-    if _, ok := globalTodoManager.plans[planID]; !ok {
-        return "", fmt.Errorf("plan not found: %s", planID)
-    }
-    globalTodoManager.currentPlanID = planID
-    return fmt.Sprintf("Current plan set to %s", planID), nil
+	planID, _ := params["plan_id"].(string)
+	globalTodoManager := t.mgr
+	globalTodoManager.mu.Lock()
+	defer globalTodoManager.mu.Unlock()
+	if _, ok := globalTodoManager.plans[planID]; !ok {
+		return "", fmt.Errorf("plan not found: %s", planID)
+	}
+	globalTodoManager.currentPlanID = planID
+	return fmt.Sprintf("Current plan set to %s", planID), nil
 }
 
 // GetTodoTools returns all todo management tools using the provided manager.

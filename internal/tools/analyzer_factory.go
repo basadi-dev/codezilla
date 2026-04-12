@@ -44,4 +44,3 @@ func (f *AnalyzerFactory) CreateProjectScanAnalyzerWithPrint(printFunc func(form
 	a.SetPrintFunc(printFunc)
 	return a
 }
-

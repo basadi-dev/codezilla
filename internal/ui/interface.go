@@ -5,15 +5,15 @@ import "github.com/charmbracelet/lipgloss"
 // Theme defines the colors and styles for the UI
 type Theme struct {
 	// Styles
-	StyleReset   lipgloss.Style
-	StyleRed     lipgloss.Style
-	StyleGreen   lipgloss.Style
-	StyleYellow  lipgloss.Style
-	StyleBlue    lipgloss.Style
-	StylePurple  lipgloss.Style
-	StyleCyan    lipgloss.Style
-	StyleBold    lipgloss.Style
-	StyleDim     lipgloss.Style
+	StyleReset  lipgloss.Style
+	StyleRed    lipgloss.Style
+	StyleGreen  lipgloss.Style
+	StyleYellow lipgloss.Style
+	StyleBlue   lipgloss.Style
+	StylePurple lipgloss.Style
+	StyleCyan   lipgloss.Style
+	StyleBold   lipgloss.Style
+	StyleDim    lipgloss.Style
 
 	// Icons
 	IconSuccess string

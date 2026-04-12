@@ -75,7 +75,7 @@ Example format:
 	a.context.AddSystemMessage(planPrompt)
 
 	llmTools := a.buildLLMTools()
-	
+
 	targetModel := a.config.PlannerModel
 	if targetModel == "" {
 		targetModel = a.config.Model

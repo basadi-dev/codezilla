@@ -41,7 +41,7 @@ func (sp *StreamProcessor) ProcessChannel(
 				totalChunks++
 				if len(chunk.Choices) > 0 {
 					delta := chunk.Choices[0].Delta
-					
+
 					// Close reasoning if switching to content or tools
 					if inReasoning && (delta.Content != "" || len(delta.ToolCalls) > 0) {
 						inReasoning = false

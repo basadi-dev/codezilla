@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -77,8 +78,8 @@ func New(config Config) (*Logger, error) {
 		}
 	}
 
-	// Create JSON handler with timestamp
-	handler := slog.NewJSONHandler(writer, &slog.HandlerOptions{
+	// Create Text handler instead of JSON for human readability
+	handler := slog.NewTextHandler(writer, &slog.HandlerOptions{
 		Level: level,
 	})
 
@@ -102,6 +103,22 @@ func (l *Logger) Close() error {
 // Debug logs a debug message
 func (l *Logger) Debug(msg string, args ...any) {
 	l.slogger.Debug(msg, args...)
+}
+
+// DumpJSON explicitly writes a nicely indented JSON block bypassing structural single-line quoting
+func (l *Logger) DumpJSON(msg string, data any) {
+	if l.level > slog.LevelDebug {
+		return
+	}
+	l.slogger.Debug(msg)
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err == nil {
+		if l.file != nil {
+			_, _ = l.file.Write(append(b, '\n'))
+		} else if l.writer != nil && !l.silent {
+			_, _ = l.writer.Write(append(b, '\n'))
+		}
+	}
 }
 
 // Info logs an info message
@@ -143,7 +160,7 @@ func (l *Logger) WithGroup(name string) *Logger {
 
 // DefaultLogger creates a basic logger that writes to stdout
 func DefaultLogger() *Logger {
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})
 

@@ -35,9 +35,10 @@ type Config struct {
 	LogSilent bool   `json:"log_silent" yaml:"log_silent"`
 
 	// Context management
-	RetainContext   bool   `json:"retain_context" yaml:"retain_context"`
-	MaxContextChars int    `json:"max_context_chars" yaml:"max_context_chars"`
-	HistoryFile     string `json:"history_file" yaml:"history_file"`
+	RetainContext    bool   `json:"retain_context" yaml:"retain_context"`
+	MaxContextChars  int    `json:"max_context_chars" yaml:"max_context_chars"`
+	HistoryFile      string `json:"history_file" yaml:"history_file"`
+	SessionEventsDir string `json:"session_events_dir" yaml:"session_events_dir"`
 
 	// Agent behavior
 	AutoPlan bool `json:"auto_plan" yaml:"auto_plan"`
@@ -66,10 +67,10 @@ type Config struct {
 
 // MetasearchSettings configures the embedded metasearch engine.
 type MetasearchSettings struct {
-	EnableBing     bool `json:"enable_bing" yaml:"enable_bing"`             // Enable Bing HTML scraping (opt-in, more fragile)
-	TimeoutSeconds int  `json:"timeout_seconds" yaml:"timeout_seconds"`     // Per-backend timeout in seconds
-	MaxResults     int  `json:"max_results" yaml:"max_results"`             // Default number of results to return
-	JitterMs       int  `json:"jitter_ms" yaml:"jitter_ms"`                 // Random delay per request in ms (0 = off)
+	EnableBing     bool `json:"enable_bing" yaml:"enable_bing"`         // Enable Bing HTML scraping (opt-in, more fragile)
+	TimeoutSeconds int  `json:"timeout_seconds" yaml:"timeout_seconds"` // Per-backend timeout in seconds
+	MaxResults     int  `json:"max_results" yaml:"max_results"`         // Default number of results to return
+	JitterMs       int  `json:"jitter_ms" yaml:"jitter_ms"`             // Random delay per request in ms (0 = off)
 }
 
 // SkillsConfig configures the skills system.
@@ -105,7 +106,7 @@ type LLMAPIKeysConfig struct {
 }
 
 type OpenAIConfig struct {
-	BaseURL  string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	BaseURL string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
 }
 
 type OllamaConfig struct {
@@ -173,10 +174,11 @@ func DefaultConfig() *Config {
 		RetainContext:          true,
 		MaxContextChars:        50000,
 		HistoryFile:            filepath.Join(getConfigDir(), "history"),
+		SessionEventsDir:       filepath.Join(getConfigDir(), "sessions"),
 		AutoPlan:               false,
 		ThinkCompressThreshold: 2000,
-		DangerousToolsWarn:  true,
-		AlwaysAskPermission: false,
+		DangerousToolsWarn:     true,
+		AlwaysAskPermission:    false,
 		ToolPermissions: map[string]string{
 			"fileRead":            "never_ask",
 			"listFiles":           "never_ask",

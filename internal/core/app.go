@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/term"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
-	"golang.org/x/term"
+	"time"
 
 	"codezilla/internal/agent"
 	"codezilla/internal/config"
 	"codezilla/internal/core/llm"
+	"codezilla/internal/session"
 	"codezilla/internal/skills"
 	"codezilla/internal/tools"
 	"codezilla/internal/ui"
@@ -23,14 +26,15 @@ import (
 
 // App represents the core application logic, independent of UI
 type App struct {
-	config       *config.Config
-	logger       *logger.Logger
-	agent        agent.Agent
-	llmClient    *llm.Client
-	tools        tools.ToolRegistry
-	ui           ui.UI
-	skillReg     *skills.Registry
-	cachedModels []string // updated by /models, used for Tab completion
+	config        *config.Config
+	logger        *logger.Logger
+	agent         agent.Agent
+	llmClient     *llm.Client
+	tools         tools.ToolRegistry
+	ui            ui.UI
+	skillReg      *skills.Registry
+	cachedModels  []string // updated by /models, used for Tab completion
+	sessionRecord *session.Recorder
 }
 
 // NewApp creates a new application instance
@@ -44,6 +48,22 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	log, err := logger.New(logConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize logger: %w", err)
+	}
+
+	// Setup Session tracking directory and file
+	if cfg.SessionEventsDir != "" {
+		if err := os.MkdirAll(cfg.SessionEventsDir, 0755); err != nil {
+			log.Warn("Failed to create SessionEventsDir", "error", err)
+		}
+	}
+	sessionPath := ""
+	if cfg.SessionEventsDir != "" {
+		sessionPath = filepath.Join(cfg.SessionEventsDir, fmt.Sprintf("session_%s.jsonl", time.Now().Format("20060102_150405")))
+	}
+
+	sessionRecord, err := session.NewRecorder(sessionPath, log)
+	if err != nil {
+		log.Warn("Failed to initialize session recorder", "error", err)
 	}
 
 	// Initialize LLM factory
@@ -104,7 +124,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				}
 				return tools.PermissionResponse{Granted: true, RememberMe: true}, nil
 			}
-			
+
 			ui.Warning("Please answer 'y', 'n', or 'always'")
 		}
 	})
@@ -133,253 +153,312 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	// and avoid interleaving with the spinner.
 
 	onToolExec := func(toolName string, params map[string]interface{}) {
-			// Clear spinner before printing so messages don't collide on the same line
-			ui.HideThinking()
+		// Record tool start in session log
+		if sessionRecord != nil {
+			sessionRecord.Record(session.EventToolStart, map[string]interface{}{
+				"tool":   toolName,
+				"params": params,
+			})
+		}
 
-			detail := ""
-			switch toolName {
-			case "fileRead":
-				if fp, ok := params["file_path"].(string); ok {
-					detail = fp
-				}
-			case "fileWrite":
-				if fp, ok := params["file_path"].(string); ok {
-					detail = fp
-				}
-			case "listFiles":
-				dir, _ := params["dir"].(string)
-				if dir == "" { dir, _ = params["directory"].(string) }
-				if dir == "" { dir, _ = params["path"].(string) }
-				detail = dir
-			case "execute":
-				if cmd, ok := params["command"].(string); ok {
-					if len(cmd) > 60 {
-						cmd = cmd[:60] + "..."
-					}
-					detail = cmd
-				}
-			case "webSearch":
-				if q, ok := params["query"].(string); ok {
-					detail = q
-				}
-			case "fetchURL":
-				if u, ok := params["url"].(string); ok {
-					detail = u
-				}
-			case "grepSearch":
-				dp, ok := params["path"].(string)
-				if !ok {
-					dp, _ = params["search_path"].(string) 
-				}
-				if dp != "" {
-					if q, ok := params["query"].(string); ok {
-						detail = fmt.Sprintf(`"%s" in %s`, q, dp)
-					} else {
-						detail = dp
-					}
-				}
-			case "subAgent":
-				if taskStr, ok := params["task"].(string); ok {
-					detail = taskStr
-					if len(detail) > 40 {
-						detail = detail[:37] + "..."
-					}
-				}
-			case "fileEdit":
-				fp, _ := params["file_path"].(string)
-				if fp == "" { fp, _ = params["target_file"].(string) }
+		// Clear spinner before printing so messages don't collide on the same line
+		ui.HideThinking()
+
+		detail := ""
+		switch toolName {
+		case "fileRead":
+			if fp, ok := params["file_path"].(string); ok {
 				detail = fp
-			case "fileManage":
-				op, _ := params["action"].(string)
-				if op == "" { op, _ = params["operation"].(string) }
-				src, _ := params["path"].(string)
-				if src == "" { src, _ = params["source_path"].(string) }
-				dst, _ := params["destination_path"].(string)
-				if op != "" {
-					if dst != "" {
-						detail = fmt.Sprintf("%s: %s -> %s", op, src, dst)
-					} else {
-						detail = fmt.Sprintf("%s: %s", op, src)
-					}
+			}
+		case "fileWrite":
+			if fp, ok := params["file_path"].(string); ok {
+				detail = fp
+			}
+		case "listFiles":
+			dir, _ := params["dir"].(string)
+			if dir == "" {
+				dir, _ = params["directory"].(string)
+			}
+			if dir == "" {
+				dir, _ = params["path"].(string)
+			}
+			detail = dir
+		case "execute":
+			if cmd, ok := params["command"].(string); ok {
+				if len(cmd) > 60 {
+					cmd = cmd[:60] + "..."
 				}
-			case "todoCreate":
-				name, _ := params["name"].(string)
-				desc, _ := params["description"].(string)
-				theme := ui.GetTheme()
-
-				// Build plan box content
-				var lines []string
-
-				// Title line
-				titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#1E66F5", Dark: "#7AA2F7"})
-				plannerModel := cfg.LLM.Models.Planner
-				if plannerModel == "" {
-					plannerModel = cfg.LLM.Models.Default
-				}
-				modelSuffix := lipgloss.NewStyle().Faint(true).Render(" · via " + plannerModel)
-				if name != "" {
-					lines = append(lines, titleStyle.Render("📋 "+name)+modelSuffix)
+				detail = cmd
+			}
+		case "webSearch":
+			if q, ok := params["query"].(string); ok {
+				detail = q
+			}
+		case "fetchURL":
+			if u, ok := params["url"].(string); ok {
+				detail = u
+			}
+		case "grepSearch":
+			dp, ok := params["path"].(string)
+			if !ok {
+				dp, _ = params["search_path"].(string)
+			}
+			if dp != "" {
+				if q, ok := params["query"].(string); ok {
+					detail = fmt.Sprintf(`"%s" in %s`, q, dp)
 				} else {
-					lines = append(lines, titleStyle.Render("📋 New Plan")+modelSuffix)
+					detail = dp
 				}
-				if desc != "" {
-					lines = append(lines, theme.StyleDim.Render(desc))
+			}
+		case "subAgent":
+			if taskStr, ok := params["task"].(string); ok {
+				detail = taskStr
+				if len(detail) > 40 {
+					detail = detail[:37] + "..."
 				}
-				lines = append(lines, "")
+			}
+		case "fileEdit":
+			fp, _ := params["file_path"].(string)
+			if fp == "" {
+				fp, _ = params["target_file"].(string)
+			}
+			detail = fp
+		case "fileManage":
+			op, _ := params["action"].(string)
+			if op == "" {
+				op, _ = params["operation"].(string)
+			}
+			src, _ := params["path"].(string)
+			if src == "" {
+				src, _ = params["source_path"].(string)
+			}
+			dst, _ := params["destination_path"].(string)
+			if op != "" {
+				if dst != "" {
+					detail = fmt.Sprintf("%s: %s -> %s", op, src, dst)
+				} else {
+					detail = fmt.Sprintf("%s: %s", op, src)
+				}
+			}
+		case "todoCreate":
+			name, _ := params["name"].(string)
+			desc, _ := params["description"].(string)
+			theme := ui.GetTheme()
 
-				// Task items
-				if items, ok := params["items"].([]interface{}); ok {
-					for _, item := range items {
-						content := "Untitled Task"
-						if strItem, ok := item.(string); ok {
-							content = strItem
-						} else if itemMap, ok := item.(map[string]interface{}); ok {
-							if c, ok := itemMap["content"].(string); ok && c != "" { content = c }
-							if content == "Untitled Task" { if c, ok := itemMap["name"].(string); ok && c != "" { content = c } }
-							if content == "Untitled Task" { if c, ok := itemMap["title"].(string); ok && c != "" { content = c } }
-							if content == "Untitled Task" { if c, ok := itemMap["item"].(string); ok && c != "" { content = c } }
-							if content == "Untitled Task" { if c, ok := itemMap["task"].(string); ok && c != "" { content = c } }
-							if content == "Untitled Task" { if c, ok := itemMap["description"].(string); ok && c != "" { content = c } }
+			// Build plan box content
+			var lines []string
 
-							priority, _ := itemMap["priority"].(string)
-							priorityBadge := ""
-							switch priority {
-							case "high":
-								priorityBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87")).Render("▲") + " "
-							case "low":
-								priorityBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262")).Render("▽") + " "
-							}
-							
-							if len(content) > 65 {
-								content = content[:62] + "..."
-							}
+			// Title line
+			titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#1E66F5", Dark: "#7AA2F7"})
+			plannerModel := cfg.LLM.Models.Planner
+			if plannerModel == "" {
+				plannerModel = cfg.LLM.Models.Default
+			}
+			modelSuffix := lipgloss.NewStyle().Faint(true).Render(" · via " + plannerModel)
+			if name != "" {
+				lines = append(lines, titleStyle.Render("📋 "+name)+modelSuffix)
+			} else {
+				lines = append(lines, titleStyle.Render("📋 New Plan")+modelSuffix)
+			}
+			if desc != "" {
+				lines = append(lines, theme.StyleDim.Render(desc))
+			}
+			lines = append(lines, "")
 
-							circleStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#7C7F93", Dark: "#565F89"})
-							lines = append(lines, fmt.Sprintf("  %s  %s%s", circleStyle.Render("○"), priorityBadge, content))
-						} else {
-							// If it's something else, just cast and truncate
-							content = fmt.Sprintf("%v", item)
-							if len(content) > 65 { content = content[:62] + "..." }
-							circleStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#7C7F93", Dark: "#565F89"})
-							lines = append(lines, fmt.Sprintf("  %s  %s", circleStyle.Render("○"), content))
+			// Task items
+			if items, ok := params["items"].([]interface{}); ok {
+				for _, item := range items {
+					content := "Untitled Task"
+					if strItem, ok := item.(string); ok {
+						content = strItem
+					} else if itemMap, ok := item.(map[string]interface{}); ok {
+						if c, ok := itemMap["content"].(string); ok && c != "" {
+							content = c
 						}
-					}
-				}
-
-				// Plain output — no box
-				ui.Print("\n")
-				for _, l := range lines {
-					ui.Print("%s\n", l)
-				}
-				ui.Print("\n")
-				ui.ShowThinking()
-				return
-			case "todoUpdate":
-				theme := ui.GetTheme()
-				statusIcons := map[string]string{
-					"pending":     "○",
-					"in_progress": "◐",
-					"completed":   "●",
-					"cancelled":   "⊘",
-				}
-
-				if plan := todoMgr.CurrentPlan(); plan != nil {
-					// Re-render the whole list so the user sees live progress
-					ui.Print("\n")
-					for _, item := range plan.Items {
-						icon := statusIcons[item.Status]
-						var iconStyle lipgloss.Style
-						switch item.Status {
-						case "in_progress":
-							iconStyle = theme.StyleYellow
-						case "completed":
-							iconStyle = theme.StyleGreen
-						case "cancelled":
-							iconStyle = theme.StyleRed
-						default:
-							iconStyle = theme.StyleDim
+						if content == "Untitled Task" {
+							if c, ok := itemMap["name"].(string); ok && c != "" {
+								content = c
+							}
 						}
-						content := item.Content
+						if content == "Untitled Task" {
+							if c, ok := itemMap["title"].(string); ok && c != "" {
+								content = c
+							}
+						}
+						if content == "Untitled Task" {
+							if c, ok := itemMap["item"].(string); ok && c != "" {
+								content = c
+							}
+						}
+						if content == "Untitled Task" {
+							if c, ok := itemMap["task"].(string); ok && c != "" {
+								content = c
+							}
+						}
+						if content == "Untitled Task" {
+							if c, ok := itemMap["description"].(string); ok && c != "" {
+								content = c
+							}
+						}
+
+						priority, _ := itemMap["priority"].(string)
+						priorityBadge := ""
+						switch priority {
+						case "high":
+							priorityBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87")).Render("▲") + " "
+						case "low":
+							priorityBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262")).Render("▽") + " "
+						}
+
 						if len(content) > 65 {
 							content = content[:62] + "..."
 						}
-						var lineStyle lipgloss.Style
-						if item.Status == "completed" || item.Status == "cancelled" {
-							lineStyle = theme.StyleDim
-						} else {
-							lineStyle = lipgloss.NewStyle()
-						}
-						ui.Print("  %s  %s\n", iconStyle.Render(icon), lineStyle.Render(content))
-					}
-					ui.Print("\n")
-				}
-				ui.ShowThinking()
-				return
-			case "projectScanAnalyzer":
-				dir, _ := params["dir"].(string)
-				if dir == "" { dir, _ = params["directory"].(string) }
-				uq, _ := params["userQuery"].(string)
-				if uq != "" {
-					if dir != "" {
-						detail = fmt.Sprintf(`"%s" in %s`, uq, dir)
+
+						circleStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#7C7F93", Dark: "#565F89"})
+						lines = append(lines, fmt.Sprintf("  %s  %s%s", circleStyle.Render("○"), priorityBadge, content))
 					} else {
-						detail = fmt.Sprintf(`"%s"`, uq)
+						// If it's something else, just cast and truncate
+						content = fmt.Sprintf("%v", item)
+						if len(content) > 65 {
+							content = content[:62] + "..."
+						}
+						circleStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#7C7F93", Dark: "#565F89"})
+						lines = append(lines, fmt.Sprintf("  %s  %s", circleStyle.Render("○"), content))
 					}
-				} else {
-					detail = dir
 				}
 			}
 
-			// Only show tool description for non-obvious tools (skip todo/file noise)
-			showDesc := true
-			switch toolName {
-			case "todoCreate", "todoUpdate", "todoList", "todoAnalyze",
-				"fileRead", "fileWrite", "fileEdit", "fileManage", "listFiles":
-				showDesc = false
+			// Plain output — no box
+			ui.Print("\n")
+			for _, l := range lines {
+				ui.Print("%s\n", l)
 			}
-			var desc string
-			if showDesc {
-				if tool, ok := toolRegistry.GetTool(toolName); ok {
-					desc = tool.Description()
-				}
-			}
-
-			displayName := toolName
-			switch toolName {
-			case "fileRead": displayName = "📄 Read File"
-			case "fileWrite": displayName = "📝 Write File"
-			case "listFiles": displayName = "📂 List Files"
-			case "execute": displayName = "💻 Run Command"
-			case "webSearch": displayName = "🌐 Web Search"
-			case "fetchURL": displayName = "📥 Fetch URL"
-			case "grepSearch": displayName = "🔎 Search Code"
-			case "subAgent": displayName = "🤖 Sub-Agent"
-			case "fileEdit": displayName = "✏️ Edit File"
-			case "fileManage": displayName = "🏗️ Manage Files"
-			case "todoCreate": displayName = "📋 Plan"
-			case "todoUpdate": displayName = "" // detail carries full info
-			case "todoList": displayName = "📃 Tasks"
-			case "todoAnalyze": displayName = "🧠 Analyze Tasks"
-			case "projectScanAnalyzer": displayName = "🔍 Analyze Project"
-			}
-
-			if displayName == "" {
-				// e.g. todoUpdate: just print detail directly
-				if detail != "" {
-					ui.Info("   %s", detail)
-				}
-			} else if detail != "" {
-				ui.Info("🛠  %s: %s", displayName, detail)
-			} else {
-				ui.Info("🛠  %s", displayName)
-			}
-
-			if desc != "" {
-				ui.Info("   ↳ %s", ui.GetTheme().StyleDim.Render(desc))
-			}
-
-			// Resume spinner after printing
+			ui.Print("\n")
 			ui.ShowThinking()
+			return
+		case "todoUpdate":
+			theme := ui.GetTheme()
+			statusIcons := map[string]string{
+				"pending":     "○",
+				"in_progress": "◐",
+				"completed":   "●",
+				"cancelled":   "⊘",
+			}
+
+			if plan := todoMgr.CurrentPlan(); plan != nil {
+				// Re-render the whole list so the user sees live progress
+				ui.Print("\n")
+				for _, item := range plan.Items {
+					icon := statusIcons[item.Status]
+					var iconStyle lipgloss.Style
+					switch item.Status {
+					case "in_progress":
+						iconStyle = theme.StyleYellow
+					case "completed":
+						iconStyle = theme.StyleGreen
+					case "cancelled":
+						iconStyle = theme.StyleRed
+					default:
+						iconStyle = theme.StyleDim
+					}
+					content := item.Content
+					if len(content) > 65 {
+						content = content[:62] + "..."
+					}
+					var lineStyle lipgloss.Style
+					if item.Status == "completed" || item.Status == "cancelled" {
+						lineStyle = theme.StyleDim
+					} else {
+						lineStyle = lipgloss.NewStyle()
+					}
+					ui.Print("  %s  %s\n", iconStyle.Render(icon), lineStyle.Render(content))
+				}
+				ui.Print("\n")
+			}
+			ui.ShowThinking()
+			return
+		case "projectScanAnalyzer":
+			dir, _ := params["dir"].(string)
+			if dir == "" {
+				dir, _ = params["directory"].(string)
+			}
+			uq, _ := params["userQuery"].(string)
+			if uq != "" {
+				if dir != "" {
+					detail = fmt.Sprintf(`"%s" in %s`, uq, dir)
+				} else {
+					detail = fmt.Sprintf(`"%s"`, uq)
+				}
+			} else {
+				detail = dir
+			}
+		}
+
+		// Only show tool description for non-obvious tools (skip todo/file noise)
+		showDesc := true
+		switch toolName {
+		case "todoCreate", "todoUpdate", "todoList", "todoAnalyze",
+			"fileRead", "fileWrite", "fileEdit", "fileManage", "listFiles":
+			showDesc = false
+		}
+		var desc string
+		if showDesc {
+			if tool, ok := toolRegistry.GetTool(toolName); ok {
+				desc = tool.Description()
+			}
+		}
+
+		displayName := toolName
+		switch toolName {
+		case "fileRead":
+			displayName = "📄 Read File"
+		case "fileWrite":
+			displayName = "📝 Write File"
+		case "listFiles":
+			displayName = "📂 List Files"
+		case "execute":
+			displayName = "💻 Run Command"
+		case "webSearch":
+			displayName = "🌐 Web Search"
+		case "fetchURL":
+			displayName = "📥 Fetch URL"
+		case "grepSearch":
+			displayName = "🔎 Search Code"
+		case "subAgent":
+			displayName = "🤖 Sub-Agent"
+		case "fileEdit":
+			displayName = "✏️ Edit File"
+		case "fileManage":
+			displayName = "🏗️ Manage Files"
+		case "todoCreate":
+			displayName = "📋 Plan"
+		case "todoUpdate":
+			displayName = "" // detail carries full info
+		case "todoList":
+			displayName = "📃 Tasks"
+		case "todoAnalyze":
+			displayName = "🧠 Analyze Tasks"
+		case "projectScanAnalyzer":
+			displayName = "🔍 Analyze Project"
+		}
+
+		if displayName == "" {
+			// e.g. todoUpdate: just print detail directly
+			if detail != "" {
+				ui.Info("   %s", detail)
+			}
+		} else if detail != "" {
+			ui.Info("🛠  %s: %s", displayName, detail)
+		} else {
+			ui.Info("🛠  %s", displayName)
+		}
+
+		if desc != "" {
+			ui.Info("   ↳ %s", ui.GetTheme().StyleDim.Render(desc))
+		}
+
+		// Resume spinner after printing
+		ui.ShowThinking()
 	}
 
 	// Register tools — must be called after onToolExec is defined so the
@@ -460,18 +539,20 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		OnLLMCall: func(callNum int) {
 			ui.UpdateThinkingStatus(fmt.Sprintf("LLM call #%d", callNum))
 		},
+		SessionRecorder: sessionRecord,
 	}
 	agentInstance := agent.NewAgent(agentConfig)
 
 	return &App{
-		config:    cfg,
-		logger:    log,
-		agent:        agentInstance,
-		llmClient:    llmClient,
-		tools:        toolRegistry,
-		ui:           ui,
-		skillReg:     skillRegistry,
-		cachedModels: models,
+		config:        cfg,
+		logger:        log,
+		agent:         agentInstance,
+		llmClient:     llmClient,
+		tools:         toolRegistry,
+		ui:            ui,
+		skillReg:      skillRegistry,
+		cachedModels:  models,
+		sessionRecord: sessionRecord,
 	}, nil
 }
 
@@ -488,7 +569,7 @@ func (app *App) wireCompleter() {
 		Aliases []string
 		Desc    string
 	}
-	
+
 	// Static top-level slash commands
 	staticCmds := []aliasDef{
 		{Primary: "/help", Aliases: []string{"/h"}, Desc: "Show this help"},
@@ -524,10 +605,12 @@ func (app *App) wireCompleter() {
 
 		// /model arg
 		if strings.HasPrefix(line, "/model ") || strings.HasPrefix(line, "/models ") {
-            prefix := "/model "
-            if strings.HasPrefix(line, "/models ") { prefix = "/models " }
+			prefix := "/model "
+			if strings.HasPrefix(line, "/models ") {
+				prefix = "/models "
+			}
 			sub := line[len(prefix):]
-			
+
 			// Detect if the user is typing a role name
 			isRoleCmd := false
 			var activeRoleCmd string
@@ -548,7 +631,7 @@ func (app *App) wireCompleter() {
 				}
 				return filterPrefix(prefix+activeRoleCmd, opts, subModel)
 			} else {
-				opts = make([]ui.Completion, len(app.cachedModels) + 6)
+				opts = make([]ui.Completion, len(app.cachedModels)+6)
 				opts[0] = ui.Completion{Text: "ls", Description: "List all available models"}
 				opts[1] = ui.Completion{Text: "list", Description: "List all available models"}
 				opts[2] = ui.Completion{Text: "planner ", Description: "Set planner model"}
@@ -646,7 +729,7 @@ func filterPrefix(commandPrefix string, opts []ui.Completion, sub string) []ui.C
 	return out
 }
 
-// skillCompletions returns the names and descriptions of skills. 
+// skillCompletions returns the names and descriptions of skills.
 // If activeOnly is true, it only returns active skills.
 func (app *App) skillCompletions(activeOnly bool) []ui.Completion {
 	all := app.skillReg.List()
@@ -669,6 +752,9 @@ func (app *App) skillCompletions(activeOnly bool) []ui.Completion {
 
 // Close cleans up application resources
 func (app *App) Close() error {
+	if app.sessionRecord != nil {
+		_ = app.sessionRecord.Close()
+	}
 	if app.logger != nil {
 		return app.logger.Close()
 	}
@@ -750,6 +836,11 @@ func (app *App) Run(ctx context.Context) error {
 
 // processInput processes user input with the AI using streaming.
 func (app *App) processInput(ctx context.Context, input string) error {
+	if app.sessionRecord != nil {
+		app.sessionRecord.Record(session.EventUIInput, map[string]interface{}{
+			"text": input,
+		})
+	}
 	for {
 		// Show thinking indicator while the connection is being established.
 		// Clear any previous status label from the last turn.
@@ -773,7 +864,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		var thinkBuffer string
 		var inThink bool
 		var thinkStyle = app.ui.GetTheme().StyleDim.Italic(true)
-		
+
 		var (
 			thinkLinesPrinted    int
 			thinkCharsPrinted    int
@@ -786,7 +877,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		if consoleWidth <= 0 {
 			consoleWidth = 80
 		}
-		
+
 		printThink := func(s string) {
 			rendered := thinkStyle.Render(s)
 			app.ui.Print("%s", rendered)
@@ -829,6 +920,11 @@ func (app *App) processInput(ctx context.Context, input string) error {
 				if token == "" {
 					return
 				}
+				if app.sessionRecord != nil {
+					app.sessionRecord.Record(session.EventToken, map[string]interface{}{
+						"token": token,
+					})
+				}
 				if !streamingStarted {
 					streamingStarted = true
 					// Hide spinner and print the response header before first token.
@@ -849,7 +945,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						app.ui.HideThinking() // Ensure spinner is OFF when streaming thoughts
 						thinkLinesPrinted = 2 // Two newlines in the initial block
 						app.ui.Print("\n%s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Italic(true).Render("🤔 Thinking..."))
-						
+
 						// Keep remainder
 						thinkBuffer = thinkBuffer[idx+len("<think>"):]
 					}
@@ -895,7 +991,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 					}
 				}
 			})
-			
+
 			// Flush any remaining buffer
 			if thinkBuffer != "" {
 				if inThink {
@@ -1153,7 +1249,7 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			if parts[0] == "/models" {
 				app.showModels(ctx)
 			} else {
-				app.ui.Info("Current models:\n  Default:    %s\n  Planner:    %s\n  Sub-Agent:  %s\n  Summariser: %s", 
+				app.ui.Info("Current models:\n  Default:    %s\n  Planner:    %s\n  Sub-Agent:  %s\n  Summariser: %s",
 					app.config.LLM.Models.Default,
 					app.config.LLM.Models.Planner,
 					app.config.LLM.Models.SubAgent,
@@ -1186,6 +1282,9 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 
 	case "/skill", "/skills":
 		app.handleSkillCommand(parts)
+
+	case "/session", "/sessions":
+		app.handleSessionCommand(ctx, parts)
 
 	case "/reset":
 		app.agent.ClearContext()
@@ -1293,7 +1392,7 @@ func (app *App) loadConversation(filename string) {
 func (app *App) replayConversation(ctx context.Context, filename string) {
 	app.loadConversation(filename)
 	messages := app.agent.GetMessages()
-	
+
 	// Find the last user message
 	lastUserIdx := -1
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -1313,7 +1412,7 @@ func (app *App) replayConversation(ctx context.Context, filename string) {
 
 	// Clear out everything from the last user message onwards
 	app.agent.ClearLastUserMessage() // First clear the very last one explicitly to be safe
-	
+
 	// Get current context, and literally strip it back to exactly before the last user prompt
 	// By rebuilding it
 	app.agent.ClearContext()
@@ -1324,7 +1423,7 @@ func (app *App) replayConversation(ctx context.Context, filename string) {
 	}
 
 	app.ui.Info("Replaying prompt: %s", promptToReplay)
-	
+
 	// Re-run the processInput block asynchronously as if the user just typed it
 	go func() {
 		if err := app.processInput(ctx, promptToReplay); err != nil {
