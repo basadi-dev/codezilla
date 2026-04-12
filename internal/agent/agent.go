@@ -31,6 +31,7 @@ type Agent interface {
 	SetModel(model string)
 	SetPlannerModel(model string)
 	SetSubAgentModel(model string)
+	SetSummariserModel(model string)
 	SetTemperature(temperature float64)
 	SetMaxTokens(maxTokens int)
 }
@@ -227,6 +228,11 @@ func (a *agent) SetPlannerModel(model string) {
 func (a *agent) SetSubAgentModel(model string) {
 	a.logger.Info("Changing sub-agent model", "from", a.config.SubAgentModel, "to", model)
 	a.config.SubAgentModel = model
+}
+
+func (a *agent) SetSummariserModel(model string) {
+	a.logger.Info("Changing summariser model", "from", a.config.SummariserModel, "to", model)
+	a.config.SummariserModel = model
 }
 
 func (a *agent) SetTemperature(temperature float64) {

@@ -134,7 +134,7 @@ func (ui *MinimalUI) ShowHelp() {
 	fmt.Println()
 }
 
-func (ui *MinimalUI) ShowModels(models []string, current, planner, subAgent string) {
+func (ui *MinimalUI) ShowModels(models []string, current, planner, subAgent, summariser string) {
 	fmt.Println("\nModels:")
 	for _, model := range models {
 		var tags []string
@@ -146,6 +146,9 @@ func (ui *MinimalUI) ShowModels(models []string, current, planner, subAgent stri
 		}
 		if model == subAgent {
 			tags = append(tags, "sub-agent")
+		}
+		if model == summariser {
+			tags = append(tags, "summariser")
 		}
 		
 		if len(tags) > 0 {

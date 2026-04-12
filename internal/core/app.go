@@ -1084,7 +1084,7 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			arg := strings.ToLower(parts[1])
 			if arg == "ls" || arg == "list" {
 				app.showModels(ctx)
-			} else if arg == "planner" || arg == "sub_agent" || arg == "default" {
+			} else if arg == "planner" || arg == "sub_agent" || arg == "summariser" || arg == "default" {
 				if len(parts) > 2 {
 					app.changeRoleModel(ctx, arg, strings.Join(parts[2:], " "))
 				} else {
@@ -1097,10 +1097,11 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			if parts[0] == "/models" {
 				app.showModels(ctx)
 			} else {
-				app.ui.Info("Current models:\n  Default:   %s\n  Planner:   %s\n  Sub-Agent: %s", 
+				app.ui.Info("Current models:\n  Default:    %s\n  Planner:    %s\n  Sub-Agent:  %s\n  Summariser: %s", 
 					app.config.LLM.Models.Default,
 					app.config.LLM.Models.Planner,
-					app.config.LLM.Models.SubAgent)
+					app.config.LLM.Models.SubAgent,
+					app.config.LLM.Models.Summariser)
 				app.ui.Info("Type '/model ls' to see available models")
 			}
 		}
@@ -1254,7 +1255,7 @@ func (app *App) showModels(ctx context.Context) {
 	// Cache for Tab completion
 	app.cachedModels = models
 
-	app.ui.ShowModels(models, app.config.LLM.Models.Default, app.config.LLM.Models.Planner, app.config.LLM.Models.SubAgent)
+	app.ui.ShowModels(models, app.config.LLM.Models.Default, app.config.LLM.Models.Planner, app.config.LLM.Models.SubAgent, app.config.LLM.Models.Summariser)
 }
 
 // changeRoleModel changes the current model for a specific role
@@ -1286,6 +1287,10 @@ func (app *App) changeRoleModel(ctx context.Context, role, modelName string) {
 		app.config.LLM.Models.SubAgent = modelName
 		app.agent.SetSubAgentModel(modelName)
 		app.ui.Success("Switched sub-agent model to: %s", modelName)
+	} else if role == "summariser" {
+		app.config.LLM.Models.Summariser = modelName
+		app.agent.SetSummariserModel(modelName)
+		app.ui.Success("Switched summariser model to: %s", modelName)
 	} else {
 		app.config.LLM.Models.Default = modelName
 		app.agent.SetModel(modelName)

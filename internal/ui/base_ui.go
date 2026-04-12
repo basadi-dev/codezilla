@@ -277,7 +277,7 @@ func (ui *BaseUI) ShowHelp() {
 }
 
 // ShowModels displays available models
-func (ui *BaseUI) ShowModels(models []string, current, planner, subAgent string) {
+func (ui *BaseUI) ShowModels(models []string, current, planner, subAgent, summariser string) {
 	ui.Println("\n%s", ui.theme.StyleBold.Render("Available Models:"))
 
 	for _, model := range models {
@@ -290,6 +290,9 @@ func (ui *BaseUI) ShowModels(models []string, current, planner, subAgent string)
 		}
 		if model == subAgent {
 			tags = append(tags, "sub-agent")
+		}
+		if model == summariser {
+			tags = append(tags, "summariser")
 		}
 
 		if len(tags) > 0 {
