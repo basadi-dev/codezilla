@@ -57,7 +57,7 @@ func TestTodoUpdateTool(t *testing.T) {
 	ctx := context.Background()
 
 	createParams := map[string]interface{}{
-		"name": "Update Test Plan",
+		"name":        "Update Test Plan",
 		"set_current": true,
 		"items": []interface{}{
 			map[string]interface{}{
@@ -102,9 +102,9 @@ func TestTodoListTool(t *testing.T) {
 
 	// Seed a plan so the list is non-empty
 	_, _ = createTool.Execute(ctx, map[string]interface{}{
-		"name":  "Seed Plan",
+		"name":        "Seed Plan",
 		"set_current": true,
-		"items": []interface{}{map[string]interface{}{"content": "seed task"}},
+		"items":       []interface{}{map[string]interface{}{"content": "seed task"}},
 	})
 
 	// List all todos
@@ -142,7 +142,7 @@ func TestTodoAnalyzeTool(t *testing.T) {
 	ctx := context.Background()
 
 	createParams := map[string]interface{}{
-		"name": "Complex Plan",
+		"name":        "Complex Plan",
 		"set_current": true,
 		"items": []interface{}{
 			map[string]interface{}{

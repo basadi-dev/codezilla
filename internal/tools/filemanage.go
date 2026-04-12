@@ -178,7 +178,7 @@ func (t *FileManageTool) execRead(filePath string, params map[string]interface{}
 }
 
 func (t *FileManageTool) execWrite(filePath string, params map[string]interface{}) (interface{}, error) {
-	content, _ := params["content"].(string)	
+	content, _ := params["content"].(string)
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return nil, err
 	}
@@ -192,7 +192,7 @@ func (t *FileManageTool) execEdit(filePath string, params map[string]interface{}
 	// Re-route functionality using existing applyReplacements
 	editTool := NewFileEditTool()
 	return editTool.Execute(context.Background(), map[string]interface{}{
-		"file_path": filePath,
+		"file_path":          filePath,
 		"replacement_chunks": params["replacement_chunks"],
 	})
 }
@@ -210,32 +210,45 @@ func (t *FileManageTool) execList(dir string, params map[string]interface{}) (in
 
 func toInt(v interface{}) (int, bool) {
 	switch n := v.(type) {
-	case float64: return int(n), true
-	case int: return n, true
-	case int64: return int(n), true
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
 	}
 	return 0, false
 }
 
 func readLineRange(filePath string, start, end int) (interface{}, error) {
 	f, err := os.Open(filePath)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer f.Close()
 
-	if start <= 0 { start = 1 }
+	if start <= 0 {
+		start = 1
+	}
 	var sb strings.Builder
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 1024*1024)
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
-		if lineNum < start { continue }
-		if end > 0 && lineNum > end { break }
+		if lineNum < start {
+			continue
+		}
+		if end > 0 && lineNum > end {
+			break
+		}
 		fmt.Fprintf(&sb, "%d: %s\n", lineNum, scanner.Text())
 	}
 	totalLines := lineNum
 	if end > 0 && end < totalLines {
-		for scanner.Scan() { lineNum++ }
+		for scanner.Scan() {
+			lineNum++
+		}
 		totalLines = lineNum
 	}
 	header := fmt.Sprintf("[%s] lines %d–%d of %d total\n", filePath, start, end, totalLines)
@@ -247,7 +260,9 @@ func readLineRange(filePath string, start, end int) (interface{}, error) {
 
 func readWithTruncation(filePath string) (interface{}, error) {
 	f, err := os.Open(filePath)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
@@ -261,7 +276,9 @@ func readWithTruncation(filePath string) (interface{}, error) {
 			sb.WriteByte('\n')
 		}
 	}
-	if lineNum <= maxFullReadLines { return sb.String(), nil }
+	if lineNum <= maxFullReadLines {
+		return sb.String(), nil
+	}
 	hint := fmt.Sprintf("\n\n[TRUNCATED] File has %d lines, showing first %d. Use line_start/line_end.", lineNum, maxFullReadLines)
 	return sb.String() + hint, nil
 }

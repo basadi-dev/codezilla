@@ -319,6 +319,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					o.agent.config.OnToolPreparing(toolName)
 				}
 			})
+			if o.agent.config.OnLLMStreamEnd != nil {
+				o.agent.config.OnLLMStreamEnd()
+			}
 			llmDur := time.Since(llmStart)
 
 			if streamErr != nil {

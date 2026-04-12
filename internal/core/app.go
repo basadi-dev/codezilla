@@ -77,7 +77,6 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		log.Warn("Failed to initialize session recorder", "error", err)
 	}
 
-
 	// Initialize LLM factory
 	llmClient := llm.NewClient(cfg)
 
@@ -366,31 +365,31 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				if plan := todoMgr.CurrentPlan(); plan != nil {
 					// Re-render the whole list so the user sees live progress
 					ui.Print("\n")
-				for _, item := range plan.Items {
-					icon := statusIcons[item.Status]
-					var iconStyle lipgloss.Style
-					switch item.Status {
-					case "in_progress":
-						iconStyle = theme.StyleYellow
-					case "completed":
-						iconStyle = theme.StyleGreen
-					case "cancelled":
-						iconStyle = theme.StyleRed
-					default:
-						iconStyle = theme.StyleDim
+					for _, item := range plan.Items {
+						icon := statusIcons[item.Status]
+						var iconStyle lipgloss.Style
+						switch item.Status {
+						case "in_progress":
+							iconStyle = theme.StyleYellow
+						case "completed":
+							iconStyle = theme.StyleGreen
+						case "cancelled":
+							iconStyle = theme.StyleRed
+						default:
+							iconStyle = theme.StyleDim
+						}
+						content := item.Content
+						if len(content) > 65 {
+							content = content[:62] + "..."
+						}
+						var lineStyle lipgloss.Style
+						if item.Status == "completed" || item.Status == "cancelled" {
+							lineStyle = theme.StyleDim
+						} else {
+							lineStyle = lipgloss.NewStyle()
+						}
+						ui.Print("  %s  %s\n", iconStyle.Render(icon), lineStyle.Render(content))
 					}
-					content := item.Content
-					if len(content) > 65 {
-						content = content[:62] + "..."
-					}
-					var lineStyle lipgloss.Style
-					if item.Status == "completed" || item.Status == "cancelled" {
-						lineStyle = theme.StyleDim
-					} else {
-						lineStyle = lipgloss.NewStyle()
-					}
-					ui.Print("  %s  %s\n", iconStyle.Render(icon), lineStyle.Render(content))
-				}
 				}
 				ui.Print("\n")
 				ui.ShowThinking()
@@ -665,7 +664,6 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		}
 	}
 
-
 	return &App{
 		config:        cfg,
 		logger:        log,
@@ -819,13 +817,13 @@ func (app *App) wireCompleter() {
 		}
 		if sessionPrefix != "" {
 			sub := line[len(sessionPrefix):]
-			
+
 			// /session play <name>
 			if strings.HasPrefix(sub, "play ") {
 				name := sub[len("play "):]
 				return filterPrefix(sessionPrefix+"play ", app.sessionCompletions(), name)
 			}
-			
+
 			opts := []ui.Completion{
 				{Text: "ls", Description: "List all available sessions"},
 				{Text: "list", Description: "List all available sessions"},
@@ -953,6 +951,22 @@ func (app *App) Run(ctx context.Context) error {
 
 	if sessionID := app.SessionID(); sessionID != "" {
 		app.ui.Info("  📝 Session:          %s", app.ui.GetTheme().StyleCyan.Render(sessionID))
+		app.ui.Print("\n%s\n", lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#2E3440")).Background(lipgloss.AdaptiveColor{Light: "#ACB0BE", Dark: "#A3BE8C"}).Render(" Session Restored "))
+		msgs := app.agent.GetMessages()
+		for _, msg := range msgs {
+			if msg.Role == "user" {
+				app.ui.Print("\n%s\n", app.ui.GetTheme().StyleBlue.Render("👤 You:"))
+				app.ui.Print("%s\n", msg.Content)
+			} else if msg.Role == "assistant" {
+				content := msg.Content
+				if content != "" {
+					app.ui.ShowResponse(sanitizeAgentResponse(content))
+				}
+			}
+		}
+		if len(msgs) > 0 {
+			app.ui.Print("\n")
+		}
 	}
 
 	// Main loop
@@ -1082,6 +1096,24 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		go func() {
 			defer close(done)
 
+			onStreamEnd := func() {
+				// Flush any remaining buffer before wiping
+				if thinkBuffer != "" {
+					if inThink {
+						printThink(thinkBuffer)
+						app.ui.Print("\n\n")
+					} else {
+						printMarkdown(thinkBuffer)
+					}
+					thinkBuffer = ""
+				}
+				if streamingStarted && markdownLinesPrinted > 0 {
+					app.ui.Print("\033[%dA\033[0J", markdownLinesPrinted)
+					markdownLinesPrinted = 0
+					markdownCharsPrinted = 0
+				}
+			}
+
 			fr, err := app.agent.ProcessMessageStream(ctx, input, func(token string) {
 				if token == "" {
 					return
@@ -1160,18 +1192,9 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						thinkBuffer = thinkBuffer[safeLen:]
 					}
 				}
-			})
+			}, onStreamEnd)
 
-			// Flush any remaining buffer
-			if thinkBuffer != "" {
-				if inThink {
-					printThink(thinkBuffer)
-					app.ui.Print("\n\n")
-				} else {
-					printMarkdown(thinkBuffer)
-				}
-			}
-
+			// ProcessMessageStream uses onStreamEnd to flush any remaining buffer.
 			finalResponse = fr
 			agentErr = err
 		}()
@@ -1187,12 +1210,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		if agentErr == nil && finalResponse != "" {
 			// Add a clear separator if we streamed raw text, then render the
 			// full final response with Glamour for proper markdown formatting.
-			if streamingStarted {
-				// Wipe the raw markdown stream, so Glamour can clean replace it without duplicate text.
-				if markdownLinesPrinted > 0 {
-					app.ui.Print("\033[%dA\033[0J", markdownLinesPrinted)
-				}
-			} else {
+			if !streamingStarted {
 				// Non-streaming path: render full response normally.
 				modelLabel := app.config.LLM.Models.Default
 				app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))

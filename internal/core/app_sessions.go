@@ -174,7 +174,7 @@ func (app *App) sessionCompletions() []ui.Completion {
 	if dir == "" {
 		return nil
 	}
-	
+
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -189,11 +189,11 @@ func (app *App) sessionCompletions() []ui.Completion {
 			Text: f.Name(),
 		})
 	}
-	
+
 	// Better to sort them descending (newest first) but since file string is date we can just sort descending
 	sort.Slice(opts, func(i, j int) bool {
 		return opts[i].Text > opts[j].Text
 	})
-	
+
 	return opts
 }

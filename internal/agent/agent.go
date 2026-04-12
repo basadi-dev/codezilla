@@ -20,7 +20,7 @@ var (
 
 type Agent interface {
 	ProcessMessage(ctx context.Context, message string) (string, error)
-	ProcessMessageStream(ctx context.Context, message string, onToken func(string)) (string, error)
+	ProcessMessageStream(ctx context.Context, message string, onToken func(string), onStreamEnd func()) (string, error)
 	ExecuteTool(ctx context.Context, toolName string, params map[string]interface{}) (interface{}, error)
 	AddSystemMessage(message string)
 	ReplaceSystemMessage(message string)
@@ -62,6 +62,8 @@ type Config struct {
 	// OnToolPreparing is called during streaming when a tool call name is first detected,
 	// before the tool actually executes. Use this to update the spinner with the tool name.
 	OnToolPreparing func(toolName string)
+	// OnLLMStreamEnd is called immediately after a text/tool stream completes natively, before parsing.
+	OnLLMStreamEnd func()
 
 	// Loop detection: stops the run loop if a tool is called with identical args consecutively.
 	// 0 = use defaults (window=10, max_repeat=3).
@@ -138,8 +140,9 @@ func (a *agent) ProcessMessage(ctx context.Context, message string) (string, err
 	return orchestrator.Run(ctx, message, nil, false)
 }
 
-func (a *agent) ProcessMessageStream(ctx context.Context, message string, onToken func(string)) (string, error) {
+func (a *agent) ProcessMessageStream(ctx context.Context, message string, onToken func(string), onStreamEnd func()) (string, error) {
 	orchestrator := NewAgentOrchestrator(a)
+	a.config.OnLLMStreamEnd = onStreamEnd
 	return orchestrator.Run(ctx, message, onToken, true)
 }
 
