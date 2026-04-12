@@ -687,13 +687,15 @@ func (app *App) Run(ctx context.Context) error {
 		connStr = app.config.LLM.Ollama.BaseURL
 	}
 	type modelledWelcome interface {
-		ShowWelcomeWithModels(model, plannerModel, subAgentModel, ollamaURL string, contextEnabled bool)
+		ShowWelcomeWithModels(model, plannerModel, subAgentModel, summariserModel, analyzerModel, ollamaURL string, contextEnabled bool)
 	}
 	if mw, ok := app.ui.(modelledWelcome); ok {
 		mw.ShowWelcomeWithModels(
 			app.config.LLM.Models.Default,
 			app.config.LLM.Models.Planner,
 			app.config.LLM.Models.SubAgent,
+			app.config.LLM.Models.Summariser,
+			app.config.LLM.Models.Analyzer,
 			connStr,
 			app.config.RetainContext,
 		)

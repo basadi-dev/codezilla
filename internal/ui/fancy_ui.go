@@ -125,7 +125,7 @@ func (ui *FancyUI) ShowWelcome(model, ollamaURL string, contextEnabled bool) {
 }
 
 // ShowWelcomeWithModels displays an enhanced welcome message including per-role model overrides.
-func (ui *FancyUI) ShowWelcomeWithModels(model, plannerModel, subAgentModel, summariserModel, ollamaURL string, contextEnabled bool) {
+func (ui *FancyUI) ShowWelcomeWithModels(model, plannerModel, subAgentModel, summariserModel, analyzerModel, ollamaURL string, contextEnabled bool) {
 	// Type-writer animation on the welcome text as a whole styled string
 	welcome := "Welcome to Codezilla!"
 	for i := 1; i <= len(welcome); i++ {
@@ -146,6 +146,9 @@ func (ui *FancyUI) ShowWelcomeWithModels(model, plannerModel, subAgentModel, sum
 	}
 	if summariserModel != "" && summariserModel != model {
 		ui.Print("%s %s\n", keyStyle.Render("  📝 Summariser:"), ui.theme.StyleYellow.Render(summariserModel))
+	}
+	if analyzerModel != "" && analyzerModel != model {
+		ui.Print("%s %s\n", keyStyle.Render("  🔍 Analyzer:"), ui.theme.StyleYellow.Render(analyzerModel))
 	}
 	ui.Print("%s %s\n", keyStyle.Render("  🔌 Provider:"), ui.theme.StyleDim.Render(ollamaURL))
 
