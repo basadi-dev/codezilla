@@ -41,6 +41,7 @@ func NewRecorder(filepath string, log *logger.Logger) (*Recorder, error) {
 		return nil, nil // No recorder if empty path
 	}
 
+	// Use O_APPEND and O_CREATE. If resuming, we just continue appending.
 	f, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		if log != nil {
@@ -55,7 +56,13 @@ func NewRecorder(filepath string, log *logger.Logger) (*Recorder, error) {
 		logger: log,
 	}
 
-	r.Record(EventSessionStart, map[string]interface{}{})
+	// Only record session_start if the file is empty (new session)
+	if info, err := f.Stat(); err == nil && info.Size() == 0 {
+		r.Record(EventSessionStart, map[string]interface{}{
+			"started_at": time.Now().Format(time.RFC3339),
+		})
+	}
+
 	return r, nil
 }
 
@@ -95,4 +102,24 @@ func (r *Recorder) Close() error {
 		return err
 	}
 	return nil
+}
+
+// LoadEvents reads all events from a session file.
+func LoadEvents(filepath string) ([]Event, error) {
+	f, err := os.Open(filepath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var events []Event
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var evt Event
+		if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
+			continue // skip malformed lines
+		}
+		events = append(events, evt)
+	}
+	return events, scanner.Err()
 }

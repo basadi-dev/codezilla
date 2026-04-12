@@ -58,14 +58,39 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		}
 	}
 	sessionPath := ""
+	isResuming := false
 	if cfg.SessionEventsDir != "" {
-		sessionPath = filepath.Join(cfg.SessionEventsDir, fmt.Sprintf("session_%s.jsonl", time.Now().Format("20060102_150405")))
+		// Detect last session file (ReadDir returns sorted; last match = newest)
+		files, err := os.ReadDir(cfg.SessionEventsDir)
+		var lastFile os.DirEntry
+		if err == nil {
+			for _, f := range files {
+				if !f.IsDir() && strings.HasPrefix(f.Name(), "session_") && strings.HasSuffix(f.Name(), ".jsonl") {
+					lastFile = f
+				}
+			}
+		}
+
+		if lastFile != nil {
+			ui.Info("Found previous session: %s", lastFile.Name())
+			// Use the UI's Confirm so it goes through FixedInput, not a raw stdin scanner
+			if ok, _ := ui.Confirm("Resume session?"); ok {
+				sessionPath = filepath.Join(cfg.SessionEventsDir, lastFile.Name())
+				isResuming = true
+				ui.Success("Resuming session...")
+			}
+		}
+
+		if sessionPath == "" {
+			sessionPath = filepath.Join(cfg.SessionEventsDir, fmt.Sprintf("session_%s.jsonl", time.Now().Format("20060102_150405")))
+		}
 	}
 
 	sessionRecord, err := session.NewRecorder(sessionPath, log)
 	if err != nil {
 		log.Warn("Failed to initialize session recorder", "error", err)
 	}
+
 
 	// Initialize LLM factory
 	llmClient := llm.NewClient(cfg)
@@ -462,7 +487,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		ui.ShowThinking()
 	}
 
-	// Register tools — must be called after onToolExec is defined so the
+	// Register tools — must be called after onToolExec is defined below so that the
 	// analyzer progress reporter can borrow the UI hide/show spinner hooks.
 	registerTools(toolRegistry, llmClient, cfg, log, permissionMgr, todoMgr, ui)
 
@@ -544,6 +569,42 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		SessionRecorder: sessionRecord,
 	}
 	agentInstance := agent.NewAgent(agentConfig)
+
+	// Restore context from session only when the user explicitly chose to resume
+	if isResuming && sessionPath != "" {
+		events, err := session.LoadEvents(sessionPath)
+		if err == nil {
+			var currentAssistantResponse strings.Builder
+			for _, evt := range events {
+				if evt.Type == session.EventUIInput {
+					// Commit any accumulated assistant response before the next user turn
+					if currentAssistantResponse.Len() > 0 {
+						agentInstance.AddAssistantMessage(currentAssistantResponse.String())
+						currentAssistantResponse.Reset()
+					}
+					if text, ok := evt.Data["text"].(string); ok {
+						agentInstance.AddUserMessage(text)
+					}
+				} else if evt.Type == session.EventToken {
+					if token, ok := evt.Data["token"].(string); ok {
+						currentAssistantResponse.WriteString(token)
+					}
+				} else if evt.Type == session.EventToolStart {
+					// Commit assistant response before tool execution boundary
+					if currentAssistantResponse.Len() > 0 {
+						agentInstance.AddAssistantMessage(currentAssistantResponse.String())
+						currentAssistantResponse.Reset()
+					}
+				}
+				// EventToolResult skipped — no reliable way to map back to tool call IDs
+			}
+			// Final commit if the session ended mid-assistant-response
+			if currentAssistantResponse.Len() > 0 {
+				agentInstance.AddAssistantMessage(currentAssistantResponse.String())
+			}
+		}
+	}
+
 
 	return &App{
 		config:        cfg,
@@ -758,7 +819,6 @@ func filterPrefix(commandPrefix string, opts []ui.Completion, sub string) []ui.C
 }
 
 // skillCompletions returns the names and descriptions of skills.
-// If activeOnly is true, it only returns active skills.
 func (app *App) skillCompletions(activeOnly bool) []ui.Completion {
 	all := app.skillReg.List()
 	comps := make([]ui.Completion, 0, len(all))
@@ -961,6 +1021,10 @@ func (app *App) processInput(ctx context.Context, input string) error {
 					app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
 					app.ui.Println("\n%s", app.ui.GetTheme().StyleGreen.Render("🤖 Assistant:"))
 					app.ui.Print("\n")
+				} else {
+					// Calls #2+: spinner was restarted by OnLLMCall but streamingStarted
+					// is still true. Kill it the moment a token arrives.
+					app.ui.HideThinking()
 				}
 
 				// Small state machine to strip/replace <think> tags dynamically
@@ -988,7 +1052,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						// Disable think style
 						inThink = false
 
-						// Wipe the stream if it was over the compress limit so the orchestrator's summary replaces it nicely
+						// Wipe the stream if it were over the compress limit so the orchestrator's summary replaces it nicely
 						if app.config.ThinkCompressThreshold > 0 && thinkCharsPrinted > app.config.ThinkCompressThreshold {
 							app.ui.Print("\033[%dA\033[0J", thinkLinesPrinted)
 							app.ui.Print("\n%s\n\n", lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Italic(true).Render("🤔 Thinking (Summarising...)"))
@@ -1002,7 +1066,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						// Keep remainder
 						thinkBuffer = thinkBuffer[idx+len("</think>"):]
 					} else {
-						// Safe to print if we leave enough buffer to not split "</think>"
+						// Safe to print if we leave enough buffer not to split "</think>"
 						if len(thinkBuffer) > 9 {
 							safeLen := len(thinkBuffer) - 9
 							printThink(thinkBuffer[:safeLen])
@@ -1163,7 +1227,7 @@ func stripLeadingCoT(s string) string {
 		}
 
 		if len(realParts) == 0 {
-			// Entire line is CoT — skip it and keep scanning.
+			// Entire line is CoT — skip and keep scanning.
 			continue
 		}
 
@@ -1659,10 +1723,10 @@ func (app *App) handleSkillCommand(parts []string) {
 		}
 		app.ui.Println("\n%s — %s", s.Name, s.Description)
 		if s.Trigger != "" {
-			app.ui.Println("Trigger: %s", s.Trigger)
+			app.ui.Print("Trigger: %s\n", s.Trigger)
 		}
-		app.ui.Println("Always-on: %v", s.AlwaysOn)
-		app.ui.Println("\nInstructions:\n%s\n", s.Instructions)
+		app.ui.Print("Always-on: %v\n", s.AlwaysOn)
+		app.ui.Print("\nInstructions:\n%s\n\n", s.Instructions)
 
 	default:
 		// Treat as skill name to activate/toggle
