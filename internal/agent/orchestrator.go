@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,6 +11,51 @@ import (
 
 	anyllm "github.com/mozilla-ai/any-llm-go"
 )
+
+// loopDetector tracks recent tool calls and detects infinite-loop patterns.
+// A loop is detected when the same (toolName, argsHash) pair appears consecutively
+// more than maxRepeat times within the sliding history window.
+type loopDetector struct {
+	history   []string // ring of "toolName:argsHash" keys
+	window    int      // max history length
+	maxRepeat int      // consecutive identical calls before kill
+}
+
+func newLoopDetector(window, maxRepeat int) *loopDetector {
+	if window <= 0 {
+		window = 10
+	}
+	if maxRepeat <= 0 {
+		maxRepeat = 3
+	}
+	return &loopDetector{window: window, maxRepeat: maxRepeat}
+}
+
+// record adds a tool call key and returns the loop-detected tool name if a loop
+// is found, or empty string if all is well.
+func (d *loopDetector) record(toolName, argsJSON string) string {
+	h := md5.Sum([]byte(argsJSON)) //nolint:gosec // not crypto use
+	key := fmt.Sprintf("%s:%x", toolName, h)
+
+	d.history = append(d.history, key)
+	if len(d.history) > d.window {
+		d.history = d.history[len(d.history)-d.window:]
+	}
+
+	// Count consecutive identical tail entries.
+	count := 0
+	for i := len(d.history) - 1; i >= 0; i-- {
+		if d.history[i] == key {
+			count++
+		} else {
+			break
+		}
+	}
+	if count >= d.maxRepeat {
+		return toolName
+	}
+	return ""
+}
 
 // OrchestratorState represents the internal state of the Agent
 type OrchestratorState int
@@ -27,6 +73,7 @@ type AgentOrchestrator struct {
 	agent   *agent
 	logger  *logger.Logger
 	tracker *StreamProcessor
+	loops   *loopDetector
 }
 
 func NewAgentOrchestrator(a *agent) *AgentOrchestrator {
@@ -34,6 +81,7 @@ func NewAgentOrchestrator(a *agent) *AgentOrchestrator {
 		agent:   a,
 		logger:  a.logger,
 		tracker: NewStreamProcessor(a.logger),
+		loops:   newLoopDetector(a.config.LoopDetectWindow, a.config.LoopDetectMaxRepeat),
 	}
 }
 
@@ -56,14 +104,12 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 		}
 	}
 
-	maxIter := 30
-	if o.agent.config.MaxIterations > 0 {
-		maxIter = o.agent.config.MaxIterations
-	}
+	// 0 means unlimited. Use configured limit if set > 0.
+	maxIter := o.agent.config.MaxIterations
 	iter := 0
 
 	for {
-		if iter >= maxIter {
+		if maxIter > 0 && iter >= maxIter {
 			return "Reached maximum tool execution iterations.", nil
 		}
 
@@ -173,6 +219,13 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			for _, tc := range toolsToExecute {
 				var params map[string]interface{}
 				_ = json.Unmarshal([]byte(tc.Function.Arguments), &params)
+
+				// Loop detection: kill if same tool+args repeated too many consecutive times.
+				if looped := o.loops.record(tc.Function.Name, tc.Function.Arguments); looped != "" {
+					msg := fmt.Sprintf("Detected infinite loop: tool '%s' called with identical arguments %d times consecutively. Stopping.", looped, o.agent.config.LoopDetectMaxRepeat)
+					o.logger.Warn(msg)
+					return msg, nil
+				}
 
 				if o.agent.config.OnToolExecution != nil {
 					o.agent.config.OnToolExecution(tc.Function.Name, params)

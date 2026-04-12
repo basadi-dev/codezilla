@@ -399,19 +399,21 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		}
 
 		subAgentConfig := &agent.Config{
-			Model:           subModel,
-			PlannerModel:    subCfg.LLM.Models.Planner,
-			SubAgentModel:   subModel,
-			Provider:        subCfg.LLM.Provider,
-			SystemPrompt:    "You are a sub-agent. Your goal is to solve the specific task provided by the parent agent. Use tools as necessary. Return a clear and concise summary of your findings and completed actions. Task: " + task,
-			Temperature:     float64(subCfg.Temperature),
-			MaxTokens:       subCfg.MaxTokens,
-			MaxIterations:   subCfg.MaxIterations,
-			Logger:          log,
-			LLMClient:       llmClient,
-			ToolRegistry:    subRegistry,
-			PermissionMgr:   permissionMgr,
-			OnToolExecution: onToolExec,
+			Model:               subModel,
+			PlannerModel:        subCfg.LLM.Models.Planner,
+			SubAgentModel:       subModel,
+			Provider:            subCfg.LLM.Provider,
+			SystemPrompt:        "You are a sub-agent. Your goal is to solve the specific task provided by the parent agent. Use tools as necessary. Return a clear and concise summary of your findings and completed actions. Task: " + task,
+			Temperature:         float64(subCfg.Temperature),
+			MaxTokens:           subCfg.MaxTokens,
+			MaxIterations:       subCfg.MaxIterations,
+			Logger:              log,
+			LLMClient:           llmClient,
+			ToolRegistry:        subRegistry,
+			PermissionMgr:       permissionMgr,
+			OnToolExecution:     onToolExec,
+			LoopDetectWindow:    subCfg.LoopDetectWindow,
+			LoopDetectMaxRepeat: subCfg.LoopDetectMaxRepeat,
 		}
 
 		subAgent := agent.NewAgent(subAgentConfig)
@@ -429,20 +431,22 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 	// Initialize agent
 	agentConfig := &agent.Config{
-		Model:           cfg.LLM.Models.Default,
-		PlannerModel:    cfg.LLM.Models.Planner,
-		SubAgentModel:   cfg.LLM.Models.SubAgent,
-		Provider:        cfg.LLM.Provider,
-		SystemPrompt:    cfg.SystemPrompt,
-		Temperature:     float64(cfg.Temperature),
-		MaxTokens:       cfg.MaxTokens,
-		MaxIterations:   cfg.MaxIterations,
-		Logger:          log,
-		LLMClient:       llmClient,
-		ToolRegistry:    toolRegistry,
-		PermissionMgr:   permissionMgr,
-		AutoPlan:        cfg.AutoPlan,
-		OnToolExecution: onToolExec,
+		Model:               cfg.LLM.Models.Default,
+		PlannerModel:        cfg.LLM.Models.Planner,
+		SubAgentModel:       cfg.LLM.Models.SubAgent,
+		Provider:            cfg.LLM.Provider,
+		SystemPrompt:        cfg.SystemPrompt,
+		Temperature:         float64(cfg.Temperature),
+		MaxTokens:           cfg.MaxTokens,
+		MaxIterations:       cfg.MaxIterations,
+		Logger:              log,
+		LLMClient:           llmClient,
+		ToolRegistry:        toolRegistry,
+		PermissionMgr:       permissionMgr,
+		AutoPlan:            cfg.AutoPlan,
+		OnToolExecution:     onToolExec,
+		LoopDetectWindow:    cfg.LoopDetectWindow,
+		LoopDetectMaxRepeat: cfg.LoopDetectMaxRepeat,
 	}
 	agentInstance := agent.NewAgent(agentConfig)
 

@@ -21,6 +21,11 @@ type Config struct {
 	MaxIterations int     `json:"max_iterations" yaml:"max_iterations"`
 	SystemPrompt  string  `json:"system_prompt" yaml:"system_prompt"`
 
+	// Loop detection: kill agent if same tool+args repeated consecutively.
+	// 0 = use defaults (window=10, max_repeat=3).
+	LoopDetectWindow    int `json:"loop_detect_window" yaml:"loop_detect_window"`
+	LoopDetectMaxRepeat int `json:"loop_detect_max_repeat" yaml:"loop_detect_max_repeat"`
+
 	// Log configuration
 	LogFile   string `json:"log_file" yaml:"log_file"`
 	LogLevel  string `json:"log_level" yaml:"log_level"`
@@ -155,7 +160,7 @@ func DefaultConfig() *Config {
 		},
 		Temperature:         0.7,
 		MaxTokens:           1024 * 32,
-		MaxIterations:       30,
+		MaxIterations:       0, // 0 = unlimited tool iterations
 		SystemPrompt:        defaultSystemPrompt(cwd),
 		LogFile:             filepath.Join("logs", "codezilla.log"),
 		LogLevel:            "info",

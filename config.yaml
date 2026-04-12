@@ -9,7 +9,7 @@ llm:
 
   models:
     # Main conversational model
-    default: "gpt-oss:20b"
+    default: "gemma4:31b"
     # Planner model — used for auto-generating todo plans (falls back to default if unset)
     planner: "glm-5.1"
     # Sub-agent model — used when spinning up sub-agents for delegated tasks (falls back to default if unset)
@@ -75,6 +75,12 @@ max_context_chars: 50000
 
 # Auto-planning: automatically create a todo plan for complex multi-step requests
 auto_plan: true
+
+# Loop detection: stops the agent if the same tool is called with identical args
+# consecutively more than loop_detect_max_repeat times.
+# 0 = use defaults (window: 10, max_repeat: 3)
+loop_detect_window: 10       # sliding history length to examine
+loop_detect_max_repeat: 3    # consecutive identical calls before kill
 
 # Safety Configuration
 dangerous_tools_warn: true

@@ -51,18 +51,25 @@ type Config struct {
 	PermissionMgr   tools.ToolPermissionManager
 	AutoPlan        bool
 	OnToolExecution func(toolName string, params map[string]interface{})
+
+	// Loop detection: stops the run loop if a tool is called with identical args consecutively.
+	// 0 = use defaults (window=10, max_repeat=3).
+	LoopDetectWindow    int
+	LoopDetectMaxRepeat int
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		Model:          "qwen2.5-coder:3b",
-		Provider:       "ollama",
-		MaxTokens:      4000,
-		MaxIterations:  30,
-		Temperature:    0.7,
-		AutoPlan:       false,
-		PromptTemplate: DefaultPromptTemplate(),
-		Logger:         logger.DefaultLogger(),
+		Model:               "qwen2.5-coder:3b",
+		Provider:            "ollama",
+		MaxTokens:           4000,
+		MaxIterations:       0, // 0 = unlimited
+		Temperature:         0.7,
+		AutoPlan:            false,
+		PromptTemplate:      DefaultPromptTemplate(),
+		Logger:              logger.DefaultLogger(),
+		LoopDetectWindow:    10,
+		LoopDetectMaxRepeat: 3,
 	}
 }
 
