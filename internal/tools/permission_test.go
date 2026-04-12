@@ -16,7 +16,7 @@ func TestPermissionManager(t *testing.T) {
 	}{
 		{
 			name:           "Never ask permission",
-			toolName:       "fileRead",
+			toolName:       "fileManage",
 			defaultPerm:    NeverAsk,
 			userResponse:   PermissionResponse{},
 			expectCallback: false,
@@ -24,7 +24,7 @@ func TestPermissionManager(t *testing.T) {
 		},
 		{
 			name:           "Always ask permission - granted",
-			toolName:       "fileWrite",
+			toolName:       "fileManage",
 			defaultPerm:    AlwaysAsk,
 			userResponse:   PermissionResponse{Granted: true, RememberMe: false},
 			expectCallback: true,
@@ -40,7 +40,7 @@ func TestPermissionManager(t *testing.T) {
 		},
 		{
 			name:           "Remember permission",
-			toolName:       "fileWrite",
+			toolName:       "fileManage",
 			defaultPerm:    AskOnce,
 			userResponse:   PermissionResponse{Granted: true, RememberMe: true},
 			expectCallback: true,
@@ -69,7 +69,7 @@ func TestPermissionManager(t *testing.T) {
 			ctx := context.Background()
 
 			// Create a mock tool
-			mockTool := &FileReadTool{}
+			mockTool := &FileManageTool{}
 
 			// Request permission
 			granted, err := pm.RequestPermission(ctx, tt.toolName, map[string]interface{}{}, mockTool)
@@ -127,7 +127,7 @@ func TestPermissionRequestFormatting(t *testing.T) {
 		"content":   "sensitive data",
 	}
 
-	mockTool := &FileWriteTool{}
+	mockTool := &FileManageTool{}
 
 	_, err := pm.RequestPermission(ctx, "test", params, mockTool)
 	if err != nil {

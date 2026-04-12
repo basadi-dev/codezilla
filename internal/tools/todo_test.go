@@ -8,17 +8,15 @@ import (
 
 // newTestTodoTools creates a fresh set of todo tools backed by an isolated manager
 // so tests don't share global state.
-func newTestTodoTools() (*TodoManager, TodoCreateTool, TodoUpdateTool, TodoListTool, TodoAnalyzeTool) {
+func newTestTodoTools() (*TodoManager, TodoCreateTool, TodoManageTool) {
 	mgr := NewTodoManager()
 	return mgr,
 		TodoCreateTool{mgr: mgr},
-		TodoUpdateTool{mgr: mgr},
-		TodoListTool{mgr: mgr},
-		TodoAnalyzeTool{mgr: mgr}
+		TodoManageTool{mgr: mgr}
 }
 
 func TestTodoCreateTool(t *testing.T) {
-	_, createTool, _, _, _ := newTestTodoTools()
+	_, createTool, _ := newTestTodoTools()
 	ctx := context.Background()
 
 	// Test creating a simple todo plan
@@ -55,11 +53,12 @@ func TestTodoCreateTool(t *testing.T) {
 }
 
 func TestTodoUpdateTool(t *testing.T) {
-	_, createTool, updateTool, listTool, _ := newTestTodoTools()
+	_, createTool, manageTool := newTestTodoTools()
 	ctx := context.Background()
 
 	createParams := map[string]interface{}{
 		"name": "Update Test Plan",
+		"set_current": true,
 		"items": []interface{}{
 			map[string]interface{}{
 				"content": "Task to update",
@@ -73,7 +72,9 @@ func TestTodoUpdateTool(t *testing.T) {
 	}
 
 	// Get the plan to find task ID
-	_, err = listTool.Execute(ctx, map[string]interface{}{})
+	_, err = manageTool.Execute(ctx, map[string]interface{}{
+		"action": "list",
+	})
 	if err != nil {
 		t.Fatalf("Failed to list todos: %v", err)
 	}
@@ -81,11 +82,12 @@ func TestTodoUpdateTool(t *testing.T) {
 	// For this test, we'll assume the task ID format
 	// In a real test, we'd parse the result to get the actual ID
 	updateParams := map[string]interface{}{
+		"action":  "update",
 		"task_id": "task_1", // This would need to be extracted from the list
 		"status":  "in_progress",
 	}
 
-	result, err := updateTool.Execute(ctx, updateParams)
+	result, err := manageTool.Execute(ctx, updateParams)
 	if err != nil {
 		// This might fail if the task ID doesn't exist
 		t.Logf("Update failed (expected if task ID doesn't match): %v", err)
@@ -95,17 +97,20 @@ func TestTodoUpdateTool(t *testing.T) {
 }
 
 func TestTodoListTool(t *testing.T) {
-	_, createTool, _, listTool, _ := newTestTodoTools()
+	_, createTool, manageTool := newTestTodoTools()
 	ctx := context.Background()
 
 	// Seed a plan so the list is non-empty
 	_, _ = createTool.Execute(ctx, map[string]interface{}{
 		"name":  "Seed Plan",
+		"set_current": true,
 		"items": []interface{}{map[string]interface{}{"content": "seed task"}},
 	})
 
 	// List all todos
-	result, err := listTool.Execute(ctx, map[string]interface{}{})
+	result, err := manageTool.Execute(ctx, map[string]interface{}{
+		"action": "list",
+	})
 	if err != nil {
 		t.Fatalf("Failed to list todos: %v", err)
 	}
@@ -121,7 +126,8 @@ func TestTodoListTool(t *testing.T) {
 	}
 
 	// Test with status filter
-	filteredResult, err := listTool.Execute(ctx, map[string]interface{}{
+	filteredResult, err := manageTool.Execute(ctx, map[string]interface{}{
+		"action":        "list",
 		"status_filter": "completed",
 	})
 	if err != nil {
@@ -132,11 +138,12 @@ func TestTodoListTool(t *testing.T) {
 }
 
 func TestTodoAnalyzeTool(t *testing.T) {
-	_, createTool, _, _, analyzeTool := newTestTodoTools()
+	_, createTool, manageTool := newTestTodoTools()
 	ctx := context.Background()
 
 	createParams := map[string]interface{}{
 		"name": "Complex Plan",
+		"set_current": true,
 		"items": []interface{}{
 			map[string]interface{}{
 				"content":  "Foundation",
@@ -161,7 +168,9 @@ func TestTodoAnalyzeTool(t *testing.T) {
 	}
 
 	// Analyze the plan
-	result, err := analyzeTool.Execute(ctx, map[string]interface{}{})
+	result, err := manageTool.Execute(ctx, map[string]interface{}{
+		"action": "analyze",
+	})
 	if err != nil {
 		t.Fatalf("Failed to analyze todos: %v", err)
 	}
