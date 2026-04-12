@@ -1202,10 +1202,10 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		// Wait for agent to finish
 		<-done
 
-		if !streamingStarted {
-			// Spinner still running — no tokens were streamed (non-streaming path or error).
-			app.ui.HideThinking()
-		}
+		// Ensure spinner is always stopped when the agent finishes its work,
+		// regardless of whether tokens were streamed. This prevents hanging 
+		// spinners on orchestrator errors or rapid loop-detection kills.
+		app.ui.HideThinking()
 
 		if agentErr == nil && finalResponse != "" {
 			// Add a clear separator if we streamed raw text, then render the

@@ -9,7 +9,7 @@ llm:
 
   models:
     # Main conversational model
-    default: "gemma4:31b"
+    default: "gpt-oss:120b"
     # Planner model — used for auto-generating todo plans (falls back to default if unset)
     planner: "glm-5.1"
     # Sub-agent model — used when spinning up sub-agents for delegated tasks (falls back to default if unset)
