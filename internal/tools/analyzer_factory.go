@@ -31,8 +31,17 @@ func (f *AnalyzerFactory) CreateAnalyzer(useLLM bool) FileAnalyzer {
 	return NewDefaultFileAnalyzer()
 }
 
-// CreateProjectScanAnalyzer creates the enhanced project scan analyzer
+// CreateProjectScanAnalyzer creates the enhanced project scan analyzer with default stderr printing.
 func (f *AnalyzerFactory) CreateProjectScanAnalyzer() *ProjectScanAnalyzer {
 	return NewProjectScanAnalyzer(f.llmClient, f.provider, f.model, f.logger)
+}
+
+// CreateProjectScanAnalyzerWithPrint creates the enhanced project scan analyzer with a custom
+// printFunc. Use this to wrap progress output with UI hooks (e.g. hide/show spinner) so that
+// the analyzer's progress lines don't interleave with the terminal's thinking indicator.
+func (f *AnalyzerFactory) CreateProjectScanAnalyzerWithPrint(printFunc func(format string, args ...interface{})) *ProjectScanAnalyzer {
+	a := NewProjectScanAnalyzer(f.llmClient, f.provider, f.model, f.logger)
+	a.SetPrintFunc(printFunc)
+	return a
 }
 

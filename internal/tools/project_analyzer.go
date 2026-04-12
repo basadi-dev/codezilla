@@ -804,6 +804,16 @@ type ProjectScanAnalyzer struct {
 	errorHandler     *ErrorHandler
 	progressReporter SimpleProgressReporter
 	analysisMetrics  *AnalysisMetrics
+	// printFunc is called for all progress output. Override via SetPrintFunc to
+	// coordinate with terminal UI (e.g. hide/show spinner around each line).
+	printFunc func(format string, args ...interface{})
+}
+
+// SetPrintFunc replaces the progress output function used by the analyzer.
+func (a *ProjectScanAnalyzer) SetPrintFunc(fn func(format string, args ...interface{})) {
+	if fn != nil {
+		a.printFunc = fn
+	}
 }
 
 // NewProjectScanAnalyzer creates the enhanced analyzer
@@ -824,6 +834,9 @@ func NewProjectScanAnalyzer(llmClient *llm.Client, provider, model string, logge
 		analysisMetrics: &AnalysisMetrics{
 			fileMetrics:     make(map[string]*FileMetrics),
 			categoryMetrics: make(map[FileCategory]*CategoryMetrics),
+		},
+		printFunc: func(format string, args ...interface{}) {
+			fmt.Fprintf(os.Stderr, format, args...)
 		},
 	}
 }
@@ -909,9 +922,7 @@ func (a *ProjectScanAnalyzer) Execute(ctx context.Context, params map[string]int
 
 	if enableProgress {
 		enhancedReporter := NewEnhancedProgressReporter(
-			func(format string, args ...interface{}) {
-				fmt.Fprintf(os.Stderr, format, args...)
-			},
+			a.printFunc,
 			showDetails,
 		)
 		a.progressReporter = enhancedReporter
@@ -960,9 +971,9 @@ func (a *ProjectScanAnalyzer) Execute(ctx context.Context, params map[string]int
 	// Scan for files
 	if len(specificDirs) > 0 {
 		if onlyInSpecificDirs {
-			fmt.Fprintf(os.Stderr, "🎯 Scanning only files in specific directories (no subdirectories): %v\n", specificDirs)
+			a.printFunc("🎯 Scanning only files in specific directories (no subdirectories): %v\n", specificDirs)
 		} else {
-			fmt.Fprintf(os.Stderr, "🎯 Scanning specific directories (including subdirectories): %v\n", specificDirs)
+			a.printFunc("🎯 Scanning specific directories (including subdirectories): %v\n", specificDirs)
 		}
 	}
 	files, err := a.scanFiles(dir, pattern, excludePatterns, includeHidden, maxDepth, specificDirs, onlyInSpecificDirs)

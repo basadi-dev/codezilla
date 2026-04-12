@@ -127,8 +127,9 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	// Create the todo manager here so onToolExec can close over it
 	todoMgr := tools.NewTodoManager()
 
-	// Register tools after permission manager is configured
-	registerTools(toolRegistry, llmClient, cfg, log, permissionMgr, todoMgr)
+	// registerTools is called after onToolExec is defined below so that the
+	// analyzer's progress reporter can call ui.HideThinking / ui.ShowThinking
+	// and avoid interleaving with the spinner.
 
 	onToolExec := func(toolName string, params map[string]interface{}) {
 			// Clear spinner before printing so messages don't collide on the same line
@@ -379,6 +380,10 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			// Resume spinner after printing
 			ui.ShowThinking()
 	}
+
+	// Register tools — must be called after onToolExec is defined so the
+	// analyzer progress reporter can borrow the UI hide/show spinner hooks.
+	registerTools(toolRegistry, llmClient, cfg, log, permissionMgr, todoMgr, ui)
 
 	// Add sub-agent tool
 	launcher := func(ctx context.Context, task string) (string, error) {
@@ -1348,7 +1353,7 @@ func (app *App) handleSkillCommand(parts []string) {
 }
 
 // registerTools registers all available tools
-func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager, todoMgr *tools.TodoManager) {
+func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager, todoMgr *tools.TodoManager, appUI ui.UI) {
 	// File operation tools
 	registry.RegisterTool(tools.NewFileReadTool())
 	registry.RegisterTool(tools.NewFileWriteTool())
@@ -1364,8 +1369,16 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	}
 	analyzerFactory := tools.NewAnalyzerFactory(llmClient, cfg.LLM.Provider, analyzerModel, logger)
 
+	// Wrap the progress printFunc so it hides the spinner before writing and
+	// restores it afterwards, preventing interleaving with the thinking indicator.
+	analyzerPrint := func(format string, args ...interface{}) {
+		appUI.HideThinking()
+		fmt.Fprintf(os.Stderr, format, args...)
+		appUI.ShowThinking()
+	}
+
 	// Register the analyzer (formerly V2)
-	registry.RegisterTool(analyzerFactory.CreateProjectScanAnalyzer())
+	registry.RegisterTool(analyzerFactory.CreateProjectScanAnalyzerWithPrint(analyzerPrint))
 
 	// All tools are auto-approved (NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("fileRead", tools.NeverAsk)

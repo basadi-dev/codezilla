@@ -194,12 +194,17 @@ func (ui *FancyUI) ShowThinking() {
 			"🧠 Analyzing..." + modelTag,
 		}
 
+		renderFrame := func(f string) string {
+			// \033[K clears from cursor to end of line — handles emoji widths correctly.
+			return ui.theme.StyleCyan.Render(f) + "\033[K"
+		}
+
 		i := 0
 		ticker := time.NewTicker(150 * time.Millisecond)
 		defer ticker.Stop()
 
 		// Print initial frame
-		ui.Print("\r%s", ui.theme.StyleCyan.Render(frames[0]))
+		ui.Print("\r%s", renderFrame(frames[0]))
 		ui.writer.Flush()
 
 		for {
@@ -211,7 +216,7 @@ func (ui *FancyUI) ShowThinking() {
 				return
 			case <-ticker.C:
 				i++
-				ui.Print("\r%s", ui.theme.StyleCyan.Render(frames[i%len(frames)]))
+				ui.Print("\r%s", renderFrame(frames[i%len(frames)]))
 				ui.writer.Flush()
 			}
 		}
