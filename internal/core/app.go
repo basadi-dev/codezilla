@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"golang.org/x/term"
 
 	"codezilla/internal/agent"
 	"codezilla/internal/config"
@@ -772,6 +773,35 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		var inThink bool
 		var generatingIndicatorShown bool
 		var thinkStyle = app.ui.GetTheme().StyleDim.Italic(true)
+		
+		var (
+			thinkLinesPrinted int
+			thinkCharsPrinted int
+			currentLineLen    int
+			consoleWidth      int
+		)
+		consoleWidth, _, _ = term.GetSize(int(os.Stdout.Fd()))
+		if consoleWidth <= 0 {
+			consoleWidth = 80
+		}
+		
+		printThink := func(s string) {
+			rendered := thinkStyle.Render(s)
+			app.ui.Print("%s", rendered)
+			thinkCharsPrinted += len(s)
+			for _, r := range s {
+				if r == '\n' {
+					thinkLinesPrinted++
+					currentLineLen = 0
+				} else {
+					currentLineLen++
+					if currentLineLen >= consoleWidth {
+						thinkLinesPrinted++
+						currentLineLen = 0
+					}
+				}
+			}
+		}
 
 		go func() {
 			defer close(done)
@@ -798,6 +828,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						// Enable think style
 						inThink = true
 						app.ui.HideThinking() // Ensure spinner is OFF when streaming thoughts
+						thinkLinesPrinted = 2 // Two newlines in the initial block
 						app.ui.Print("\n%s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Italic(true).Render("🤔 Thinking..."))
 						
 						// Keep remainder
@@ -809,11 +840,18 @@ func (app *App) processInput(ctx context.Context, input string) error {
 					if idx := strings.Index(thinkBuffer, "</think>"); idx != -1 {
 						// Print anything before </think> with style
 						if idx > 0 {
-							app.ui.Print("%s", thinkStyle.Render(thinkBuffer[:idx]))
+							printThink(thinkBuffer[:idx])
 						}
 						// Disable think style
 						inThink = false
-						app.ui.Print("\n\n")
+
+						// Wipe the stream if it was over the compress limit so the orchestrator's summary replaces it nicely
+						if app.config.ThinkCompressThreshold > 0 && thinkCharsPrinted > app.config.ThinkCompressThreshold {
+							app.ui.Print("\033[%dA\033[0J", thinkLinesPrinted)
+							app.ui.Print("\n%s\n\n", lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Italic(true).Render("🤔 Thinking (Summarising...)"))
+						} else {
+							app.ui.Print("\n\n")
+						}
 
 						// Show spinner for markdown generation
 						app.ui.UpdateThinkingStatus("Generating Markdown...")
@@ -826,7 +864,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						// Safe to print if we leave enough buffer to not split "</think>"
 						if len(thinkBuffer) > 9 {
 							safeLen := len(thinkBuffer) - 9
-							app.ui.Print("%s", thinkStyle.Render(thinkBuffer[:safeLen]))
+							printThink(thinkBuffer[:safeLen])
 							thinkBuffer = thinkBuffer[safeLen:]
 						}
 					}
