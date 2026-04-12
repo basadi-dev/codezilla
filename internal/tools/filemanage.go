@@ -189,12 +189,37 @@ func (t *FileManageTool) execWrite(filePath string, params map[string]interface{
 }
 
 func (t *FileManageTool) execEdit(filePath string, params map[string]interface{}) (interface{}, error) {
-	// Re-route functionality using existing applyReplacements
+	chunks, ok := params["replacement_chunks"].([]interface{})
+	if !ok || len(chunks) == 0 {
+		return nil, fmt.Errorf("replacement_chunks must be a non-empty array")
+	}
+
 	editTool := NewFileEditTool()
-	return editTool.Execute(context.Background(), map[string]interface{}{
-		"file_path":          filePath,
-		"replacement_chunks": params["replacement_chunks"],
-	})
+	var results []interface{}
+
+	for _, rawChunk := range chunks {
+		chunk, ok := rawChunk.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid chunk format in replacement_chunks")
+		}
+
+		res, err := editTool.Execute(context.Background(), map[string]interface{}{
+			"file_path":           filePath,
+			"target_content":      chunk["target_content"],
+			"replacement_content": chunk["replacement_content"],
+		})
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+
+	// Just return success message or the last result
+	return map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Successfully applied %d edits to %s", len(chunks), filePath),
+		"results": results,
+	}, nil
 }
 
 func (t *FileManageTool) execList(dir string, params map[string]interface{}) (interface{}, error) {
