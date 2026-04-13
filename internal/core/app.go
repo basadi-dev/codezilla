@@ -575,6 +575,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		LoopDetectWindow:       cfg.LoopDetectWindow,
 		LoopDetectMaxRepeat:    cfg.LoopDetectMaxRepeat,
 		ThinkCompressThreshold: cfg.ThinkCompressThreshold,
+		SlidingWindowSize:      cfg.SlidingWindowSize,
 		OnLLMCall: func(callNum, msgCount, approxToks int) {
 			// Format token count: "21K" or "800"
 			tokLabel := fmt.Sprintf("%d", approxToks)
@@ -1203,7 +1204,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		<-done
 
 		// Ensure spinner is always stopped when the agent finishes its work,
-		// regardless of whether tokens were streamed. This prevents hanging 
+		// regardless of whether tokens were streamed. This prevents hanging
 		// spinners on orchestrator errors or rapid loop-detection kills.
 		app.ui.HideThinking()
 

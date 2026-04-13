@@ -13,7 +13,7 @@ import (
 
 // FancyUI implements a fancy UI with animations and extra visual elements
 type FancyUI struct {
-	*BaseUI // Embed BaseUI and override specific methods
+	*BaseUI     // Embed BaseUI and override specific methods
 	spinnerDone chan bool
 }
 
@@ -266,7 +266,7 @@ func (ui *FancyUI) HideThinking() {
 		}
 		close(ui.spinnerStop)
 		ui.spinnerStop = nil
-		
+
 		doneChan := ui.spinnerDone
 		ui.spinnerDone = nil
 		ui.spinnerMutex.Unlock()

@@ -36,12 +36,14 @@ type ToolResult struct {
 }
 
 type Context struct {
-	mu             sync.RWMutex
-	Messages       []Message
-	MaxTokens      int
-	CurrentTokens  int
-	TruncateOldest bool
-	logger         *logger.Logger
+	mu                sync.RWMutex
+	Messages          []Message
+	RollingSummary    string // compressed summary of evicted messages
+	SlidingWindowSize int    // number of recent non-system messages to keep verbatim (0 = disabled)
+	MaxTokens         int
+	CurrentTokens     int
+	TruncateOldest    bool
+	logger            *logger.Logger
 }
 
 func NewContext(maxTokens int, log *logger.Logger) *Context {
@@ -53,11 +55,12 @@ func NewContext(maxTokens int, log *logger.Logger) *Context {
 	}
 
 	return &Context{
-		Messages:       []Message{},
-		MaxTokens:      maxTokens,
-		CurrentTokens:  0,
-		TruncateOldest: true,
-		logger:         log,
+		Messages:          []Message{},
+		MaxTokens:         maxTokens,
+		CurrentTokens:     0,
+		TruncateOldest:    true,
+		SlidingWindowSize: 20, // default: keep last 20 non-system messages verbatim
+		logger:            log,
 	}
 }
 
@@ -87,8 +90,8 @@ func (c *Context) ClearContext() {
 
 // AggressiveTrim drops the oldest ~50% of non-system messages. This is the
 // nuclear option used when the LLM rejects prompt due to context overflow.
-// Returns the number of messages removed.
-func (c *Context) AggressiveTrim() int {
+// Returns the number of messages removed and the evicted messages (for summarisation).
+func (c *Context) AggressiveTrim() (int, []Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -104,12 +107,14 @@ func (c *Context) AggressiveTrim() int {
 
 	if len(otherMsgs) <= 2 {
 		// Nothing meaningful to trim — keep at least the latest user+assistant pair
-		return 0
+		return 0, nil
 	}
 
 	// Keep the newest 50% (rounded up)
 	keepCount := (len(otherMsgs) + 1) / 2
 	removed := len(otherMsgs) - keepCount
+	evicted := make([]Message, removed)
+	copy(evicted, otherMsgs[:removed])
 	kept := otherMsgs[len(otherMsgs)-keepCount:]
 
 	// Rebuild messages and recount tokens
@@ -128,6 +133,11 @@ func (c *Context) AggressiveTrim() int {
 		}
 	}
 
+	// Keep summary tokens accounted for
+	if c.RollingSummary != "" {
+		newTokens += estimateTokens(c.RollingSummary)
+	}
+
 	c.Messages = newMsgs
 	c.CurrentTokens = newTokens
 	c.logger.Info("AggressiveTrim: dropped oldest messages",
@@ -135,7 +145,7 @@ func (c *Context) AggressiveTrim() int {
 		"remaining", len(newMsgs),
 		"~tokens", newTokens)
 
-	return removed
+	return removed, evicted
 }
 
 // ContextStats returns the current message count and estimated token count.
@@ -288,13 +298,13 @@ func (c *Context) AddMessage(msg Message) {
 
 // PreFlightTrim proactively trims the context to fit within the given token budget.
 // Call this before each LLM request, passing (modelContextWindow - toolSchemaTokens)
-// as the budget. Returns the number of messages removed (0 if no trimming needed).
-func (c *Context) PreFlightTrim(budgetTokens int) int {
+// as the budget. Returns the number of messages removed and evicted messages (for summarisation).
+func (c *Context) PreFlightTrim(budgetTokens int) (int, []Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if budgetTokens <= 0 || c.CurrentTokens <= budgetTokens {
-		return 0
+		return 0, nil
 	}
 
 	removed := 0
@@ -321,10 +331,10 @@ func (c *Context) PreFlightTrim(budgetTokens int) int {
 	if c.CurrentTokens <= budgetTokens {
 		c.logger.Info("PreFlightTrim: compressed tool results to fit budget",
 			"~tokens", c.CurrentTokens, "budget", budgetTokens)
-		return removed
+		return removed, nil
 	}
 
-	// Phase 2: Drop oldest non-system messages until we fit
+	// Phase 2: Drop oldest non-system messages until we fit, collecting evicted messages
 	newMsgs := make([]Message, 0, len(c.Messages))
 	for _, msg := range c.Messages {
 		if msg.Role == RoleSystem {
@@ -334,9 +344,14 @@ func (c *Context) PreFlightTrim(budgetTokens int) int {
 
 	// Walk from newest to oldest, keeping messages until budget is exceeded
 	var keptNonSystem []Message
+	var evicted []Message
 	keptTokens := 0
 	for _, msg := range newMsgs {
 		keptTokens += estimateTokens(msg.Content)
+	}
+	// Account for rolling summary tokens
+	if c.RollingSummary != "" {
+		keptTokens += estimateTokens(c.RollingSummary)
 	}
 
 	for i := len(c.Messages) - 1; i >= 0; i-- {
@@ -356,6 +371,7 @@ func (c *Context) PreFlightTrim(budgetTokens int) int {
 			keptNonSystem = append(keptNonSystem, msg)
 			keptTokens += msgToks
 		} else {
+			evicted = append(evicted, msg)
 			removed++
 		}
 	}
@@ -363,6 +379,11 @@ func (c *Context) PreFlightTrim(budgetTokens int) int {
 	// Reverse keptNonSystem to restore chronological order
 	for i, j := 0, len(keptNonSystem)-1; i < j; i, j = i+1, j-1 {
 		keptNonSystem[i], keptNonSystem[j] = keptNonSystem[j], keptNonSystem[i]
+	}
+
+	// Reverse evicted to chronological order (oldest first)
+	for i, j := 0, len(evicted)-1; i < j; i, j = i+1, j-1 {
+		evicted[i], evicted[j] = evicted[j], evicted[i]
 	}
 
 	newMsgs = append(newMsgs, keptNonSystem...)
@@ -377,7 +398,99 @@ func (c *Context) PreFlightTrim(budgetTokens int) int {
 			"budget", budgetTokens)
 	}
 
-	return removed
+	return removed, evicted
+}
+
+// SlidingWindowEvict removes the oldest non-system messages that fall outside
+// the sliding window. Returns the evicted messages for summarisation.
+func (c *Context) SlidingWindowEvict() []Message {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.SlidingWindowSize <= 0 {
+		return nil // disabled
+	}
+
+	// Count non-system messages
+	var nonSystemCount int
+	for _, msg := range c.Messages {
+		if msg.Role != RoleSystem {
+			nonSystemCount++
+		}
+	}
+
+	if nonSystemCount <= c.SlidingWindowSize {
+		return nil // everything fits in the window
+	}
+
+	toEvict := nonSystemCount - c.SlidingWindowSize
+	var evicted []Message
+	var kept []Message
+	evictedCount := 0
+
+	for _, msg := range c.Messages {
+		if msg.Role == RoleSystem {
+			kept = append(kept, msg)
+			continue
+		}
+		if evictedCount < toEvict {
+			evicted = append(evicted, msg)
+			evictedCount++
+		} else {
+			kept = append(kept, msg)
+		}
+	}
+
+	// Recount tokens for kept messages
+	newTokens := 0
+	for _, msg := range kept {
+		newTokens += estimateTokens(msg.Content)
+		if len(msg.ToolCalls) > 0 {
+			newTokens += estimateToolCallsTokens(msg.ToolCalls)
+		}
+		if msg.ToolResult != nil {
+			newTokens += estimateToolResultTokens(msg.ToolResult)
+		}
+	}
+	if c.RollingSummary != "" {
+		newTokens += estimateTokens(c.RollingSummary)
+	}
+
+	c.Messages = kept
+	c.CurrentTokens = newTokens
+
+	if len(evicted) > 0 {
+		c.logger.Info("SlidingWindowEvict: evicted messages from window",
+			"evicted", len(evicted),
+			"remaining", len(kept),
+			"window_size", c.SlidingWindowSize,
+			"~tokens", newTokens)
+	}
+
+	return evicted
+}
+
+// SetRollingSummary stores a compressed summary of evicted messages.
+// Updates the token count to account for the summary.
+func (c *Context) SetRollingSummary(summary string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Remove old summary tokens
+	if c.RollingSummary != "" {
+		c.CurrentTokens -= estimateTokens(c.RollingSummary)
+	}
+
+	c.RollingSummary = summary
+
+	// Add new summary tokens
+	if summary != "" {
+		c.CurrentTokens += estimateTokens(summary)
+	}
+
+	c.logger.Info("SetRollingSummary: updated rolling summary",
+		"summary_len", len(summary),
+		"~tokens", c.CurrentTokens)
 }
 
 // EstimateToolSchemaTokens estimates the token overhead of tool schemas.
@@ -469,7 +582,10 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	formatted := make([]anyllm.Message, 0, len(c.Messages))
+	formatted := make([]anyllm.Message, 0, len(c.Messages)+1) // +1 for possible summary
+
+	// Track where system messages end so we can inject summary after them
+	summaryInjected := false
 
 	for _, msg := range c.Messages {
 		var role string
@@ -484,6 +600,15 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 			role = "tool"
 		default:
 			role = "user"
+		}
+
+		// Inject rolling summary before the first non-system message
+		if !summaryInjected && msg.Role != RoleSystem && c.RollingSummary != "" {
+			formatted = append(formatted, anyllm.Message{
+				Role:    "system",
+				Content: "[Conversation History Summary]\n" + c.RollingSummary,
+			})
+			summaryInjected = true
 		}
 
 		formattedMsg := anyllm.Message{

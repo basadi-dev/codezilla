@@ -72,6 +72,7 @@ type Config struct {
 
 	SummariserModel        string
 	ThinkCompressThreshold int
+	SlidingWindowSize      int // number of recent non-system messages to keep verbatim (0 = disabled)
 	SessionRecorder        *session.Recorder
 }
 
@@ -114,9 +115,14 @@ func NewAgent(config *Config) Agent {
 		})
 	}
 
+	ctx := NewContext(config.MaxTokens, config.Logger)
+	if config.SlidingWindowSize > 0 {
+		ctx.SlidingWindowSize = config.SlidingWindowSize
+	}
+
 	agent := &agent{
 		config:        config,
-		context:       NewContext(config.MaxTokens, config.Logger),
+		context:       ctx,
 		llmClient:     config.LLMClient,
 		toolRegistry:  config.ToolRegistry,
 		logger:        config.Logger,

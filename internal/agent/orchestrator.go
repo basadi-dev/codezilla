@@ -102,10 +102,10 @@ func (s OrchestratorState) String() string {
 }
 
 type AgentOrchestrator struct {
-	agent               *agent
-	logger              *logger.Logger
-	tracker             *StreamProcessor
-	loops               *loopDetector
+	agent                *agent
+	logger               *logger.Logger
+	tracker              *StreamProcessor
+	loops                *loopDetector
 	contextLengthRetries int // tracks retries for context-length errors within a single Run()
 }
 
@@ -123,7 +123,13 @@ func NewAgentOrchestrator(a *agent) *AgentOrchestrator {
 // preFlightContextTrim proactively trims context before an LLM call.
 // It queries the model's actual context window from the provider (Ollama /api/show)
 // and accounts for tool schema overhead. Falls back to MaxTokens if unknown.
-func (o *AgentOrchestrator) preFlightContextTrim(toolCount int) {
+// Also runs sliding window eviction and summarisation.
+func (o *AgentOrchestrator) preFlightContextTrim(ctx context.Context, toolCount int) {
+	// Step 1: Sliding window eviction (proactive, before budget check)
+	if evicted := o.agent.context.SlidingWindowEvict(); len(evicted) > 0 {
+		o.summarizeAndStore(ctx, evicted)
+	}
+
 	budget := o.agent.config.MaxTokens
 	if budget <= 0 {
 		return // no budget configured; skip
@@ -131,8 +137,8 @@ func (o *AgentOrchestrator) preFlightContextTrim(toolCount int) {
 
 	// Try to discover the real model context window
 	if o.agent.llmClient != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		realCtx := o.agent.llmClient.GetModelContextLength(ctx, o.agent.config.Provider, o.agent.config.Model)
+		queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		realCtx := o.agent.llmClient.GetModelContextLength(queryCtx, o.agent.config.Provider, o.agent.config.Model)
 		cancel()
 
 		if realCtx > 0 {
@@ -165,8 +171,106 @@ func (o *AgentOrchestrator) preFlightContextTrim(toolCount int) {
 			"current_tokens", currentTokens,
 			"effective_budget", effectiveBudget,
 			"schema_overhead", schemaOverhead)
-		o.agent.context.PreFlightTrim(effectiveBudget)
+		_, evicted := o.agent.context.PreFlightTrim(effectiveBudget)
+		if len(evicted) > 0 {
+			o.summarizeAndStore(ctx, evicted)
+		}
 	}
+}
+
+// summarizeAndStore summarises evicted messages and stores the rolling summary.
+// Falls back to keeping the existing summary if summarisation fails.
+func (o *AgentOrchestrator) summarizeAndStore(ctx context.Context, evicted []Message) {
+	if len(evicted) == 0 {
+		return
+	}
+
+	existingSummary := o.agent.context.RollingSummary
+	newSummary := o.summarizeEvictedMessages(ctx, existingSummary, evicted)
+	if newSummary != "" {
+		o.agent.context.SetRollingSummary(newSummary)
+	}
+	// If summarisation failed, existing summary is preserved (no-op)
+}
+
+// summarizeEvictedMessages uses the SummariserModel to incrementally update
+// the rolling conversation summary with newly evicted messages.
+func (o *AgentOrchestrator) summarizeEvictedMessages(ctx context.Context, existingSummary string, evicted []Message) string {
+	summariserModel := o.agent.config.SummariserModel
+	if summariserModel == "" {
+		o.logger.Debug("No summariser model configured, skipping eviction summary")
+		return "" // no summariser = fall back to hard-drop
+	}
+
+	// Format evicted messages for the summariser
+	var evictedText strings.Builder
+	for _, msg := range evicted {
+		evictedText.WriteString(fmt.Sprintf("[%s]: ", msg.Role))
+		if msg.Content != "" {
+			// Cap content to avoid sending huge messages to summariser
+			content := msg.Content
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+			evictedText.WriteString(content)
+		}
+		if msg.ToolResult != nil {
+			result := fmt.Sprintf("%v", msg.ToolResult.Result)
+			if len(result) > 200 {
+				result = result[:200] + "..."
+			}
+			evictedText.WriteString(fmt.Sprintf(" [tool_result: %s]", result))
+		}
+		if len(msg.ToolCalls) > 0 {
+			var toolNames []string
+			for _, tc := range msg.ToolCalls {
+				toolNames = append(toolNames, tc.Function.Name)
+			}
+			evictedText.WriteString(fmt.Sprintf(" [called: %s]", strings.Join(toolNames, ", ")))
+		}
+		evictedText.WriteString("\n")
+	}
+
+	var userContent string
+	if existingSummary != "" {
+		userContent = fmt.Sprintf("EXISTING SUMMARY:\n%s\n\nNEWLY EVICTED MESSAGES:\n%s", existingSummary, evictedText.String())
+	} else {
+		userContent = fmt.Sprintf("EVICTED MESSAGES:\n%s", evictedText.String())
+	}
+
+	msgs := []anyllm.Message{
+		{Role: "system", Content: `You are an internal context compactor. Given evicted conversation messages (and optionally an existing summary), produce an updated summary that captures:
+- Key decisions made
+- Files read or modified (with paths)
+- Important findings, conclusions, and error resolutions
+- User preferences expressed
+- Current task state and progress
+- Tool results that matter for future turns
+
+Be extremely concise (max 300 tokens). Use bullet points. Never include raw file contents or full tool outputs. Focus on facts the agent will need to continue working.`},
+		{Role: "user", Content: userContent},
+	}
+
+	o.logger.Debug("Summarising evicted messages",
+		"model", summariserModel,
+		"evicted_count", len(evicted),
+		"existing_summary_len", len(existingSummary))
+
+	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.2, nil)
+	if err != nil {
+		o.logger.Warn("Eviction summary failed, keeping existing summary", "error", err)
+		return existingSummary
+	}
+
+	if len(comp.Choices) > 0 {
+		result := strings.TrimSpace(comp.Choices[0].Message.ContentString())
+		o.logger.Info("Eviction summary complete",
+			"new_summary_len", len(result),
+			"evicted_messages", len(evicted))
+		return result
+	}
+
+	return existingSummary
 }
 
 // Run executes the core processing loop via state machine transitions
@@ -225,7 +329,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			llmTools := o.agent.buildLLMTools()
 
 			// Proactively trim context before sending to LLM
-			o.preFlightContextTrim(len(llmTools))
+			o.preFlightContextTrim(ctx, len(llmTools))
 
 			var toolNames []string
 			for _, t := range llmTools {
@@ -323,7 +427,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			llmTools := o.agent.buildLLMTools()
 
 			// Proactively trim context before sending to LLM
-			o.preFlightContextTrim(len(llmTools))
+			o.preFlightContextTrim(ctx, len(llmTools))
 
 			msgs := o.agent.buildChatMessages()
 			sysPrompt := o.agent.buildSystemPrompt()
@@ -551,8 +655,13 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			if errors.Is(currentLLMError, llm.ErrContextLengthExceeded) && o.contextLengthRetries < maxContextLengthRetries {
 				o.contextLengthRetries++
 				msgsBefore, toksBefore := o.agent.context.ContextStats()
-				removed := o.agent.context.AggressiveTrim()
+				removed, evicted := o.agent.context.AggressiveTrim()
 				msgsAfter, toksAfter := o.agent.context.ContextStats()
+
+				// Summarise evicted messages before retrying
+				if len(evicted) > 0 {
+					o.summarizeAndStore(ctx, evicted)
+				}
 
 				o.logger.Warn("Context length exceeded — auto-trimming and retrying",
 					"retry", o.contextLengthRetries,

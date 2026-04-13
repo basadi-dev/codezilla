@@ -40,17 +40,30 @@ llm:
 
   # Model context window sizes (in tokens).
   # For Ollama models, this is auto-detected via /api/show.
-  # Use this to override or specify context windows for non-Ollama providers.
+  # Use this to override or specify context windows for any provider.
   # Prefix matching is supported: "gpt-4o" matches "gpt-4o-mini", "gpt-4o-2024-05-13", etc.
   context_lengths:
+    # Ollama Cloud models
+    gpt-oss:120b: 128000
+    glm-5.1: 198000
+    qwen3-coder:480b: 262144
+    deepseek-v3.2: 128000
+    # Ollama Local models
+    devstral-small-2:24b: 128000
+    qwen3-coder-next: 262144
+    ministral-3:14b: 256000
+    gemma3:12b: 128000
+    # OpenAI models
     gpt-4o: 128000
     gpt-4-turbo: 128000
     gpt-4: 8192
     gpt-3.5-turbo: 4096
     o3: 200000
     o4: 200000
+    # Anthropic models
     claude-3: 200000
     claude-4: 200000
+    # Google models
     gemini-2: 1000000
     gemini-3: 1000000
 
@@ -89,6 +102,11 @@ log_silent: false
 retain_context: true
 max_context_chars: 50000
 session_events_dir: "logs/sessions"
+
+# Sliding window: number of recent messages to keep verbatim.
+# Older messages are summarised by the summariser model and evicted to save context.
+# Higher = more memory but larger context usage. 0 = disable (use hard drop).
+sliding_window_size: 20
 
 # Auto-planning: automatically create a todo plan for complex multi-step requests
 auto_plan: true

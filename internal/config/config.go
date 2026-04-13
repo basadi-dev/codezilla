@@ -35,11 +35,12 @@ type Config struct {
 	LogSilent bool   `json:"log_silent" yaml:"log_silent"`
 
 	// Context management
-	RetainContext    bool   `json:"retain_context" yaml:"retain_context"`
-	MaxContextChars  int    `json:"max_context_chars" yaml:"max_context_chars"`
-	HistoryFile      string `json:"history_file" yaml:"history_file"`
-	SessionEventsDir string `json:"session_events_dir" yaml:"session_events_dir"`
-	ResumeSessionID  string `json:"resume_session_id" yaml:"resume_session_id"`
+	RetainContext     bool   `json:"retain_context" yaml:"retain_context"`
+	MaxContextChars   int    `json:"max_context_chars" yaml:"max_context_chars"`
+	SlidingWindowSize int    `json:"sliding_window_size" yaml:"sliding_window_size"`
+	HistoryFile       string `json:"history_file" yaml:"history_file"`
+	SessionEventsDir  string `json:"session_events_dir" yaml:"session_events_dir"`
+	ResumeSessionID   string `json:"resume_session_id" yaml:"resume_session_id"`
 
 	// Agent behavior
 	AutoPlan bool `json:"auto_plan" yaml:"auto_plan"`
@@ -119,11 +120,11 @@ type OllamaConfig struct {
 }
 
 type LLMConfig struct {
-	Provider       string           `json:"provider" yaml:"provider"`
-	Models         LLMModelsConfig  `json:"models" yaml:"models"`
-	APIKeys        LLMAPIKeysConfig `json:"api_keys" yaml:"api_keys"`
-	Ollama         OllamaConfig     `json:"ollama" yaml:"ollama"`
-	OpenAI         OpenAIConfig     `json:"openai,omitempty" yaml:"openai,omitempty"`
+	Provider string           `json:"provider" yaml:"provider"`
+	Models   LLMModelsConfig  `json:"models" yaml:"models"`
+	APIKeys  LLMAPIKeysConfig `json:"api_keys" yaml:"api_keys"`
+	Ollama   OllamaConfig     `json:"ollama" yaml:"ollama"`
+	OpenAI   OpenAIConfig     `json:"openai,omitempty" yaml:"openai,omitempty"`
 	// ContextLengths maps model names to their maximum context window in tokens.
 	// Used as a fallback when the provider doesn't expose context info dynamically.
 	// Example: {"gpt-4o": 128000, "claude-3-5-sonnet": 200000}
