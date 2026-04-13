@@ -108,9 +108,13 @@ type AgentOrchestrator struct {
 	loops                *loopDetector
 	tokens               *TokenTracker
 	contextLengthRetries int // tracks retries for context-length errors within a single Run()
+	transientRetries     int // tracks retries for model provider transient errors
 }
 
-const maxContextLengthRetries = 3
+const (
+	maxContextLengthRetries = 3
+	maxTransientRetries     = 3
+)
 
 func NewAgentOrchestrator(a *agent) *AgentOrchestrator {
 	return &AgentOrchestrator{
@@ -733,6 +737,24 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				// Reset error and retry
 				currentLLMError = nil
 				state = StatePrompting
+				continue
+			}
+
+			// Check if this is a transient provider error
+			if llm.IsTransientError(currentLLMError) && o.transientRetries < maxTransientRetries {
+				o.transientRetries++
+				delay := time.Duration(1<<o.transientRetries) * time.Second
+
+				o.logger.Warn(fmt.Sprintf("Provider error detected: %v. Retrying in %v (Attempt %d/%d)...", currentLLMError, delay, o.transientRetries, maxTransientRetries))
+				
+				time.Sleep(delay)
+
+				currentLLMError = nil
+				if stream {
+					state = StateStreaming
+				} else {
+					state = StatePrompting
+				}
 				continue
 			}
 

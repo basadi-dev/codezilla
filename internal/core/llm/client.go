@@ -456,3 +456,30 @@ func wrapContextLengthError(err error) error {
 	}
 	return err
 }
+
+// IsTransientError checks if a provider error is likely a transient network or server issue
+// that could be resolved by retrying with a short backoff (e.g. 500, 502, 503, 429, timeouts).
+func IsTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	patterns := []string{
+		"internal server error",
+		"bad gateway",
+		"service unavailable",
+		"too many requests",
+		"rate limit",
+		"timeout",
+		"connection reset",
+		"eof",
+		"broken pipe",
+		"gateway timeout",
+	}
+	for _, p := range patterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
+}
