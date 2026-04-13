@@ -42,9 +42,10 @@ type App struct {
 	cachedModels  []string // updated by /models, used for Tab completion
 	sessionRecord *session.Recorder
 
-	// Token usage tracking (updated by OnLLMUsage callback)
+	// Token usage & logic tracking
 	lastTurnUsage agent.TokenUsage
 	sessionUsage  agent.TokenUsage
+	routedModel   string
 
 	// Task cancellation tracking
 	taskCancel context.CancelFunc
@@ -707,6 +708,10 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		resultApp.lastTurnUsage = turn
 		resultApp.sessionUsage = session
 	}
+	agentConfig.OnModelRouted = func(model, reason string) {
+		resultApp.routedModel = model
+		ui.UpdateThinkingStatus(fmt.Sprintf("routed → %s (%s)", model, reason))
+	}
 	// Suppress unused variable warnings for the pre-wiring aliases
 	_ = appTurnUsage
 	_ = appSessionUsage
@@ -1257,6 +1262,9 @@ func (app *App) processInput(ctx context.Context, input string) error {
 					// Hide spinner and print the response header before first token.
 					app.ui.HideThinking()
 					modelLabel := app.config.LLM.Models.Default
+					if app.routedModel != "" {
+						modelLabel = app.routedModel
+					}
 					app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
 					app.ui.Println("\n%s", app.ui.GetTheme().StyleGreen.Render("🤖 Assistant:"))
 					app.ui.Print("\n")
@@ -1366,6 +1374,9 @@ func (app *App) processInput(ctx context.Context, input string) error {
 			if !streamingStarted {
 				// Non-streaming path: render full response normally.
 				modelLabel := app.config.LLM.Models.Default
+				if app.routedModel != "" {
+					modelLabel = app.routedModel
+				}
 				app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
 			}
 			app.ui.ShowResponse(sanitizeAgentResponse(cleanResponse))
