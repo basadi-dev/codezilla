@@ -20,7 +20,7 @@ const (
 const (
 	// RoutingThreshold is the score required to shift a request out of the Default tier
 	RoutingThreshold = 3
-	
+
 	// Thresholds for text analysis
 	MaxLengthFast  = 50
 	MinLengthHeavy = 300
@@ -241,8 +241,6 @@ var complexKeywords = []string{
 	"set up", "configure and deploy", "step by step",
 	"plan", "architecture", "design",
 }
-
-
 
 var (
 	// Matches numbered lists in any position: "1. foo", "  2) bar", inline "1. design 2. write"

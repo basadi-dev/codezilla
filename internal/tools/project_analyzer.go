@@ -806,13 +806,21 @@ type ProjectScanAnalyzer struct {
 	analysisMetrics  *AnalysisMetrics
 	// printFunc is called for all progress output. Override via SetPrintFunc to
 	// coordinate with terminal UI (e.g. hide/show spinner around each line).
-	printFunc func(format string, args ...interface{})
+	printFunc     func(format string, args ...interface{})
+	statusUpdater func(status string)
 }
 
 // SetPrintFunc replaces the progress output function used by the analyzer.
 func (a *ProjectScanAnalyzer) SetPrintFunc(fn func(format string, args ...interface{})) {
 	if fn != nil {
 		a.printFunc = fn
+	}
+}
+
+// SetStatusUpdater configures a callback to natively update a UI spinner label.
+func (a *ProjectScanAnalyzer) SetStatusUpdater(fn func(status string)) {
+	if fn != nil {
+		a.statusUpdater = fn
 	}
 }
 
@@ -921,12 +929,18 @@ func (a *ProjectScanAnalyzer) Execute(ctx context.Context, params map[string]int
 	showDetails := getBoolParam(params, "showDetails", true)
 
 	if enableProgress {
-		enhancedReporter := NewEnhancedProgressReporter(
-			a.printFunc,
-			showDetails,
-		)
-		a.progressReporter = enhancedReporter
-		defer enhancedReporter.PrintSummary()
+		if a.statusUpdater != nil {
+			a.progressReporter = &SpinnerProgressReporter{
+				updateStatus: a.statusUpdater,
+			}
+		} else {
+			enhancedReporter := NewEnhancedProgressReporter(
+				a.printFunc,
+				showDetails,
+			)
+			a.progressReporter = enhancedReporter
+			defer enhancedReporter.PrintSummary()
+		}
 	} else {
 		a.progressReporter = &NullSimpleProgressReporter{}
 	}
@@ -1554,6 +1568,31 @@ func min(a, b float64) float64 {
 // ================================
 // Enhanced Progress Reporter
 // ================================
+
+// SpinnerProgressReporter pushes clean status strings to a UI spinner
+type SpinnerProgressReporter struct {
+	updateStatus func(string)
+}
+
+func (r *SpinnerProgressReporter) StartAnalysis(totalFiles int) {
+	if r.updateStatus != nil {
+		r.updateStatus(fmt.Sprintf("🔍 Analyzing 0/%d files", totalFiles))
+	}
+}
+
+func (r *SpinnerProgressReporter) UpdateFile(fileName string, current, total int) {
+	if r.updateStatus != nil {
+		r.updateStatus(fmt.Sprintf("🔍 Analyzing %d/%d: %s", current, total, truncateFileName(fileName, 40)))
+	}
+}
+
+func (r *SpinnerProgressReporter) FileCompleted(fileName string, success bool, relevance float64) {}
+
+func (r *SpinnerProgressReporter) AnalysisComplete(duration time.Duration, successful, failed int) {
+	if r.updateStatus != nil {
+		r.updateStatus(fmt.Sprintf("✅ Analysis complete: %d files in %.1fs", successful, duration.Seconds()))
+	}
+}
 
 // EnhancedProgressReporter provides detailed progress reporting with statistics
 type EnhancedProgressReporter struct {

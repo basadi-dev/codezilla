@@ -2111,7 +2111,11 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	}
 
 	// Register the analyzer (formerly V2)
-	registry.RegisterTool(analyzerFactory.CreateProjectScanAnalyzerWithPrint(analyzerPrint))
+	projectAnalyzer := analyzerFactory.CreateProjectScanAnalyzerWithPrint(analyzerPrint)
+	projectAnalyzer.SetStatusUpdater(func(status string) {
+		appUI.UpdateThinkingStatus(status)
+	})
+	registry.RegisterTool(projectAnalyzer)
 
 	// All tools are auto-approved (NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.NeverAsk)
