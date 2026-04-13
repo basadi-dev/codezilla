@@ -229,6 +229,7 @@ var complexKeywords = []string{
 	"implement", "refactor", "migrate", "integrate",
 	"redesign", "architect", "rewrite", "overhaul",
 	"set up", "configure and deploy", "step by step",
+	"plan", "architecture", "design",
 }
 
 func containsComplexKeyword(lower string) string {

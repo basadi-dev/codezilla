@@ -105,19 +105,19 @@ func (ui *FancyUI) ShowWelcome(model, ollamaURL string, contextEnabled bool) {
 	ui.Println("")
 
 	// Status info panel
-	keyStyle := ui.theme.StyleDim.Width(22)
+	keyStyle := ui.theme.StyleDim.Width(16)
 
-	ui.Print("%s %s\n", keyStyle.Render("  🧠 Model:"), ui.theme.StyleYellow.Render(model))
-	ui.Print("%s %s\n", keyStyle.Render("  🔌 Provider:"), ui.theme.StyleDim.Render(ollamaURL))
+	ui.Print("  🧠 %s %s\n", keyStyle.Render("Model:"), ui.theme.StyleYellow.Render(model))
+	ui.Print("  🔌 %s %s\n", keyStyle.Render("Provider:"), ui.theme.StyleDim.Render(ollamaURL))
 
 	contextVal := ui.theme.StyleRed.Render("Disabled")
 	if contextEnabled {
 		contextVal = ui.theme.StyleGreen.Render("Enabled ✓")
 	}
-	ui.Print("%s %s\n", keyStyle.Render("  💾 Context:"), contextVal)
+	ui.Print("  💾 %s %s\n", keyStyle.Render("Context:"), contextVal)
 
 	cwd, _ := os.Getwd()
-	ui.Print("%s %s\n", keyStyle.Render("  📁 Directory:"), ui.theme.StyleCyan.Render(cwd))
+	ui.Print("  📁 %s %s\n", keyStyle.Render("Directory:"), ui.theme.StyleCyan.Render(cwd))
 
 	ui.Print("\n  Type %s for commands or just start chatting.\n\n",
 		ui.theme.StyleYellow.Render("/help"))
@@ -134,25 +134,25 @@ func (ui *FancyUI) ShowWelcomeWithModels(defaultModel, fastModel, heavyModel, ol
 	ui.Println("")
 
 	// Status info panel
-	keyStyle := ui.theme.StyleDim.Width(22)
+	keyStyle := ui.theme.StyleDim.Width(16)
 
-	ui.Print("%s %s\n", keyStyle.Render("  🧠 Model:"), ui.theme.StyleYellow.Render(defaultModel))
+	ui.Print("  🧠 %s %s\n", keyStyle.Render("Model:"), ui.theme.StyleYellow.Render(defaultModel))
 	if fastModel != "" {
-		ui.Print("%s %s\n", keyStyle.Render("  ⚡ Fast:"), ui.theme.StyleYellow.Render(fastModel))
+		ui.Print("  ⚡ %s %s\n", keyStyle.Render("Fast:"), ui.theme.StyleYellow.Render(fastModel))
 	}
 	if heavyModel != "" {
-		ui.Print("%s %s\n", keyStyle.Render("  🏋️ Heavy:"), ui.theme.StyleYellow.Render(heavyModel))
+		ui.Print("  🏋️  %s %s\n", keyStyle.Render("Heavy:"), ui.theme.StyleYellow.Render(heavyModel))
 	}
-	ui.Print("%s %s\n", keyStyle.Render("  🔌 Provider:"), ui.theme.StyleDim.Render(ollamaURL))
+	ui.Print("  🔌 %s %s\n", keyStyle.Render("Provider:"), ui.theme.StyleDim.Render(ollamaURL))
 
 	contextVal := ui.theme.StyleRed.Render("Disabled")
 	if contextEnabled {
 		contextVal = ui.theme.StyleGreen.Render("Enabled ✓")
 	}
-	ui.Print("%s %s\n", keyStyle.Render("  💾 Context:"), contextVal)
+	ui.Print("  💾 %s %s\n", keyStyle.Render("Context:"), contextVal)
 
 	cwd, _ := os.Getwd()
-	ui.Print("%s %s\n", keyStyle.Render("  📁 Directory:"), ui.theme.StyleCyan.Render(cwd))
+	ui.Print("  📁 %s %s\n", keyStyle.Render("Directory:"), ui.theme.StyleCyan.Render(cwd))
 
 	ui.Print("\n  Type %s for commands or just start chatting.\n\n",
 		ui.theme.StyleYellow.Render("/help"))
