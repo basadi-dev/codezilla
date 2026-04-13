@@ -1,9 +1,14 @@
 package llm
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +20,11 @@ import (
 	"github.com/mozilla-ai/any-llm-go/providers/ollama"
 	"github.com/mozilla-ai/any-llm-go/providers/openai"
 )
+
+// ErrContextLengthExceeded is returned when the LLM rejects a prompt because
+// it exceeds the model's maximum context window. Callers can use errors.Is()
+// to detect this and attempt context trimming before retrying.
+var ErrContextLengthExceeded = errors.New("context length exceeded")
 
 // bearerAuthTransport injects an Authorization header into every outgoing
 // HTTP request. The official Ollama SDK uses SSH key-based challenge-response
@@ -61,16 +71,18 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 type Client struct {
-	cfg       *config.Config
-	mu        sync.RWMutex
-	providers map[string]anyllm.Provider
+	cfg               *config.Config
+	mu                sync.RWMutex
+	providers         map[string]anyllm.Provider
+	modelContextCache map[string]int // cache: model name → context window size
 }
 
 // NewClient creates a new thread-safe LLM client registry
 func NewClient(cfg *config.Config) *Client {
 	return &Client{
-		cfg:       cfg,
-		providers: make(map[string]anyllm.Provider),
+		cfg:               cfg,
+		providers:         make(map[string]anyllm.Provider),
+		modelContextCache: make(map[string]int),
 	}
 }
 
@@ -214,7 +226,11 @@ func (c *Client) Complete(ctx context.Context, providerName, model string, messa
 		params.Tools = tools
 	}
 
-	return p.Completion(ctx, params)
+	result, err := p.Completion(ctx, params)
+	if err != nil {
+		return nil, wrapContextLengthError(err)
+	}
+	return result, nil
 }
 
 // Stream executes a streaming text completion.
@@ -222,7 +238,7 @@ func (c *Client) Complete(ctx context.Context, providerName, model string, messa
 func (c *Client) Stream(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64, tools []anyllm.Tool) (<-chan anyllm.ChatCompletionChunk, <-chan error, error) {
 	p, err := c.GetProvider(providerName)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, wrapContextLengthError(err)
 	}
 
 	params := anyllm.CompletionParams{
@@ -269,4 +285,174 @@ func (c *Client) GetDefaultModel() string {
 		return c.cfg.LLM.Models.Default
 	}
 	return "qwen2.5-coder:3b" // Failsafe
+}
+
+// GetModelContextLength returns the model's maximum context window in tokens.
+// For Ollama, it queries the /api/show endpoint to get the real value.
+// For other providers, it uses a well-known lookup table.
+// Results are cached per model to avoid redundant API calls.
+// Returns 0 if the context length cannot be determined.
+func (c *Client) GetModelContextLength(ctx context.Context, providerName, model string) int {
+	if providerName == "" {
+		providerName = "ollama"
+	}
+
+	cacheKey := providerName + ":" + model
+
+	// Check cache first
+	c.mu.RLock()
+	if cached, ok := c.modelContextCache[cacheKey]; ok {
+		c.mu.RUnlock()
+		return cached
+	}
+	c.mu.RUnlock()
+
+	var ctxLen int
+
+	// 1. Check user-configured context_lengths map first (works for any provider)
+	if len(c.cfg.LLM.ContextLengths) > 0 {
+		ctxLen = c.lookupConfiguredContextLength(model)
+	}
+
+	// 2. For Ollama, try dynamic discovery via /api/show
+	if ctxLen == 0 && providerName == "ollama" {
+		ctxLen = c.queryOllamaContextLength(ctx, model)
+	}
+
+	// Cache the result (even 0 = "unknown", to avoid retrying)
+	c.mu.Lock()
+	c.modelContextCache[cacheKey] = ctxLen
+	c.mu.Unlock()
+
+	return ctxLen
+}
+
+// lookupConfiguredContextLength checks the config's context_lengths map.
+// Tries exact match first, then prefix match (e.g., "gpt-4o" matches "gpt-4o-mini").
+func (c *Client) lookupConfiguredContextLength(model string) int {
+	// Exact match
+	if v, ok := c.cfg.LLM.ContextLengths[model]; ok {
+		return v
+	}
+
+	// Prefix match (e.g., config has "gpt-4o" and model is "gpt-4o-2024-05-13")
+	modelLower := strings.ToLower(model)
+	for k, v := range c.cfg.LLM.ContextLengths {
+		if strings.HasPrefix(modelLower, strings.ToLower(k)) {
+			return v
+		}
+	}
+
+	return 0
+}
+
+// queryOllamaContextLength calls Ollama's /api/show endpoint to get the
+// model's actual context window size. Falls back to 0 on any error.
+func (c *Client) queryOllamaContextLength(ctx context.Context, model string) int {
+	baseURL := c.cfg.LLM.Ollama.BaseURL
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model":   model,
+		"verbose": true,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/show", bytes.NewReader(reqBody))
+	if err != nil {
+		return 0
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Apply auth headers if configured
+	if c.cfg.LLM.APIKeys.Ollama != "" {
+		authType := c.cfg.LLM.Ollama.AuthType
+		if authType == "" {
+			authType = "bearer"
+		}
+		if authType == "bearer" {
+			req.Header.Set("Authorization", "Bearer "+c.cfg.LLM.APIKeys.Ollama)
+		} else if authType == "basic" {
+			req.SetBasicAuth(c.cfg.LLM.Ollama.Username, c.cfg.LLM.Ollama.Password)
+		}
+	}
+	for k, v := range c.cfg.LLM.Ollama.Headers {
+		req.Header.Set(k, v)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0
+	}
+
+	// Parse response to extract context length from model_info
+	var showResp struct {
+		ModelInfo map[string]interface{} `json:"model_info"`
+	}
+	if err := json.Unmarshal(body, &showResp); err != nil {
+		return 0
+	}
+
+	// Look for context length in model_info keys
+	// Common keys: "<arch>.context_length", "context_length"
+	for k, v := range showResp.ModelInfo {
+		if strings.HasSuffix(k, ".context_length") || k == "context_length" {
+			switch n := v.(type) {
+			case float64:
+				return int(n)
+			case int:
+				return n
+			}
+		}
+	}
+
+	return 0
+}
+
+// IsContextLengthError checks if an error message indicates the LLM's context window was exceeded.
+func IsContextLengthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	patterns := []string{
+		"context_length_exceeded",
+		"context length exceeded",
+		"prompt too long",
+		"maximum context length",
+		"max context length",
+		"token limit",
+		"exceeds the model's max",
+		"input is too long",
+	}
+	for _, p := range patterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapContextLengthError wraps a provider error with ErrContextLengthExceeded
+// if it matches known context-length error patterns.
+func wrapContextLengthError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if IsContextLengthError(err) {
+		return fmt.Errorf("%w: %v", ErrContextLengthExceeded, err)
+	}
+	return err
 }

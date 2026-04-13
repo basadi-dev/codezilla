@@ -119,11 +119,15 @@ type OllamaConfig struct {
 }
 
 type LLMConfig struct {
-	Provider string           `json:"provider" yaml:"provider"`
-	Models   LLMModelsConfig  `json:"models" yaml:"models"`
-	APIKeys  LLMAPIKeysConfig `json:"api_keys" yaml:"api_keys"`
-	Ollama   OllamaConfig     `json:"ollama" yaml:"ollama"`
-	OpenAI   OpenAIConfig     `json:"openai,omitempty" yaml:"openai,omitempty"`
+	Provider       string           `json:"provider" yaml:"provider"`
+	Models         LLMModelsConfig  `json:"models" yaml:"models"`
+	APIKeys        LLMAPIKeysConfig `json:"api_keys" yaml:"api_keys"`
+	Ollama         OllamaConfig     `json:"ollama" yaml:"ollama"`
+	OpenAI         OpenAIConfig     `json:"openai,omitempty" yaml:"openai,omitempty"`
+	// ContextLengths maps model names to their maximum context window in tokens.
+	// Used as a fallback when the provider doesn't expose context info dynamically.
+	// Example: {"gpt-4o": 128000, "claude-3-5-sonnet": 200000}
+	ContextLengths map[string]int `json:"context_lengths,omitempty" yaml:"context_lengths,omitempty"`
 }
 
 // defaultSystemPrompt returns the default system prompt with working directory.

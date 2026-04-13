@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"codezilla/internal/core/llm"
 	"codezilla/internal/session"
 	"codezilla/pkg/logger"
 
@@ -100,11 +102,14 @@ func (s OrchestratorState) String() string {
 }
 
 type AgentOrchestrator struct {
-	agent   *agent
-	logger  *logger.Logger
-	tracker *StreamProcessor
-	loops   *loopDetector
+	agent               *agent
+	logger              *logger.Logger
+	tracker             *StreamProcessor
+	loops               *loopDetector
+	contextLengthRetries int // tracks retries for context-length errors within a single Run()
 }
+
+const maxContextLengthRetries = 3
 
 func NewAgentOrchestrator(a *agent) *AgentOrchestrator {
 	return &AgentOrchestrator{
@@ -112,6 +117,55 @@ func NewAgentOrchestrator(a *agent) *AgentOrchestrator {
 		logger:  a.logger,
 		tracker: NewStreamProcessor(a.logger),
 		loops:   newLoopDetector(a.config.LoopDetectWindow, a.config.LoopDetectMaxRepeat),
+	}
+}
+
+// preFlightContextTrim proactively trims context before an LLM call.
+// It queries the model's actual context window from the provider (Ollama /api/show)
+// and accounts for tool schema overhead. Falls back to MaxTokens if unknown.
+func (o *AgentOrchestrator) preFlightContextTrim(toolCount int) {
+	budget := o.agent.config.MaxTokens
+	if budget <= 0 {
+		return // no budget configured; skip
+	}
+
+	// Try to discover the real model context window
+	if o.agent.llmClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		realCtx := o.agent.llmClient.GetModelContextLength(ctx, o.agent.config.Provider, o.agent.config.Model)
+		cancel()
+
+		if realCtx > 0 {
+			o.logger.Debug("Discovered model context window",
+				"model", o.agent.config.Model,
+				"context_window", realCtx,
+				"config_max_tokens", budget)
+			// Use the smaller of config budget and real context window
+			if realCtx < budget {
+				budget = realCtx
+			}
+		}
+	}
+
+	// Reserve space for tool schemas + response
+	schemaOverhead := EstimateToolSchemaTokens(toolCount)
+	responseReserve := 1024 // leave room for the LLM to generate a response
+	effectiveBudget := budget - schemaOverhead - responseReserve
+
+	if effectiveBudget <= 0 {
+		o.logger.Warn("PreFlight: tool schema overhead exceeds budget",
+			"budget", budget,
+			"schema_overhead", schemaOverhead)
+		return
+	}
+
+	_, currentTokens := o.agent.context.ContextStats()
+	if currentTokens > effectiveBudget {
+		o.logger.Info("PreFlight: context exceeds budget, trimming proactively",
+			"current_tokens", currentTokens,
+			"effective_budget", effectiveBudget,
+			"schema_overhead", schemaOverhead)
+		o.agent.context.PreFlightTrim(effectiveBudget)
 	}
 }
 
@@ -169,6 +223,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				o.agent.config.OnLLMCall(iter, len(msgsForCount), totalChars/4)
 			}
 			llmTools := o.agent.buildLLMTools()
+
+			// Proactively trim context before sending to LLM
+			o.preFlightContextTrim(len(llmTools))
 
 			var toolNames []string
 			for _, t := range llmTools {
@@ -264,6 +321,10 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 		case StateStreaming:
 			iter++
 			llmTools := o.agent.buildLLMTools()
+
+			// Proactively trim context before sending to LLM
+			o.preFlightContextTrim(len(llmTools))
+
 			msgs := o.agent.buildChatMessages()
 			sysPrompt := o.agent.buildSystemPrompt()
 			if len(msgs) > 0 && msgs[0].Role != "system" {
@@ -333,6 +394,10 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			llmDur := time.Since(llmStart)
 
 			if streamErr != nil {
+				// Wrap stream errors for context-length detection
+				if llm.IsContextLengthError(streamErr) {
+					streamErr = fmt.Errorf("%w: %v", llm.ErrContextLengthExceeded, streamErr)
+				}
 				o.logger.Error("LLM stream failed",
 					"iter", iter,
 					"duration", llmDur.Round(time.Millisecond),
@@ -482,10 +547,44 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			state = StatePrompting
 
 		case StateErrorRecovery:
+			// Check if this is a context-length error that we can auto-recover from
+			if errors.Is(currentLLMError, llm.ErrContextLengthExceeded) && o.contextLengthRetries < maxContextLengthRetries {
+				o.contextLengthRetries++
+				msgsBefore, toksBefore := o.agent.context.ContextStats()
+				removed := o.agent.context.AggressiveTrim()
+				msgsAfter, toksAfter := o.agent.context.ContextStats()
+
+				o.logger.Warn("Context length exceeded — auto-trimming and retrying",
+					"retry", o.contextLengthRetries,
+					"max_retries", maxContextLengthRetries,
+					"msgs_before", msgsBefore,
+					"msgs_after", msgsAfter,
+					"~toks_before", toksBefore,
+					"~toks_after", toksAfter,
+					"removed", removed)
+
+				if removed == 0 {
+					// Nothing left to trim — give up
+					o.logger.Error("Cannot trim further, context is minimal")
+					finalResponse = "I'm sorry, the prompt is too long for this model's context window and I cannot trim further. Try using a model with a larger context window, or start a new conversation."
+					state = StateComplete
+					continue
+				}
+
+				// Reset error and retry
+				currentLLMError = nil
+				state = StatePrompting
+				continue
+			}
+
 			o.logger.Error("LLM Error Recovery",
 				"iter", iter,
 				"error", currentLLMError)
-			finalResponse = "I'm sorry, an error occurred communicating with the model: " + currentLLMError.Error()
+			if errors.Is(currentLLMError, llm.ErrContextLengthExceeded) {
+				finalResponse = "I'm sorry, the prompt is too long for this model's context window. Try `/clear` to reset the conversation, or switch to a model with a larger context window."
+			} else {
+				finalResponse = "I'm sorry, an error occurred communicating with the model: " + currentLLMError.Error()
+			}
 			state = StateComplete
 
 		case StateComplete:
