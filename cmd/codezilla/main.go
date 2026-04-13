@@ -5,10 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"codezilla/internal/config"
 	"codezilla/internal/core"
@@ -122,21 +120,12 @@ func main() {
 	}
 	defer app.Close()
 
-	// Setup signal handling
+	// Define context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		appUI.Info("\nShutting down...")
-		app.PrintSessionSummary()
-		cancel()
-	}()
-
 	// Run the application
-	if err := app.Run(ctx); err != nil {
+	if err := app.Run(ctx, cancel); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

@@ -17,6 +17,16 @@ const (
 	TierHeavy
 )
 
+const (
+	// RoutingThreshold is the score required to shift a request out of the Default tier
+	RoutingThreshold = 3
+	
+	// Thresholds for text analysis
+	MaxLengthFast  = 50
+	MinLengthHeavy = 300
+	MaxExplainLen  = 200
+)
+
 // String returns a human-readable label for the tier.
 func (t RequestTier) String() string {
 	switch t {
@@ -94,16 +104,16 @@ func (r *ModelRouter) Classify(message string, prevToolCount int) (RequestTier, 
 	}
 
 	// Very short, no code keywords
-	if length < 30 && !containsCodeKeyword(lower) {
-		fastScore += 3
+	if length < MaxLengthFast && !containsCodeKeyword(lower) {
+		fastScore += RoutingThreshold
 		if fastReason == "" {
 			fastReason = "short simple query"
 		}
 	}
 
 	// Explanation-seeking questions
-	if containsExplainKeyword(lower) && length < 200 {
-		fastScore += 2
+	if containsExplainKeyword(lower) && length < MaxExplainLen && !containsCodeKeyword(lower) {
+		fastScore += RoutingThreshold
 		if fastReason == "" {
 			fastReason = "simple explanation"
 		}
@@ -114,7 +124,7 @@ func (r *ModelRouter) Classify(message string, prevToolCount int) (RequestTier, 
 	// Complex action keywords (accumulate score for each match)
 	for _, kw := range complexKeywords {
 		if strings.Contains(lower, kw) {
-			heavyScore += 2
+			heavyScore += RoutingThreshold
 			if heavyReason == "" {
 				heavyReason = kw + " request"
 			}
@@ -122,7 +132,7 @@ func (r *ModelRouter) Classify(message string, prevToolCount int) (RequestTier, 
 	}
 
 	// Long input (likely detailed spec)
-	if length > 300 {
+	if length > MinLengthHeavy {
 		heavyScore++
 		if heavyReason == "" {
 			heavyReason = "detailed request"
@@ -161,12 +171,12 @@ func (r *ModelRouter) Classify(message string, prevToolCount int) (RequestTier, 
 	// ---- Decision ----
 
 	// Fast path: only if we have a fast model configured and fast signals are strong
-	if fastScore >= 3 && r.FastModel != "" {
+	if fastScore >= RoutingThreshold && r.FastModel != "" {
 		return TierFast, fastReason
 	}
 
 	// Heavy path
-	if heavyScore >= 3 {
+	if heavyScore >= RoutingThreshold {
 		return TierHeavy, heavyReason
 	}
 
@@ -232,14 +242,7 @@ var complexKeywords = []string{
 	"plan", "architecture", "design",
 }
 
-func containsComplexKeyword(lower string) string {
-	for _, kw := range complexKeywords {
-		if strings.Contains(lower, kw) {
-			return kw
-		}
-	}
-	return ""
-}
+
 
 var (
 	// Matches numbered lists in any position: "1. foo", "  2) bar", inline "1. design 2. write"

@@ -8,9 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -42,6 +45,10 @@ type App struct {
 	// Token usage tracking (updated by OnLLMUsage callback)
 	lastTurnUsage agent.TokenUsage
 	sessionUsage  agent.TokenUsage
+
+	// Task cancellation tracking
+	taskCancel context.CancelFunc
+	cancelMu   sync.Mutex
 }
 
 // NewApp creates a new application instance
@@ -1005,10 +1012,34 @@ func (app *App) Close() error {
 }
 
 // Run starts the main application loop
-func (app *App) Run(ctx context.Context) error {
+func (app *App) Run(ctx context.Context, rootCancel context.CancelFunc) error {
 	// Show UI elements
 	app.ui.Clear()
 	app.ui.ShowBanner()
+
+	// Setup task-aware signal handler for graceful interruption
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		for range sigChan {
+			app.cancelMu.Lock()
+			if app.taskCancel != nil {
+				// We are in the middle of a task -> Cancel it!
+				app.taskCancel()
+				app.taskCancel = nil
+				app.cancelMu.Unlock()
+				app.ui.Warning("\n⚠️  Task Cancelled")
+			} else {
+				// Idling -> Shutdown whole app
+				app.cancelMu.Unlock()
+				app.ui.Info("\nShutting down...")
+				app.PrintSessionSummary()
+				if rootCancel != nil {
+					rootCancel()
+				}
+			}
+		}
+	}()
 
 	// Wire Tab auto-complete now that skill registry is populated
 	app.wireCompleter()
@@ -1093,7 +1124,9 @@ func (app *App) Run(ctx context.Context) error {
 
 			// Process with AI
 			if err := app.processInput(ctx, input); err != nil {
-				app.ui.Error("Failed to process: %v", err)
+				if err != context.Canceled {
+					app.ui.Error("Failed to process: %v", err)
+				}
 			}
 		}
 	}
@@ -1101,6 +1134,17 @@ func (app *App) Run(ctx context.Context) error {
 
 // processInput processes user input with the AI using streaming.
 func (app *App) processInput(ctx context.Context, input string) error {
+	ctx, cancelTask := context.WithCancel(ctx)
+	app.cancelMu.Lock()
+	app.taskCancel = cancelTask
+	app.cancelMu.Unlock()
+	defer func() {
+		app.cancelMu.Lock()
+		app.taskCancel = nil
+		app.cancelMu.Unlock()
+		cancelTask()
+	}()
+
 	if app.sessionRecord != nil {
 		app.sessionRecord.Record(session.EventUIInput, map[string]interface{}{
 			"text": input,
