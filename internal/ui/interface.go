@@ -68,7 +68,7 @@ type UI interface {
 
 	// Structured displays
 	ShowHelp()
-	ShowModels(models []string, current, planner, subAgent, summariser string)
+	ShowModels(models []string, current, fast, heavy string)
 	ShowTools(tools []ToolInfo)
 	ShowContext(context string)
 

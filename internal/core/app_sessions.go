@@ -103,7 +103,7 @@ func (app *App) listSessions() {
 						firstTs = evt.TimestampNano
 					}
 					lastTs = evt.TimestampNano
-					
+
 					if evt.Type == session.EventUIInput && snippet == "<No UI input recorded>" {
 						if text, ok := evt.Data["text"].(string); ok {
 							if len(text) > 50 {
@@ -156,9 +156,9 @@ func (app *App) listSessions() {
 	app.ui.Println("\n%s", lipgloss.NewStyle().Bold(true).Render("Available Sessions:"))
 	for _, s := range top {
 		durationStr := lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Render(formatDuration(s.Duration))
-		app.ui.Println("  %s  %-22s  %-6s  %s", 
-			lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("ID"), 
-			s.Filename, 
+		app.ui.Println("  %s  %-22s  %-6s  %s",
+			lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("ID"),
+			s.Filename,
 			durationStr,
 			lipgloss.NewStyle().Faint(true).Render(s.Snippet))
 	}
@@ -212,7 +212,7 @@ func (app *App) handleSessionResume(ctx context.Context, sessionID string) {
 			app.agent.AddAssistantMessage(currentAssistantResponse.String())
 		}
 		app.ui.Success("Session context restored.")
-		
+
 		msgs := app.agent.GetMessages()
 		for _, msg := range msgs {
 			if msg.Role == "user" {

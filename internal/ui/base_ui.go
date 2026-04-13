@@ -213,19 +213,19 @@ func (ui *BaseUI) ShowResponse(response string) {
 	for {
 		startIdx := strings.Index(response, "<think>")
 		endIdx := strings.Index(response, "</think>")
-		
+
 		if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
 			// Text before think block
 			before := response[:startIdx]
 			if strings.TrimSpace(before) != "" {
 				ui.renderMarkdownOnly(before)
 			}
-			
+
 			// Think block
 			thinkContent := strings.TrimSpace(response[startIdx+7 : endIdx])
 			ui.Println("\n%s\n", ui.theme.StyleCyan.Italic(true).Render("🤔 Thinking..."))
 			ui.Println("%s\n", ui.theme.StyleDim.Italic(true).Render(thinkContent))
-			
+
 			// Advance response
 			response = response[endIdx+8:]
 		} else {
@@ -318,7 +318,7 @@ func (ui *BaseUI) ShowHelp() {
 }
 
 // ShowModels displays available models
-func (ui *BaseUI) ShowModels(models []string, current, planner, subAgent, summariser string) {
+func (ui *BaseUI) ShowModels(models []string, current, fast, heavy string) {
 	ui.Println("\n%s", ui.theme.StyleBold.Render("Available Models:"))
 
 	for _, model := range models {
@@ -326,14 +326,11 @@ func (ui *BaseUI) ShowModels(models []string, current, planner, subAgent, summar
 		if model == current {
 			tags = append(tags, "default")
 		}
-		if model == planner {
-			tags = append(tags, "planner")
+		if model == fast {
+			tags = append(tags, "fast")
 		}
-		if model == subAgent {
-			tags = append(tags, "sub-agent")
-		}
-		if model == summariser {
-			tags = append(tags, "summariser")
+		if model == heavy {
+			tags = append(tags, "heavy")
 		}
 
 		if len(tags) > 0 {

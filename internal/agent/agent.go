@@ -31,18 +31,17 @@ type Agent interface {
 	ClearContext()
 	ClearLastUserMessage()
 	SetModel(model string)
-	SetPlannerModel(model string)
-	SetSubAgentModel(model string)
-	SetSummariserModel(model string)
+	SetFastModel(model string)
+	SetHeavyModel(model string)
+	GetModelForTier(tier RequestTier) string
 	SetTemperature(temperature float64)
 	SetMaxTokens(maxTokens int)
 	SetSessionRecorder(recorder *session.Recorder)
+	SetAutoRoute(enabled bool)
 }
 
 type Config struct {
 	Model           string
-	PlannerModel    string
-	SubAgentModel   string
 	Provider        string
 	MaxTokens       int
 	MaxIterations   int
@@ -74,10 +73,15 @@ type Config struct {
 	LoopDetectWindow    int
 	LoopDetectMaxRepeat int
 
-	SummariserModel        string
+	FastModel              string
+	HeavyModel             string
+	AutoRoute              bool
 	ThinkCompressThreshold int
 	SlidingWindowSize      int // number of recent non-system messages to keep verbatim (0 = disabled)
 	SessionRecorder        *session.Recorder
+	// OnModelRouted is called when the router selects a model for the current request.
+	// model is the selected model name, reason is a short human-readable explanation.
+	OnModelRouted func(model, reason string)
 }
 
 func DefaultConfig() *Config {
@@ -102,6 +106,7 @@ type agent struct {
 	toolRegistry  tools.ToolRegistry
 	logger        *logger.Logger
 	permissionMgr tools.ToolPermissionManager
+	router        *ModelRouter
 }
 
 func NewAgent(config *Config) Agent {
@@ -131,6 +136,11 @@ func NewAgent(config *Config) Agent {
 		toolRegistry:  config.ToolRegistry,
 		logger:        config.Logger,
 		permissionMgr: config.PermissionMgr,
+	}
+
+	// Initialise the model router when auto-routing is enabled
+	if config.AutoRoute && (config.FastModel != "" || config.HeavyModel != "") {
+		agent.router = NewModelRouter(true, config.FastModel, config.Model, config.HeavyModel)
 	}
 
 	if config.SystemPrompt != "" {
@@ -267,19 +277,45 @@ func (a *agent) SetModel(model string) {
 	a.config.Model = model
 }
 
-func (a *agent) SetPlannerModel(model string) {
-	a.logger.Info("Changing planner model", "from", a.config.PlannerModel, "to", model)
-	a.config.PlannerModel = model
+func (a *agent) GetModelForTier(tier RequestTier) string {
+	if a.router == nil {
+		return a.config.Model
+	}
+	return a.router.ModelForTier(tier)
 }
 
-func (a *agent) SetSubAgentModel(model string) {
-	a.logger.Info("Changing sub-agent model", "from", a.config.SubAgentModel, "to", model)
-	a.config.SubAgentModel = model
+func (a *agent) SetFastModel(model string) {
+	a.logger.Info("Changing fast model", "from", a.config.FastModel, "to", model)
+	a.config.FastModel = model
+	if a.router != nil {
+		a.router.FastModel = model
+	} else if model != "" && a.config.AutoRoute {
+		a.router = NewModelRouter(true, model, a.config.Model, a.config.HeavyModel)
+	}
 }
 
-func (a *agent) SetSummariserModel(model string) {
-	a.logger.Info("Changing summariser model", "from", a.config.SummariserModel, "to", model)
-	a.config.SummariserModel = model
+func (a *agent) SetHeavyModel(model string) {
+	a.logger.Info("Changing heavy model", "from", a.config.HeavyModel, "to", model)
+	a.config.HeavyModel = model
+	if a.router != nil {
+		a.router.HeavyModel = model
+	} else if model != "" && a.config.AutoRoute {
+		a.router = NewModelRouter(true, a.config.FastModel, a.config.Model, model)
+	}
+}
+
+func (a *agent) SetAutoRoute(enabled bool) {
+	a.logger.Info("Changing auto-route", "from", a.config.AutoRoute, "to", enabled)
+	a.config.AutoRoute = enabled
+	if enabled && (a.config.FastModel != "" || a.config.HeavyModel != "") {
+		if a.router == nil {
+			a.router = NewModelRouter(true, a.config.FastModel, a.config.Model, a.config.HeavyModel)
+		} else {
+			a.router.Enabled = true
+		}
+	} else if a.router != nil {
+		a.router.Enabled = false
+	}
 }
 
 func (a *agent) SetTemperature(temperature float64) {

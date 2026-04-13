@@ -43,7 +43,8 @@ type Config struct {
 	ResumeSessionID   string `json:"resume_session_id" yaml:"resume_session_id"`
 
 	// Agent behavior
-	AutoPlan bool `json:"auto_plan" yaml:"auto_plan"`
+	AutoPlan  bool `json:"auto_plan" yaml:"auto_plan"`
+	AutoRoute bool `json:"auto_route" yaml:"auto_route"`
 
 	// Embedded metasearch settings (no API keys required)
 	Metasearch MetasearchSettings `json:"metasearch" yaml:"metasearch"`
@@ -93,11 +94,9 @@ type AnalyzerSettings struct {
 }
 
 type LLMModelsConfig struct {
-	Default    string `json:"default" yaml:"default"`
-	Planner    string `json:"planner,omitempty" yaml:"planner,omitempty"`
-	SubAgent   string `json:"sub_agent,omitempty" yaml:"sub_agent,omitempty"`
-	Analyzer   string `json:"analyzer,omitempty" yaml:"analyzer,omitempty"`
-	Summariser string `json:"summariser,omitempty" yaml:"summariser,omitempty"`
+	Default string `json:"default" yaml:"default"`
+	Fast    string `json:"fast,omitempty" yaml:"fast,omitempty"`
+	Heavy   string `json:"heavy,omitempty" yaml:"heavy,omitempty"`
 }
 
 type LLMAPIKeysConfig struct {
@@ -164,8 +163,8 @@ func DefaultConfig() *Config {
 		LLM: LLMConfig{
 			Provider: "ollama",
 			Models: LLMModelsConfig{
-				Default:    "qwen3-coder:480b", // Best open-weight coder
-				Summariser: "gemma3:12b",
+				Default: "qwen3-coder:480b", // Best open-weight coder
+				Fast:    "gemma3:12b",
 			},
 			Ollama: OllamaConfig{
 				BaseURL: "http://localhost:11434",
@@ -183,6 +182,7 @@ func DefaultConfig() *Config {
 		HistoryFile:            filepath.Join(getConfigDir(), "history"),
 		SessionEventsDir:       filepath.Join(getConfigDir(), "sessions"),
 		AutoPlan:               false,
+		AutoRoute:              true,
 		ThinkCompressThreshold: 2000,
 		DangerousToolsWarn:     true,
 		AlwaysAskPermission:    false,

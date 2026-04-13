@@ -273,7 +273,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 			// Title line
 			titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#1E66F5", Dark: "#7AA2F7"})
-			plannerModel := cfg.LLM.Models.Planner
+			plannerModel := cfg.LLM.Models.Heavy
 			if plannerModel == "" {
 				plannerModel = cfg.LLM.Models.Default
 			}
@@ -515,10 +515,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 	// Add sub-agent tool
 	launcher := func(ctx context.Context, task string) (string, error) {
-		subModel := cfg.LLM.Models.SubAgent
-		if subModel == "" {
-			subModel = cfg.LLM.Models.Default
-		}
+		subModel := cfg.LLM.Models.Default
 		ui.Info("\n🤖 Launching Sub-Agent... %s", lipgloss.NewStyle().Faint(true).Render("· "+subModel))
 		ui.Info("   Task: %s\n", task)
 		subCfg := *cfg
@@ -533,9 +530,6 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 
 		subAgentConfig := &agent.Config{
 			Model:                  subModel,
-			PlannerModel:           subCfg.LLM.Models.Planner,
-			SubAgentModel:          subModel,
-			SummariserModel:        subCfg.LLM.Models.Summariser,
 			Provider:               subCfg.LLM.Provider,
 			SystemPrompt:           "You are a sub-agent. Your goal is to solve the specific task provided by the parent agent. Use tools as necessary. Return a clear and concise summary of your findings and completed actions. Task: " + task,
 			Temperature:            float64(subCfg.Temperature),
@@ -573,9 +567,6 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	// Initialize agent
 	agentConfig := &agent.Config{
 		Model:                  cfg.LLM.Models.Default,
-		PlannerModel:           cfg.LLM.Models.Planner,
-		SubAgentModel:          cfg.LLM.Models.SubAgent,
-		SummariserModel:        cfg.LLM.Models.Summariser,
 		Provider:               cfg.LLM.Provider,
 		SystemPrompt:           cfg.SystemPrompt,
 		Temperature:            float64(cfg.Temperature),
@@ -645,6 +636,12 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			appTurnUsage = turn
 			appSessionUsage = session
 		},
+		OnModelRouted: func(model, reason string) {
+			ui.UpdateThinkingStatus(fmt.Sprintf("routed → %s (%s)", model, reason))
+		},
+		FastModel:       cfg.LLM.Models.Fast,
+		HeavyModel:      cfg.LLM.Models.Heavy,
+		AutoRoute:       cfg.AutoRoute,
 		SessionRecorder: sessionRecord,
 	}
 	agentInstance := agent.NewAgent(agentConfig)
@@ -740,6 +737,7 @@ func (app *App) wireCompleter() {
 		{Primary: "/load ", Desc: "Load conversation from JSON file"},
 		{Primary: "/replay ", Desc: "Replay last user message from a loaded JSON file"},
 		{Primary: "/tokens", Desc: "Show session token usage"},
+		{Primary: "/router ", Desc: "Model routing [on|off|status]"},
 	}
 
 	c.SetCompleter(func(line string) []ui.Completion {
@@ -759,6 +757,17 @@ func (app *App) wireCompleter() {
 			return filterPrefix("/context ", opts, sub)
 		}
 
+		// /router <sub>
+		if strings.HasPrefix(line, "/router ") {
+			sub := line[len("/router "):]
+			opts := []ui.Completion{
+				{Text: "on", Description: "Enable auto model routing"},
+				{Text: "off", Description: "Disable routing (use default model)"},
+				{Text: "status", Description: "Show current routing config"},
+			}
+			return filterPrefix("/router ", opts, sub)
+		}
+
 		// /model arg
 		if strings.HasPrefix(line, "/model ") || strings.HasPrefix(line, "/models ") {
 			prefix := "/model "
@@ -770,7 +779,7 @@ func (app *App) wireCompleter() {
 			// Detect if the user is typing a role name
 			isRoleCmd := false
 			var activeRoleCmd string
-			for _, role := range []string{"planner ", "sub_agent ", "summariser ", "default "} {
+			for _, role := range []string{"default ", "fast ", "heavy "} {
 				if strings.HasPrefix(sub, role) {
 					isRoleCmd = true
 					activeRoleCmd = role
@@ -787,15 +796,14 @@ func (app *App) wireCompleter() {
 				}
 				return filterPrefix(prefix+activeRoleCmd, opts, subModel)
 			} else {
-				opts = make([]ui.Completion, len(app.cachedModels)+6)
+				opts = make([]ui.Completion, len(app.cachedModels)+5)
 				opts[0] = ui.Completion{Text: "ls", Description: "List all available models"}
 				opts[1] = ui.Completion{Text: "list", Description: "List all available models"}
-				opts[2] = ui.Completion{Text: "planner ", Description: "Set planner model"}
-				opts[3] = ui.Completion{Text: "sub_agent ", Description: "Set sub-agent model"}
-				opts[4] = ui.Completion{Text: "summariser ", Description: "Set summariser model"}
-				opts[5] = ui.Completion{Text: "default ", Description: "Set default model"}
+				opts[2] = ui.Completion{Text: "default ", Description: "Set default model"}
+				opts[3] = ui.Completion{Text: "fast ", Description: "Set fast model (simple Q&A)"}
+				opts[4] = ui.Completion{Text: "heavy ", Description: "Set heavy model (complex tasks)"}
 				for i, m := range app.cachedModels {
-					opts[i+6] = ui.Completion{Text: m}
+					opts[i+5] = ui.Completion{Text: m}
 				}
 				return filterPrefix(prefix, opts, sub)
 			}
@@ -1010,15 +1018,13 @@ func (app *App) Run(ctx context.Context) error {
 		connStr = app.config.LLM.Ollama.BaseURL
 	}
 	type modelledWelcome interface {
-		ShowWelcomeWithModels(model, plannerModel, subAgentModel, summariserModel, analyzerModel, ollamaURL string, contextEnabled bool)
+		ShowWelcomeWithModels(defaultModel, fastModel, heavyModel, ollamaURL string, contextEnabled bool)
 	}
 	if mw, ok := app.ui.(modelledWelcome); ok {
 		mw.ShowWelcomeWithModels(
 			app.config.LLM.Models.Default,
-			app.config.LLM.Models.Planner,
-			app.config.LLM.Models.SubAgent,
-			app.config.LLM.Models.Summariser,
-			app.config.LLM.Models.Analyzer,
+			app.config.LLM.Models.Fast,
+			app.config.LLM.Models.Heavy,
 			connStr,
 			app.config.RetainContext,
 		)
@@ -1029,7 +1035,7 @@ func (app *App) Run(ctx context.Context) error {
 
 	if sessionID := app.SessionID(); sessionID != "" {
 		app.ui.Info("  📝 Session:          %s", app.ui.GetTheme().StyleCyan.Render(sessionID))
-		
+
 		if app.config.ResumeSessionID != "" {
 			app.ui.Print("\n%s\n", lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#2E3440")).Background(lipgloss.AdaptiveColor{Light: "#ACB0BE", Dark: "#A3BE8C"}).Render(" Session Restored "))
 			msgs := app.agent.GetMessages()
@@ -1540,7 +1546,7 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			arg := strings.ToLower(parts[1])
 			if arg == "ls" || arg == "list" {
 				app.showModels(ctx)
-			} else if arg == "planner" || arg == "sub_agent" || arg == "summariser" || arg == "default" {
+			} else if arg == "default" || arg == "fast" || arg == "heavy" {
 				if len(parts) > 2 {
 					app.changeRoleModel(ctx, arg, strings.Join(parts[2:], " "))
 				} else {
@@ -1553,11 +1559,10 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			if parts[0] == "/models" {
 				app.showModels(ctx)
 			} else {
-				app.ui.Info("Current models:\n  Default:    %s\n  Planner:    %s\n  Sub-Agent:  %s\n  Summariser: %s",
+				app.ui.Info("Current models:\n  Default: %s\n  Fast:    %s\n  Heavy:   %s",
 					app.config.LLM.Models.Default,
-					app.config.LLM.Models.Planner,
-					app.config.LLM.Models.SubAgent,
-					app.config.LLM.Models.Summariser)
+					app.config.LLM.Models.Fast,
+					app.config.LLM.Models.Heavy)
 				app.ui.Info("Type '/model ls' to see available models")
 			}
 		}
@@ -1630,6 +1635,31 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			}
 			app.ui.Print("%s %s\n", keyStyle.Render("  Total tokens:"), theme.StyleYellow.Render(agent.FormatNumber(app.sessionUsage.TotalTokens)))
 			app.ui.Println("")
+		}
+
+	case "/router":
+		if len(parts) > 1 {
+			switch strings.ToLower(parts[1]) {
+			case "on":
+				app.config.AutoRoute = true
+				app.agent.SetAutoRoute(true)
+				if app.config.LLM.Models.Fast == "" {
+					app.ui.Warning("Auto-routing enabled, but no fast model configured.")
+					app.ui.Info("Set one with: /model fast <model_name>")
+				} else {
+					app.ui.Success("Auto-routing enabled (fast: %s)", app.config.LLM.Models.Fast)
+				}
+			case "off":
+				app.config.AutoRoute = false
+				app.agent.SetAutoRoute(false)
+				app.ui.Success("Auto-routing disabled — all requests use default model")
+			case "status":
+				app.showRouterStatus()
+			default:
+				app.ui.Warning("Usage: /router [on|off|status]")
+			}
+		} else {
+			app.showRouterStatus()
 		}
 
 	default:
@@ -1764,7 +1794,7 @@ func (app *App) showModels(ctx context.Context) {
 	// Cache for Tab completion
 	app.cachedModels = models
 
-	app.ui.ShowModels(models, app.config.LLM.Models.Default, app.config.LLM.Models.Planner, app.config.LLM.Models.SubAgent, app.config.LLM.Models.Summariser)
+	app.ui.ShowModels(models, app.config.LLM.Models.Default, app.config.LLM.Models.Fast, app.config.LLM.Models.Heavy)
 }
 
 // changeRoleModel changes the current model for a specific role
@@ -1788,24 +1818,59 @@ func (app *App) changeRoleModel(ctx context.Context, role, modelName string) {
 		app.ui.Warning("Model '%s' not explicitly found in model list, but assigning anyway.", modelName)
 	}
 
-	if role == "planner" {
-		app.config.LLM.Models.Planner = modelName
-		app.agent.SetPlannerModel(modelName)
-		app.ui.Success("Switched planner model to: %s", modelName)
-	} else if role == "sub_agent" {
-		app.config.LLM.Models.SubAgent = modelName
-		app.agent.SetSubAgentModel(modelName)
-		app.ui.Success("Switched sub-agent model to: %s", modelName)
-	} else if role == "summariser" {
-		app.config.LLM.Models.Summariser = modelName
-		app.agent.SetSummariserModel(modelName)
-		app.ui.Success("Switched summariser model to: %s", modelName)
+	if role == "fast" {
+		app.config.LLM.Models.Fast = modelName
+		app.agent.SetFastModel(modelName)
+		app.ui.Success("Switched fast model to: %s", modelName)
+		if !app.config.AutoRoute {
+			app.ui.Info("Tip: enable routing with /router on")
+		}
+	} else if role == "heavy" {
+		app.config.LLM.Models.Heavy = modelName
+		app.agent.SetHeavyModel(modelName)
+		app.ui.Success("Switched heavy model to: %s", modelName)
+		if !app.config.AutoRoute {
+			app.ui.Info("Tip: enable routing with /router on")
+		}
 	} else {
 		app.config.LLM.Models.Default = modelName
 		app.agent.SetModel(modelName)
 		app.ui.SetModel(modelName)
 		app.ui.Success("Switched default model to: %s", modelName)
 	}
+}
+
+// showRouterStatus displays the current model routing configuration.
+func (app *App) showRouterStatus() {
+	theme := app.ui.GetTheme()
+	app.ui.Println("")
+	app.ui.Println("%s", lipgloss.NewStyle().Bold(true).Render("🔀 Model Router"))
+
+	status := theme.StyleRed.Render("disabled")
+	if app.config.AutoRoute {
+		status = theme.StyleGreen.Render("enabled")
+	}
+
+	keyStyle := theme.StyleDim.Width(16)
+	app.ui.Print("%s %s\n", keyStyle.Render("  Status:"), status)
+	app.ui.Print("%s %s\n", keyStyle.Render("  Fast:"), modelOrNotSet(app.config.LLM.Models.Fast, theme))
+	app.ui.Print("%s %s\n", keyStyle.Render("  Default:"), app.config.LLM.Models.Default)
+	app.ui.Print("%s %s\n", keyStyle.Render("  Heavy:"), modelOrNotSet(app.config.LLM.Models.Heavy, theme))
+	app.ui.Println("")
+	if !app.config.AutoRoute {
+		app.ui.Info("Enable with: /router on")
+	}
+	if app.config.LLM.Models.Fast == "" && app.config.LLM.Models.Heavy == "" && app.config.AutoRoute {
+		app.ui.Info("Set models with: /model fast <name> and /model heavy <name>")
+	}
+}
+
+// modelOrNotSet returns the model name or a dimmed "(not set)" placeholder.
+func modelOrNotSet(model string, theme ui.Theme) string {
+	if model != "" {
+		return model
+	}
+	return theme.StyleDim.Render("(not set)")
 }
 
 // handleContextCommand handles context-related commands
@@ -1976,7 +2041,7 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	registry.RegisterTool(tools.NewGrepSearchTool())
 
 	// Create analyzer factory and register analyzer tool
-	analyzerModel := cfg.LLM.Models.Analyzer
+	analyzerModel := cfg.LLM.Models.Fast
 	if analyzerModel == "" {
 		analyzerModel = cfg.LLM.Models.Default
 	}

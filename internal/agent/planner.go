@@ -76,10 +76,7 @@ Example format:
 
 	llmTools := a.buildLLMTools()
 
-	targetModel := a.config.PlannerModel
-	if targetModel == "" {
-		targetModel = a.config.Model
-	}
+	targetModel := a.GetModelForTier(TierHeavy)
 
 	completion, err := a.generateCompletion(ctx, targetModel, llmTools)
 	if err != nil {

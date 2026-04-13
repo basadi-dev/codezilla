@@ -107,8 +107,10 @@ type AgentOrchestrator struct {
 	tracker              *StreamProcessor
 	loops                *loopDetector
 	tokens               *TokenTracker
-	contextLengthRetries int // tracks retries for context-length errors within a single Run()
-	transientRetries     int // tracks retries for model provider transient errors
+	contextLengthRetries int    // tracks retries for context-length errors within a single Run()
+	transientRetries     int    // tracks retries for model provider transient errors
+	routedModel          string // per-Run model override set by the router (empty = use config.Model)
+	prevToolCount        int    // tool count from previous Run (used by router)
 }
 
 const (
@@ -124,6 +126,16 @@ func NewAgentOrchestrator(a *agent) *AgentOrchestrator {
 		loops:   newLoopDetector(a.config.LoopDetectWindow, a.config.LoopDetectMaxRepeat),
 		tokens:  NewTokenTracker(),
 	}
+}
+
+// effectiveModel returns the model to use for LLM calls in this Run.
+// If the router selected a model, that takes priority; otherwise falls back
+// to the agent's configured default model.
+func (o *AgentOrchestrator) effectiveModel() string {
+	if o.routedModel != "" {
+		return o.routedModel
+	}
+	return o.agent.config.Model
 }
 
 // preFlightContextTrim proactively trims context before an LLM call.
@@ -144,12 +156,12 @@ func (o *AgentOrchestrator) preFlightContextTrim(ctx context.Context, toolCount 
 	// Try to discover the real model context window
 	if o.agent.llmClient != nil {
 		queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		realCtx := o.agent.llmClient.GetModelContextLength(queryCtx, o.agent.config.Provider, o.agent.config.Model)
+		realCtx := o.agent.llmClient.GetModelContextLength(queryCtx, o.agent.config.Provider, o.effectiveModel())
 		cancel()
 
 		if realCtx > 0 {
 			o.logger.Debug("Discovered model context window",
-				"model", o.agent.config.Model,
+				"model", o.effectiveModel(),
 				"context_window", realCtx,
 				"config_max_tokens", budget)
 			// Use the smaller of config budget and real context window
@@ -202,9 +214,9 @@ func (o *AgentOrchestrator) summarizeAndStore(ctx context.Context, evicted []Mes
 // summarizeEvictedMessages uses the SummariserModel to incrementally update
 // the rolling conversation summary with newly evicted messages.
 func (o *AgentOrchestrator) summarizeEvictedMessages(ctx context.Context, existingSummary string, evicted []Message) string {
-	summariserModel := o.agent.config.SummariserModel
+	summariserModel := o.agent.GetModelForTier(TierFast)
 	if summariserModel == "" {
-		o.logger.Debug("No summariser model configured, skipping eviction summary")
+		o.logger.Debug("No fast model configured, skipping eviction summary")
 		return "" // no summariser = fall back to hard-drop
 	}
 
@@ -289,6 +301,35 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 	o.agent.AddUserMessage(initialMessage)
 
+	// ---- Model routing: classify the request and pick the best model tier ----
+	if o.agent.router != nil && o.agent.router.Enabled {
+		tier, reason := o.agent.router.Classify(initialMessage, o.prevToolCount)
+		routedModel := o.agent.router.ModelForTier(tier)
+		if routedModel != o.agent.config.Model {
+			o.routedModel = routedModel
+			o.logger.Info("Model router",
+				"tier", tier.String(),
+				"model", routedModel,
+				"reason", reason)
+		} else {
+			o.logger.Debug("Model router: staying on default",
+				"tier", tier.String(),
+				"reason", reason)
+		}
+		// Notify UI callback
+		if o.agent.config.OnModelRouted != nil {
+			o.agent.config.OnModelRouted(routedModel, reason)
+		}
+		// Record routing decision in session
+		if o.agent.config.SessionRecorder != nil {
+			o.agent.config.SessionRecorder.Record(session.EventStateChange, map[string]interface{}{
+				"routing_tier":   tier.String(),
+				"routing_model":  routedModel,
+				"routing_reason": reason,
+			})
+		}
+	}
+
 	if o.agent.config.AutoPlan && o.agent.shouldCreateTodoPlan(initialMessage) {
 		o.logger.Debug("Creating automatic todo plan for complex task")
 		planResponse, err := o.agent.createAutomaticTodoPlan(ctx, initialMessage)
@@ -354,14 +395,14 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 			o.logger.Info("LLM request (complete)",
 				"iter", iter,
-				"model", o.agent.config.Model,
+				"model", o.effectiveModel(),
 				"messages", len(msgsForLog),
 				"~tokens", approxToks,
 				"tools", len(toolNames))
 
 			o.logger.DumpPretty("LLM Request Detail (Prompting)", map[string]any{
 				"provider": o.agent.config.Provider,
-				"model":    o.agent.config.Model,
+				"model":    o.effectiveModel(),
 				"tools":    toolNames,
 			})
 
@@ -476,7 +517,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			if o.agent.config.SessionRecorder != nil {
 				o.agent.config.SessionRecorder.Record(session.EventLLMRequest, map[string]interface{}{
 					"provider": o.agent.config.Provider,
-					"model":    o.agent.config.Model,
+					"model":    o.effectiveModel(),
 					"messages": len(msgs),
 					"~tokens":  ctxChars / 4,
 				})
@@ -484,19 +525,19 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 			o.logger.Info("LLM request (stream)",
 				"iter", iter,
-				"model", o.agent.config.Model,
+				"model", o.effectiveModel(),
 				"messages", len(msgs),
 				"~tokens", ctxChars/4,
 				"tools", len(toolNames))
 
 			o.logger.DumpPretty("LLM Request Detail (Streaming)", map[string]any{
 				"provider": o.agent.config.Provider,
-				"model":    o.agent.config.Model,
+				"model":    o.effectiveModel(),
 				"tools":    toolNames,
 			})
 
 			llmStart := time.Now()
-			streamCh, errCh, err := o.agent.llmClient.Stream(ctx, o.agent.config.Provider, o.agent.config.Model, msgs, o.agent.config.Temperature, llmTools)
+			streamCh, errCh, err := o.agent.llmClient.Stream(ctx, o.agent.config.Provider, o.effectiveModel(), msgs, o.agent.config.Temperature, llmTools)
 
 			if err != nil {
 				o.logger.Error("Stream init failed",
@@ -746,7 +787,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				delay := time.Duration(1<<o.transientRetries) * time.Second
 
 				o.logger.Warn(fmt.Sprintf("Provider error detected: %v. Retrying in %v (Attempt %d/%d)...", currentLLMError, delay, o.transientRetries, maxTransientRetries))
-				
+
 				time.Sleep(delay)
 
 				currentLLMError = nil
@@ -779,9 +820,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 // summarizeThink creates a condensed version of a large <think> block using the Summariser model.
 func (o *AgentOrchestrator) summarizeThink(ctx context.Context, thinkText string) string {
-	summariserModel := o.agent.config.SummariserModel
+	summariserModel := o.agent.GetModelForTier(TierFast)
 	if summariserModel == "" {
-		summariserModel = o.agent.config.Model // fallback
+		summariserModel = o.agent.GetModelForTier(TierDefault) // fallback
 	}
 
 	msgs := []anyllm.Message{

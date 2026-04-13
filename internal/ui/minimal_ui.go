@@ -139,30 +139,27 @@ func (ui *MinimalUI) ShowHelp() {
 	fmt.Println()
 }
 
-func (ui *MinimalUI) ShowModels(models []string, current, planner, subAgent, summariser string) {
-	fmt.Println("\nModels:")
+func (ui *MinimalUI) ShowModels(models []string, current, fast, heavy string) {
+	fmt.Print("Models:\n")
 	for _, model := range models {
 		var tags []string
 		if model == current {
 			tags = append(tags, "default")
 		}
-		if model == planner {
-			tags = append(tags, "planner")
+		if model == fast {
+			tags = append(tags, "fast")
 		}
-		if model == subAgent {
-			tags = append(tags, "sub-agent")
-		}
-		if model == summariser {
-			tags = append(tags, "summariser")
+		if model == heavy {
+			tags = append(tags, "heavy")
 		}
 
 		if len(tags) > 0 {
-			fmt.Printf("  * %s (%s)\n", model, strings.Join(tags, ", "))
+			fmt.Printf("* %s (%s)\n", model, strings.Join(tags, ", "))
 		} else {
-			fmt.Printf("    %s\n", model)
+			fmt.Printf("  %s\n", model)
 		}
 	}
-	fmt.Println()
+	fmt.Print("\n")
 }
 
 func (ui *MinimalUI) ShowTools(tools []ToolInfo) {

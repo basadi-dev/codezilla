@@ -123,8 +123,8 @@ func (ui *FancyUI) ShowWelcome(model, ollamaURL string, contextEnabled bool) {
 		ui.theme.StyleYellow.Render("/help"))
 }
 
-// ShowWelcomeWithModels displays an enhanced welcome message including per-role model overrides.
-func (ui *FancyUI) ShowWelcomeWithModels(model, plannerModel, subAgentModel, summariserModel, analyzerModel, ollamaURL string, contextEnabled bool) {
+// ShowWelcomeWithModels displays an enhanced welcome message including per-tier model overrides.
+func (ui *FancyUI) ShowWelcomeWithModels(defaultModel, fastModel, heavyModel, ollamaURL string, contextEnabled bool) {
 	// Type-writer animation on the welcome text as a whole styled string
 	welcome := "Welcome to Codezilla!"
 	for i := 1; i <= len(welcome); i++ {
@@ -136,18 +136,12 @@ func (ui *FancyUI) ShowWelcomeWithModels(model, plannerModel, subAgentModel, sum
 	// Status info panel
 	keyStyle := ui.theme.StyleDim.Width(22)
 
-	ui.Print("%s %s\n", keyStyle.Render("  🧠 Model:"), ui.theme.StyleYellow.Render(model))
-	if plannerModel != "" && plannerModel != model {
-		ui.Print("%s %s\n", keyStyle.Render("  📋 Planner:"), ui.theme.StyleYellow.Render(plannerModel))
+	ui.Print("%s %s\n", keyStyle.Render("  🧠 Model:"), ui.theme.StyleYellow.Render(defaultModel))
+	if fastModel != "" {
+		ui.Print("%s %s\n", keyStyle.Render("  ⚡ Fast:"), ui.theme.StyleYellow.Render(fastModel))
 	}
-	if subAgentModel != "" && subAgentModel != model {
-		ui.Print("%s %s\n", keyStyle.Render("  🤖 Sub-Agent:"), ui.theme.StyleYellow.Render(subAgentModel))
-	}
-	if summariserModel != "" && summariserModel != model {
-		ui.Print("%s %s\n", keyStyle.Render("  📝 Summariser:"), ui.theme.StyleYellow.Render(summariserModel))
-	}
-	if analyzerModel != "" && analyzerModel != model {
-		ui.Print("%s %s\n", keyStyle.Render("  🔍 Analyzer:"), ui.theme.StyleYellow.Render(analyzerModel))
+	if heavyModel != "" {
+		ui.Print("%s %s\n", keyStyle.Render("  🏋️ Heavy:"), ui.theme.StyleYellow.Render(heavyModel))
 	}
 	ui.Print("%s %s\n", keyStyle.Render("  🔌 Provider:"), ui.theme.StyleDim.Render(ollamaURL))
 
@@ -294,19 +288,19 @@ func (ui *FancyUI) ShowResponse(response string) {
 	for {
 		startIdx := strings.Index(response, "<think>")
 		endIdx := strings.Index(response, "</think>")
-		
+
 		if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
 			// Text before think block
 			before := response[:startIdx]
 			if strings.TrimSpace(before) != "" {
 				ui.renderMarkdownOnly(before)
 			}
-			
+
 			// Think block
 			thinkContent := strings.TrimSpace(response[startIdx+7 : endIdx])
 			ui.Println("\n%s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Italic(true).Render("🤔 Thinking..."))
 			ui.Println("%s\n", ui.theme.StyleDim.Italic(true).Render(thinkContent))
-			
+
 			// Advance response
 			response = response[endIdx+8:]
 		} else {

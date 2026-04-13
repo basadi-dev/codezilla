@@ -8,18 +8,18 @@ llm:
   provider: "ollama"
 
   models:
-    # Main conversational model
+    # Default model — your main workhorse for coding tasks, tool use, and general conversation.
+    # Pick the most capable model you can afford. This handles everything the router doesn't fast-path.
     default: "gpt-oss:120b"
-    # Planner model — used for auto-generating todo plans (falls back to default if unset)
-    planner: "glm-5.1"
-    # Sub-agent model — used when spinning up sub-agents for delegated tasks (falls back to default if unset)
-    # sub_agent: "qwen3-coder:8b"
-    # Recommended models by provider:
-    #   ollama cloud: qwen3-coder:480b, deepseek-v3.2, gpt-oss:120b
-    #   ollama local: devstral-small-2:24b, qwen3-coder-next, ministral-3:14b
-    #   openai:       gpt-4o, o3-mini
-    #   anthropic:    claude-3-5-sonnet-20241022
-    #   gemini:       gemini-3.1-pro-preview
+
+    # Fast model — a small, cheap model for trivial exchanges (greetings, "yes/no", "what is X?").
+    # The auto-router sends simple inputs here to save tokens and latency.
+    # Pick a lightweight model with good instruction-following. Leave blank to disable fast-routing.
+    fast: "gemma3:12b"
+
+    # Heavy model — the most powerful model for complex multi-step tasks (refactors, migrations, architecture).
+    # The auto-router sends clearly complex inputs here. Falls back to default if unset.
+    heavy: "glm-5.1"
 
   # Ollama-specific settings
   ollama:
@@ -110,6 +110,10 @@ sliding_window_size: 20
 
 # Auto-planning: automatically create a todo plan for complex multi-step requests
 auto_plan: true
+
+# Intelligent model routing: auto-selects fast/default model per request based on complexity.
+# Requires a fast model to be configured above. Disable with: /router off
+auto_route: true
 
 # Loop detection: stops the agent if the same tool is called with identical args
 # consecutively more than loop_detect_max_repeat times.
