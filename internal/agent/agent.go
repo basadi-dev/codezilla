@@ -62,6 +62,8 @@ type Config struct {
 	// OnToolPreparing is called during streaming when a tool call name is first detected,
 	// before the tool actually executes. Use this to update the spinner with the tool name.
 	OnToolPreparing func(toolName string)
+	// OnContextSummarizing is called when preFlight trimming triggers a fast-model summarization.
+	OnContextSummarizing func()
 	// OnLLMStreamEnd is called immediately after a text/tool stream completes natively, before parsing.
 	OnLLMStreamEnd func()
 	// OnLLMUsage is called after each LLM call with the per-turn and cumulative session token usage.

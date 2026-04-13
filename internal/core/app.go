@@ -513,6 +513,9 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			lastToolSummary = name
 		}
 
+		// Update the spinner label so the user knows it's no longer "preparing"
+		ui.UpdateThinkingStatus(fmt.Sprintf("executing %s", name))
+
 		// Resume spinner after printing
 		ui.ShowThinking()
 	}
@@ -639,6 +642,10 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				display = "🔍 Analyze Project"
 			}
 			ui.UpdateThinkingStatus(fmt.Sprintf("preparing %s", display))
+		},
+		OnContextSummarizing: func() {
+			ui.UpdateThinkingStatus("summarizing context buffer")
+			ui.RestartThinking()
 		},
 		OnLLMUsage: func(turn agent.TokenUsage, session agent.TokenUsage) {
 			appTurnUsage = turn

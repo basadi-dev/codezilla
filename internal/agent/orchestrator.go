@@ -274,6 +274,10 @@ Be extremely concise (max 300 tokens). Use bullet points. Never include raw file
 		"evicted_count", len(evicted),
 		"existing_summary_len", len(existingSummary))
 
+	if o.agent.config.OnContextSummarizing != nil {
+		o.agent.config.OnContextSummarizing()
+	}
+
 	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.2, nil)
 	if err != nil {
 		o.logger.Warn("Eviction summary failed, keeping existing summary", "error", err)
