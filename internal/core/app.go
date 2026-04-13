@@ -36,6 +36,10 @@ type App struct {
 	skillReg      *skills.Registry
 	cachedModels  []string // updated by /models, used for Tab completion
 	sessionRecord *session.Recorder
+
+	// Token usage tracking (updated by OnLLMUsage callback)
+	lastTurnUsage agent.TokenUsage
+	sessionUsage  agent.TokenUsage
 }
 
 // NewApp creates a new application instance
@@ -555,6 +559,12 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	toolRegistry.RegisterTool(tools.NewSubAgentTool(launcher))
 	permissionMgr.SetDefaultPermissionLevel("subAgent", tools.NeverAsk)
 
+	// Pointer indirection: the OnLLMUsage callback below is created before
+	// the App struct, so these local aliases get wired to app fields after
+	// the App is constructed.
+	var appTurnUsage agent.TokenUsage
+	var appSessionUsage agent.TokenUsage
+
 	// Initialize agent
 	agentConfig := &agent.Config{
 		Model:                  cfg.LLM.Models.Default,
@@ -626,6 +636,10 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			}
 			ui.UpdateThinkingStatus(fmt.Sprintf("preparing %s", display))
 		},
+		OnLLMUsage: func(turn agent.TokenUsage, session agent.TokenUsage) {
+			appTurnUsage = turn
+			appSessionUsage = session
+		},
 		SessionRecorder: sessionRecord,
 	}
 	agentInstance := agent.NewAgent(agentConfig)
@@ -665,7 +679,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		}
 	}
 
-	return &App{
+	resultApp := &App{
 		config:        cfg,
 		logger:        log,
 		agent:         agentInstance,
@@ -675,7 +689,20 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		skillReg:      skillRegistry,
 		cachedModels:  models,
 		sessionRecord: sessionRecord,
-	}, nil
+	}
+
+	// Wire the OnLLMUsage callback to write to app struct fields via closure.
+	// The callback was created before the App struct existed, so we patch it
+	// by overwriting the agent config callback now that we have a reference.
+	agentConfig.OnLLMUsage = func(turn agent.TokenUsage, session agent.TokenUsage) {
+		resultApp.lastTurnUsage = turn
+		resultApp.sessionUsage = session
+	}
+	// Suppress unused variable warnings for the pre-wiring aliases
+	_ = appTurnUsage
+	_ = appSessionUsage
+
+	return resultApp, nil
 }
 
 // wireCompleter builds and installs the Tab-completion callback if the UI
@@ -707,6 +734,7 @@ func (app *App) wireCompleter() {
 		{Primary: "/save ", Desc: "Save conversation to JSON file"},
 		{Primary: "/load ", Desc: "Load conversation from JSON file"},
 		{Primary: "/replay ", Desc: "Replay last user message from a loaded JSON file"},
+		{Primary: "/tokens", Desc: "Show session token usage"},
 	}
 
 	c.SetCompleter(func(line string) []ui.Completion {
@@ -1217,6 +1245,18 @@ func (app *App) processInput(ctx context.Context, input string) error {
 				app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
 			}
 			app.ui.ShowResponse(sanitizeAgentResponse(finalResponse))
+
+			// Show token usage summary after response
+			if app.lastTurnUsage.TotalTokens > 0 {
+				usageLine := fmt.Sprintf("📊 tokens: %s", app.lastTurnUsage.String())
+				if app.sessionUsage.TotalTokens > app.lastTurnUsage.TotalTokens {
+					usageLine += fmt.Sprintf(" · session: %s total", agent.FormatNumber(app.sessionUsage.TotalTokens))
+				}
+				app.ui.Print("%s\n", lipgloss.NewStyle().Faint(true).Render(usageLine))
+				// Reset per-turn usage after display
+				app.lastTurnUsage = agent.TokenUsage{}
+			}
+
 			app.ui.Print("\n") // breathing room at bottom
 		}
 
@@ -1501,6 +1541,23 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			app.ui.Warning("Usage: /replay <filename>")
 		} else {
 			app.replayConversation(ctx, parts[1])
+		}
+
+	case "/tokens":
+		if app.sessionUsage.TotalTokens == 0 {
+			app.ui.Info("No token usage recorded yet in this session.")
+		} else {
+			app.ui.Println("")
+			app.ui.Println("%s", lipgloss.NewStyle().Bold(true).Render("📊 Session Token Usage"))
+			theme := app.ui.GetTheme()
+			keyStyle := theme.StyleDim.Width(22)
+			app.ui.Print("%s %s\n", keyStyle.Render("  Prompt tokens:"), agent.FormatNumber(app.sessionUsage.PromptTokens))
+			app.ui.Print("%s %s\n", keyStyle.Render("  Completion tokens:"), agent.FormatNumber(app.sessionUsage.CompletionTokens))
+			if app.sessionUsage.ReasoningTokens > 0 {
+				app.ui.Print("%s %s\n", keyStyle.Render("  Reasoning tokens:"), agent.FormatNumber(app.sessionUsage.ReasoningTokens))
+			}
+			app.ui.Print("%s %s\n", keyStyle.Render("  Total tokens:"), theme.StyleYellow.Render(agent.FormatNumber(app.sessionUsage.TotalTokens)))
+			app.ui.Println("")
 		}
 
 	default:

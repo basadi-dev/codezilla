@@ -106,6 +106,7 @@ type AgentOrchestrator struct {
 	logger               *logger.Logger
 	tracker              *StreamProcessor
 	loops                *loopDetector
+	tokens               *TokenTracker
 	contextLengthRetries int // tracks retries for context-length errors within a single Run()
 }
 
@@ -117,6 +118,7 @@ func NewAgentOrchestrator(a *agent) *AgentOrchestrator {
 		logger:  a.logger,
 		tracker: NewStreamProcessor(a.logger),
 		loops:   newLoopDetector(a.config.LoopDetectWindow, a.config.LoopDetectMaxRepeat),
+		tokens:  NewTokenTracker(),
 	}
 }
 
@@ -377,6 +379,18 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				"iter", iter,
 				"duration", llmDur.Round(time.Millisecond))
 
+			// Capture token usage from the completion response
+			if completion.Usage != nil {
+				o.tokens.Record(completion.Usage)
+				o.logger.Info("LLM token usage",
+					"prompt", completion.Usage.PromptTokens,
+					"completion", completion.Usage.CompletionTokens,
+					"total", completion.Usage.TotalTokens)
+				if o.agent.config.OnLLMUsage != nil {
+					o.agent.config.OnLLMUsage(o.tokens.LastTurn(), o.tokens.SessionTotal())
+				}
+			}
+
 			if len(completion.Choices) > 0 {
 				msg := completion.Choices[0].Message
 
@@ -490,7 +504,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				continue
 			}
 
-			fullResp, nativeTools, streamErr := o.tracker.ProcessChannel(ctx, streamCh, errCh, onToken, func(toolName string) {
+			fullResp, nativeTools, streamUsage, streamErr := o.tracker.ProcessChannel(ctx, streamCh, errCh, onToken, func(toolName string) {
 				if o.agent.config.OnToolPreparing != nil {
 					o.agent.config.OnToolPreparing(toolName)
 				}
@@ -519,6 +533,18 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				"duration", llmDur.Round(time.Millisecond),
 				"resp_len", len(fullResp),
 				"native_tools", len(nativeTools))
+
+			// Capture token usage from stream
+			if streamUsage != nil {
+				o.tokens.Record(streamUsage)
+				o.logger.Info("LLM token usage (stream)",
+					"prompt", streamUsage.PromptTokens,
+					"completion", streamUsage.CompletionTokens,
+					"total", streamUsage.TotalTokens)
+				if o.agent.config.OnLLMUsage != nil {
+					o.agent.config.OnLLMUsage(o.tokens.LastTurn(), o.tokens.SessionTotal())
+				}
+			}
 
 			fullResp = strings.TrimPrefix(strings.TrimSpace(fullResp), "Assistant:")
 			// Layer 1: sanitise leaked special tokens before any further processing

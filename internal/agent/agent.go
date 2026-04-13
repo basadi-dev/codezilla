@@ -64,6 +64,9 @@ type Config struct {
 	OnToolPreparing func(toolName string)
 	// OnLLMStreamEnd is called immediately after a text/tool stream completes natively, before parsing.
 	OnLLMStreamEnd func()
+	// OnLLMUsage is called after each LLM call with the per-turn and cumulative session token usage.
+	// Providers that don't return usage data will not trigger this callback.
+	OnLLMUsage func(turn TokenUsage, session TokenUsage)
 
 	// Loop detection: stops the run loop if a tool is called with identical args consecutively.
 	// 0 = use defaults (window=10, max_repeat=3).

@@ -277,6 +277,7 @@ func (ui *BaseUI) ShowHelp() {
 		{"/reset", "Reset conversation"},
 		{"/save <filename>", "Save conversation to JSON file"},
 		{"/load <filename>", "Load conversation from JSON file"},
+		{"/tokens", "Show session token usage"},
 	}
 
 	for _, cmd := range commands {

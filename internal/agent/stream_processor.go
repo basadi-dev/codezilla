@@ -25,11 +25,12 @@ func (sp *StreamProcessor) ProcessChannel(
 	errCh <-chan error,
 	onTextToken func(string),
 	onToolPreparing func(toolName string),
-) (string, []anyllm.ToolCall, error) {
+) (string, []anyllm.ToolCall, *anyllm.Usage, error) {
 
 	var fullResponse string
 	var streamedToolCalls []anyllm.ToolCall
 	var streamErr error
+	var streamUsage *anyllm.Usage
 	var totalChunks, contentChunks, reasoningChunks int
 	var inReasoning bool
 	var sentFirstTool bool
@@ -43,6 +44,10 @@ func (sp *StreamProcessor) ProcessChannel(
 				streamCh = nil
 			} else {
 				totalChunks++
+				// Capture usage from the last chunk that reports it
+				if chunk.Usage != nil {
+					streamUsage = chunk.Usage
+				}
 				if len(chunk.Choices) > 0 {
 					delta := chunk.Choices[0].Delta
 
@@ -115,5 +120,5 @@ func (sp *StreamProcessor) ProcessChannel(
 		"reasoning", reasoningChunks,
 		"nativeTools", len(streamedToolCalls))
 
-	return fullResponse, streamedToolCalls, streamErr
+	return fullResponse, streamedToolCalls, streamUsage, streamErr
 }
