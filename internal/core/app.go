@@ -3,6 +3,8 @@ package core
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -72,7 +74,10 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			sessionPath = filepath.Join(cfg.SessionEventsDir, name)
 			isResuming = true
 		} else {
-			sessionPath = filepath.Join(cfg.SessionEventsDir, fmt.Sprintf("session_%s.jsonl", time.Now().Format("20060102_150405")))
+			b := make([]byte, 4)
+			rand.Read(b)
+			shortUUID := hex.EncodeToString(b)
+			sessionPath = filepath.Join(cfg.SessionEventsDir, fmt.Sprintf("session_%s_%s.jsonl", time.Now().Format("20060102_150405"), shortUUID))
 		}
 	}
 
@@ -847,10 +852,18 @@ func (app *App) wireCompleter() {
 		if sessionPrefix != "" {
 			sub := line[len(sessionPrefix):]
 
-			// /session play <name>
+			// /session play/replay/resume <name>
 			if strings.HasPrefix(sub, "play ") {
 				name := sub[len("play "):]
 				return filterPrefix(sessionPrefix+"play ", app.sessionCompletions(), name)
+			}
+			if strings.HasPrefix(sub, "replay ") {
+				name := sub[len("replay "):]
+				return filterPrefix(sessionPrefix+"replay ", app.sessionCompletions(), name)
+			}
+			if strings.HasPrefix(sub, "resume ") {
+				name := sub[len("resume "):]
+				return filterPrefix(sessionPrefix+"resume ", app.sessionCompletions(), name)
 			}
 
 			opts := []ui.Completion{
@@ -858,6 +871,7 @@ func (app *App) wireCompleter() {
 				{Text: "list", Description: "List all available sessions"},
 				{Text: "play ", Description: "Replay a session file"},
 				{Text: "replay ", Description: "Replay a session file"},
+				{Text: "resume ", Description: "Resume a session file"},
 			}
 			return filterPrefix(sessionPrefix, opts, sub)
 		}
@@ -891,11 +905,29 @@ func (app *App) wireCompleter() {
 	})
 }
 
-// filterPrefix filters opts by sub-prefix and prepends commandPrefix to each result.
+// fuzzyMatch checks if sub is a subsequence of text, ignoring case.
+func fuzzyMatch(text, sub string) bool {
+	if sub == "" {
+		return true
+	}
+	t := strings.ToLower(text)
+	s := strings.ToLower(sub)
+
+	tIdx, sIdx := 0, 0
+	for tIdx < len(t) && sIdx < len(s) {
+		if t[tIdx] == s[sIdx] {
+			sIdx++
+		}
+		tIdx++
+	}
+	return sIdx == len(s)
+}
+
+// filterPrefix filters opts by sub-prefix (fuzzy) and prepends commandPrefix to each result.
 func filterPrefix(commandPrefix string, opts []ui.Completion, sub string) []ui.Completion {
 	var out []ui.Completion
 	for _, o := range opts {
-		if strings.HasPrefix(o.Text, sub) {
+		if fuzzyMatch(o.Text, sub) {
 			out = append(out, ui.Completion{
 				Text:        commandPrefix + o.Text,
 				Description: o.Description,
@@ -934,6 +966,23 @@ func (app *App) SessionID() string {
 		}
 	}
 	return ""
+}
+
+// PrintSessionSummary prints a formatted summary of the current session on exit.
+func (app *App) PrintSessionSummary() {
+	sid := app.SessionID()
+	if sid == "" {
+		return
+	}
+
+	app.ui.Print("\n%s\n", lipgloss.NewStyle().Bold(true).Render("📊 Session Summary"))
+	app.ui.Print("  %s %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Width(10).Render("ID:"), sid)
+	app.ui.Print("  %s %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Width(10).Render("Model:"), app.config.LLM.Models.Default)
+	if app.sessionUsage.TotalTokens > 0 {
+		app.ui.Print("  %s %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Width(10).Render("Tokens:"), agent.FormatNumber(app.sessionUsage.TotalTokens))
+	}
+	app.ui.Print("\n  To resume this session, run:\n")
+	app.ui.Print("  %s\n\n", lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#1E66F5", Dark: "#7AA2F7"}).Render(fmt.Sprintf("codezilla resume %s", sid)))
 }
 
 // Close cleans up application resources
@@ -980,21 +1029,24 @@ func (app *App) Run(ctx context.Context) error {
 
 	if sessionID := app.SessionID(); sessionID != "" {
 		app.ui.Info("  📝 Session:          %s", app.ui.GetTheme().StyleCyan.Render(sessionID))
-		app.ui.Print("\n%s\n", lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#2E3440")).Background(lipgloss.AdaptiveColor{Light: "#ACB0BE", Dark: "#A3BE8C"}).Render(" Session Restored "))
-		msgs := app.agent.GetMessages()
-		for _, msg := range msgs {
-			if msg.Role == "user" {
-				app.ui.Print("\n%s\n", app.ui.GetTheme().StyleBlue.Render("👤 You:"))
-				app.ui.Print("%s\n", msg.Content)
-			} else if msg.Role == "assistant" {
-				content := msg.Content
-				if content != "" {
-					app.ui.ShowResponse(sanitizeAgentResponse(content))
+		
+		if app.config.ResumeSessionID != "" {
+			app.ui.Print("\n%s\n", lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#2E3440")).Background(lipgloss.AdaptiveColor{Light: "#ACB0BE", Dark: "#A3BE8C"}).Render(" Session Restored "))
+			msgs := app.agent.GetMessages()
+			for _, msg := range msgs {
+				if msg.Role == "user" {
+					app.ui.Print("\n%s\n", app.ui.GetTheme().StyleBlue.Render("👤 You:"))
+					app.ui.Print("%s\n", msg.Content)
+				} else if msg.Role == "assistant" {
+					content := msg.Content
+					if content != "" {
+						app.ui.ShowResponse(sanitizeAgentResponse(content))
+					}
 				}
 			}
-		}
-		if len(msgs) > 0 {
-			app.ui.Print("\n")
+			if len(msgs) > 0 {
+				app.ui.Print("\n")
+			}
 		}
 	}
 
@@ -1008,9 +1060,7 @@ func (app *App) Run(ctx context.Context) error {
 			input, err := app.ui.ReadLine()
 			if err != nil {
 				app.ui.Info("\n💡 Goodbye!")
-				if sid := app.SessionID(); sid != "" {
-					app.ui.Info("  To resume: codezilla -session %s", sid)
-				}
+				app.PrintSessionSummary()
 				return nil
 			}
 
@@ -1454,9 +1504,7 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 
 	case "/exit", "/quit", "/q":
 		app.ui.Success("Goodbye!")
-		if sid := app.SessionID(); sid != "" {
-			app.ui.Info("  To resume: codezilla -session %s", sid)
-		}
+		app.PrintSessionSummary()
 		return true
 
 	case "/clear", "/c":

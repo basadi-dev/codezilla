@@ -36,6 +36,7 @@ type Agent interface {
 	SetSummariserModel(model string)
 	SetTemperature(temperature float64)
 	SetMaxTokens(maxTokens int)
+	SetSessionRecorder(recorder *session.Recorder)
 }
 
 type Config struct {
@@ -289,4 +290,9 @@ func (a *agent) SetTemperature(temperature float64) {
 func (a *agent) SetMaxTokens(maxTokens int) {
 	a.logger.Info("Changing max tokens", "from", a.config.MaxTokens, "to", maxTokens)
 	a.config.MaxTokens = maxTokens
+}
+
+func (a *agent) SetSessionRecorder(recorder *session.Recorder) {
+	a.logger.Info("Changing session recorder")
+	a.config.SessionRecorder = recorder
 }

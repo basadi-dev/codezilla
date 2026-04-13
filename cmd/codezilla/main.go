@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"codezilla/internal/config"
@@ -30,6 +31,16 @@ func main() {
 		help        = flag.Bool("help", false, "Show help")
 	)
 	flag.Parse()
+
+	// Parse remainder args for resume command or URL scheme
+	args := flag.Args()
+	if len(args) > 0 {
+		if args[0] == "resume" && len(args) > 1 {
+			*sessionID = args[1]
+		} else if strings.HasPrefix(args[0], "codezilla://session/") {
+			*sessionID = strings.TrimPrefix(args[0], "codezilla://session/")
+		}
+	}
 
 	// Handle version
 	if *version {
@@ -120,7 +131,7 @@ func main() {
 	go func() {
 		<-sigChan
 		appUI.Info("\nShutting down...")
-		appUI.Info("To resume this session, run: codezilla -session %s\n", app.SessionID())
+		app.PrintSessionSummary()
 		cancel()
 	}()
 

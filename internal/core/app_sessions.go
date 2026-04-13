@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,15 +30,42 @@ func (app *App) handleSessionCommand(ctx context.Context, parts []string) {
 			return
 		}
 		app.playSessionCtx(ctx, parts[2])
+	} else if sub == "resume" {
+		if len(parts) < 3 {
+			app.ui.Warning("Usage: /session resume <filename>")
+			return
+		}
+		app.handleSessionResume(ctx, parts[2])
 	} else {
-		app.ui.Warning("Usage: /session [ls | play <filename>]")
+		app.ui.Warning("Usage: /session [ls | play <filename> | resume <filename>]")
 	}
 }
 
 type sessionSummary struct {
 	Filename string
 	Time     time.Time
+	Duration time.Duration
 	Snippet  string
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return "<1s"
+	}
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 func (app *App) listSessions() {
@@ -64,29 +92,46 @@ func (app *App) listSessions() {
 
 		path := filepath.Join(dir, f.Name())
 		snippet := "<No UI input recorded>"
+		var firstTs, lastTs int64
 
-		// Extract first UI Input
 		if sf, err := os.Open(path); err == nil {
 			scanner := bufio.NewScanner(sf)
 			for scanner.Scan() {
 				var evt session.Event
-				if json.Unmarshal(scanner.Bytes(), &evt) == nil && evt.Type == session.EventUIInput {
-					if text, ok := evt.Data["text"].(string); ok {
-						if len(text) > 50 {
-							snippet = text[:47] + "..."
-						} else {
-							snippet = text
+				if json.Unmarshal(scanner.Bytes(), &evt) == nil {
+					if firstTs == 0 {
+						firstTs = evt.TimestampNano
+					}
+					lastTs = evt.TimestampNano
+					
+					if evt.Type == session.EventUIInput && snippet == "<No UI input recorded>" {
+						if text, ok := evt.Data["text"].(string); ok {
+							if len(text) > 50 {
+								snippet = text[:47] + "..."
+							} else {
+								snippet = text
+							}
 						}
-						break
 					}
 				}
 			}
 			sf.Close()
 		}
 
+		duration := time.Duration(0)
+		if firstTs > 0 && lastTs > firstTs {
+			duration = time.Duration(lastTs - firstTs)
+		}
+
+		sessionTime := info.ModTime()
+		if firstTs > 0 {
+			sessionTime = time.Unix(0, firstTs)
+		}
+
 		summaries = append(summaries, sessionSummary{
 			Filename: f.Name(),
-			Time:     info.ModTime(),
+			Time:     sessionTime,
+			Duration: duration,
 			Snippet:  strings.ReplaceAll(snippet, "\n", " "),
 		})
 	}
@@ -95,14 +140,109 @@ func (app *App) listSessions() {
 		return summaries[i].Time.After(summaries[j].Time)
 	})
 
-	app.ui.Println("\n%s", lipgloss.NewStyle().Bold(true).Render("Available Sessions:"))
+	var top []sessionSummary
 	for i, s := range summaries {
 		if i >= 15 {
 			break
 		}
-		app.ui.Println("  %s  %-22s  %s", lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("ID"), s.Filename, lipgloss.NewStyle().Faint(true).Render(s.Snippet))
+		top = append(top, s)
+	}
+
+	for i := 0; i < len(top)/2; i++ {
+		j := len(top) - i - 1
+		top[i], top[j] = top[j], top[i]
+	}
+
+	app.ui.Println("\n%s", lipgloss.NewStyle().Bold(true).Render("Available Sessions:"))
+	for _, s := range top {
+		durationStr := lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Render(formatDuration(s.Duration))
+		app.ui.Println("  %s  %-22s  %-6s  %s", 
+			lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("ID"), 
+			s.Filename, 
+			durationStr,
+			lipgloss.NewStyle().Faint(true).Render(s.Snippet))
 	}
 	app.ui.Print("\n")
+}
+
+func (app *App) handleSessionResume(ctx context.Context, sessionID string) {
+	targetPath := sessionID
+	if !strings.Contains(sessionID, string(os.PathSeparator)) {
+		if !strings.HasSuffix(sessionID, ".jsonl") {
+			sessionID += ".jsonl"
+		}
+		targetPath = filepath.Join(app.config.SessionEventsDir, sessionID)
+	}
+
+	app.ui.Info("\nResuming session: %s...", sessionID)
+
+	// Close old recorder
+	if app.sessionRecord != nil {
+		app.sessionRecord.Close()
+	}
+
+	// Wipe context
+	app.agent.ClearContext()
+
+	// Load previous events
+	events, err := session.LoadEvents(targetPath)
+	if err == nil {
+		var currentAssistantResponse strings.Builder
+		for _, evt := range events {
+			if evt.Type == session.EventUIInput {
+				if currentAssistantResponse.Len() > 0 {
+					app.agent.AddAssistantMessage(currentAssistantResponse.String())
+					currentAssistantResponse.Reset()
+				}
+				if text, ok := evt.Data["text"].(string); ok {
+					app.agent.AddUserMessage(text)
+				}
+			} else if evt.Type == session.EventToken {
+				if token, ok := evt.Data["token"].(string); ok {
+					currentAssistantResponse.WriteString(token)
+				}
+			} else if evt.Type == session.EventToolStart {
+				if currentAssistantResponse.Len() > 0 {
+					app.agent.AddAssistantMessage(currentAssistantResponse.String())
+					currentAssistantResponse.Reset()
+				}
+			}
+		}
+		if currentAssistantResponse.Len() > 0 {
+			app.agent.AddAssistantMessage(currentAssistantResponse.String())
+		}
+		app.ui.Success("Session context restored.")
+		
+		msgs := app.agent.GetMessages()
+		for _, msg := range msgs {
+			if msg.Role == "user" {
+				app.ui.Print("\n%s\n", app.ui.GetTheme().StyleBlue.Render("👤 You:"))
+				app.ui.Print("%s\n", msg.Content)
+			} else if msg.Role == "assistant" {
+				content := msg.Content
+				if content != "" {
+					app.ui.ShowResponse(content)
+				}
+			}
+		}
+		if len(msgs) > 0 {
+			app.ui.Print("\n")
+		}
+	} else {
+		app.ui.Warning("Failed to load session history: %v", err)
+	}
+
+	// Create new recorder appending to the target path
+	recorder, err := session.NewRecorder(targetPath, app.logger)
+	if err != nil {
+		app.ui.Error("Failed to initialize session recorder: %v", err)
+	} else {
+		app.sessionRecord = recorder
+		// Ensure agent points to new recorder
+		if agentInstance, ok := app.agent.(interface{ SetSessionRecorder(*session.Recorder) }); ok {
+			agentInstance.SetSessionRecorder(recorder)
+		}
+	}
 }
 
 func (app *App) playSessionCtx(ctx context.Context, sessionID string) {
