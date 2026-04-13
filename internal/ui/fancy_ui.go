@@ -290,6 +290,41 @@ func (ui *FancyUI) ShowResponse(response string) {
 	ui.Println("")
 	ui.Println("%s", ui.theme.StyleGreen.Render("🤖 Assistant:"))
 
+	// Render loop that finds <think> blocks
+	for {
+		startIdx := strings.Index(response, "<think>")
+		endIdx := strings.Index(response, "</think>")
+		
+		if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+			// Text before think block
+			before := response[:startIdx]
+			if strings.TrimSpace(before) != "" {
+				ui.renderMarkdownOnly(before)
+			}
+			
+			// Think block
+			thinkContent := strings.TrimSpace(response[startIdx+7 : endIdx])
+			ui.Println("\n%s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Italic(true).Render("🤔 Thinking..."))
+			ui.Println("%s\n", ui.theme.StyleDim.Italic(true).Render(thinkContent))
+			
+			// Advance response
+			response = response[endIdx+8:]
+		} else {
+			break
+		}
+	}
+
+	if strings.TrimSpace(response) != "" {
+		ui.renderMarkdownOnly(response)
+	}
+
+	ui.Println("")
+
+	// Ensure the buffer is flushed so the prompt appears
+	ui.writer.Flush()
+}
+
+func (ui *FancyUI) renderMarkdownOnly(response string) {
 	// Pre-process markdown to add spacing between table rows
 	response = addTableSpacing(response)
 
@@ -316,11 +351,6 @@ func (ui *FancyUI) ShowResponse(response string) {
 		fmt.Fprint(ui.writer, response)
 		ui.Println("")
 	}
-
-	ui.Println("")
-
-	// Ensure the buffer is flushed so the prompt appears
-	ui.writer.Flush()
 }
 
 // addTableSpacing pre-processes markdown tables by inserting an empty

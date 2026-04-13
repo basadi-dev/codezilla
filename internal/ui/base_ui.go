@@ -209,6 +209,38 @@ func (ui *BaseUI) HideThinking() {
 func (ui *BaseUI) ShowResponse(response string) {
 	ui.Println("\n%s", ui.theme.StyleGreen.Render("Assistant:"))
 
+	// Render loop that finds <think> blocks
+	for {
+		startIdx := strings.Index(response, "<think>")
+		endIdx := strings.Index(response, "</think>")
+		
+		if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+			// Text before think block
+			before := response[:startIdx]
+			if strings.TrimSpace(before) != "" {
+				ui.renderMarkdownOnly(before)
+			}
+			
+			// Think block
+			thinkContent := strings.TrimSpace(response[startIdx+7 : endIdx])
+			ui.Println("\n%s\n", ui.theme.StyleCyan.Italic(true).Render("🤔 Thinking..."))
+			ui.Println("%s\n", ui.theme.StyleDim.Italic(true).Render(thinkContent))
+			
+			// Advance response
+			response = response[endIdx+8:]
+		} else {
+			break
+		}
+	}
+
+	if strings.TrimSpace(response) != "" {
+		ui.renderMarkdownOnly(response)
+	}
+
+	ui.Println("")
+}
+
+func (ui *BaseUI) renderMarkdownOnly(response string) {
 	// Process response for code blocks
 	lines := strings.Split(response, "\n")
 	inCode := false
@@ -226,7 +258,6 @@ func (ui *BaseUI) ShowResponse(response string) {
 			ui.Println(line)
 		}
 	}
-	ui.Println("")
 }
 
 // ShowResponseStream displays a streaming AI response token by token.

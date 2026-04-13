@@ -1287,6 +1287,30 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		app.ui.HideThinking()
 
 		if agentErr == nil && finalResponse != "" {
+			cleanResponse := finalResponse
+			// Remove original `<think>` blocks from cleanResponse to prevent duplicating them
+			// in the markdown renderer. However, if the block was summarized, KEEP it so
+			// ShowResponse can render the summary.
+			for {
+				startIdx := strings.Index(cleanResponse, "<think>")
+				endIdx := strings.Index(cleanResponse, "</think>")
+				if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+					thinkContent := cleanResponse[startIdx+7 : endIdx]
+					if strings.Contains(thinkContent, "[Thought Process Summarized]") {
+						// It was summarized. We want ShowResponse to render this.
+						// To avoid an infinite loop, temporarily mark it.
+						cleanResponse = cleanResponse[:startIdx] + "<_summarized_think>" + thinkContent + "</_summarized_think>" + cleanResponse[endIdx+8:]
+					} else {
+						// Unsummarized block was already streamed to the terminal.
+						cleanResponse = cleanResponse[:startIdx] + cleanResponse[endIdx+8:]
+					}
+				} else {
+					break
+				}
+			}
+			cleanResponse = strings.ReplaceAll(cleanResponse, "<_summarized_think>", "<think>")
+			cleanResponse = strings.ReplaceAll(cleanResponse, "</_summarized_think>", "</think>")
+
 			// Add a clear separator if we streamed raw text, then render the
 			// full final response with Glamour for proper markdown formatting.
 			if !streamingStarted {
@@ -1294,7 +1318,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 				modelLabel := app.config.LLM.Models.Default
 				app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
 			}
-			app.ui.ShowResponse(sanitizeAgentResponse(finalResponse))
+			app.ui.ShowResponse(sanitizeAgentResponse(cleanResponse))
 
 			// Show token usage summary after response
 			if app.lastTurnUsage.TotalTokens > 0 {
