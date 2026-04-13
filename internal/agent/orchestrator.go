@@ -279,6 +279,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 	var finalResponse string
 	var currentLLMError error
 	var toolsToExecute []anyllm.ToolCall
+	var toolFormatRetries int // tracks auto-correction retries for leaked tool calls
 
 	o.agent.AddUserMessage(initialMessage)
 
@@ -384,6 +385,8 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					text = strings.TrimSpace(msg.Reasoning.Content)
 				}
 
+				// Layer 1: sanitise leaked special tokens before any further processing
+				text = SanitiseSpecialTokens(text)
 				finalResponse = text
 
 				// Think compression logic
@@ -518,7 +521,8 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				"native_tools", len(nativeTools))
 
 			fullResp = strings.TrimPrefix(strings.TrimSpace(fullResp), "Assistant:")
-			finalResponse = strings.TrimSpace(fullResp)
+			// Layer 1: sanitise leaked special tokens before any further processing
+			finalResponse = SanitiseSpecialTokens(strings.TrimSpace(fullResp))
 
 			// Think compression logic
 			if threshold := o.agent.config.ThinkCompressThreshold; threshold > 0 {
@@ -558,7 +562,27 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			if len(parsedTools) > 0 {
 				toolsToExecute = parsedTools
 				finalResponse = cleanedText
+				toolFormatRetries = 0 // reset on success
 				state = StateExecutingTools
+			} else if looksLikeLeakedToolCall(finalResponse) && toolFormatRetries < 2 {
+				// Layer 4: auto-correction — the model tried to call a tool but
+				// the format was unrecoverable. Inject a correction and re-prompt.
+				toolFormatRetries++
+				o.logger.Warn("Detected unrecoverable leaked tool call, injecting correction",
+					"retry", toolFormatRetries,
+					"response_preview", finalResponse[:min(len(finalResponse), 120)])
+				correctionMsg := fmt.Sprintf(
+					"[SYSTEM CORRECTION] Your previous response contained a malformed tool call "+
+						"that could not be executed. You must use the native tool calling mechanism — "+
+						"never output tool calls as raw text or JSON in your message. "+
+						"The malformed text was: %q. Please retry using the proper tool format.",
+					finalResponse[:min(len(finalResponse), 200)],
+				)
+				o.agent.context.AddToolResultMessage("", map[string]interface{}{
+					"correction": correctionMsg,
+				}, nil)
+				finalResponse = ""
+				state = StatePrompting
 			} else {
 				state = StateComplete
 			}

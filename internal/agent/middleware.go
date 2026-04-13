@@ -26,11 +26,109 @@ type XMLParams struct {
 	XMLData []byte `xml:",innerxml"`
 }
 
+// specialTokenPatterns matches leaked model-specific formatting tokens that
+// should never appear in user-visible output. These are stripped before any
+// further processing.
+var specialTokenPatterns = []*regexp.Regexp{
+	// Chat template tokens (Llama, Qwen, Mistral variants)
+	regexp.MustCompile(`<\|im_start\|>[a-z]*\n?`),
+	regexp.MustCompile(`<\|im_end\|>\n?`),
+	regexp.MustCompile(`<\|message\|>`),
+	regexp.MustCompile(`<\|tool_call\|>`),
+	regexp.MustCompile(`<\|tool_call_end\|>`),
+	regexp.MustCompile(`<\|end_of_turn\|>`),
+	regexp.MustCompile(`<\|eot_id\|>`),
+	regexp.MustCompile(`<\|start_header_id\|>[a-z]*<\|end_header_id\|>\n?`),
+	regexp.MustCompile(`<\|python_tag\|>`),
+	// Closing analysis/reasoning tags that leaked out
+	regexp.MustCompile(`</?(analysis|reasoning|thought)[^>]*>`),
+	// Function call markers (various model families)
+	regexp.MustCompile(`</?function_calls>\n?`),
+	regexp.MustCompile(`</?invoke>\n?`),
+	// GPT-OSS/custom model tokens
+	regexp.MustCompile(`to=functions\.[a-zA-Z0-9_]+\s*`),
+}
+
+// SanitiseSpecialTokens strips leaked model-internal formatting tokens from
+// text before it is shown to the user or processed further.
+func SanitiseSpecialTokens(text string) string {
+	for _, pattern := range specialTokenPatterns {
+		text = pattern.ReplaceAllString(text, "")
+	}
+	return strings.TrimSpace(text)
+}
+
+// looksLikeLeakedToolCall checks if text contains suspicious patterns that
+// suggest the model tried to call a tool but leaked the syntax as plain text.
+// Returns true only when there is strong evidence of a leaked call (not just
+// explanatory JSON shown to the user).
+func looksLikeLeakedToolCall(text string) bool {
+	// Must contain something JSON-like
+	if !strings.Contains(text, "{") {
+		return false
+	}
+
+	// Strong indicators: model-specific special tokens in the text
+	for _, p := range specialTokenPatterns {
+		if p.MatchString(text) {
+			return true
+		}
+	}
+
+	// Strong indicator: text is almost entirely a JSON object with tool-like keys
+	// and has very little surrounding prose
+	trimmed := strings.TrimSpace(text)
+
+	// Strip any leading/trailing tags before checking for bare JSON
+	tagStripped := regexp.MustCompile(`^[^{]*`).ReplaceAllString(trimmed, "")
+	if strings.HasPrefix(tagStripped, "{") {
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(tagStripped), &obj); err == nil {
+			// JSON decoded cleanly — check if it has known tool parameter keys
+			toolParamKeys := []string{"action", "path", "file_path", "command", "query", "url", "task", "content"}
+			matchCount := 0
+			for _, k := range toolParamKeys {
+				if _, ok := obj[k]; ok {
+					matchCount++
+				}
+			}
+			// Also check for explicit tool/name/function keys
+			_, hasName := obj["name"]
+			_, hasTool := obj["tool"]
+			_, hasFunction := obj["function"]
+			if hasName || hasTool || hasFunction || matchCount >= 2 {
+				// Make sure the surrounding text is minimal (not embedded in prose)
+				nonJSONLen := len(trimmed) - len(tagStripped)
+				return nonJSONLen < 80 // less than 80 chars of prose around the JSON
+			}
+		}
+	}
+
+	// Known leak patterns from real models in the wild
+	leakPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`to=functions\.[a-zA-Z0-9_]+`),
+		regexp.MustCompile(`<tool_call>\s*\{`),
+		regexp.MustCompile(`<\|tool_call\|>`),
+		regexp.MustCompile(`"action"\s*:\s*"(read|write|list|execute|search)"`),
+	}
+	for _, p := range leakPatterns {
+		if p.MatchString(text) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // ParseLLMResponse scans the raw text from the LLM. If it detects embedded
-// tool calls (like markdown JSON/Bash blocks or XML blocks), it strips them
-// from the text and converts them into native anyllm.ToolCall structs.
+// tool calls (like markdown JSON/Bash blocks, XML blocks, or leaked model
+// special-token syntax), it strips them from the text and converts them into
+// native anyllm.ToolCall structs.
 // It returns the cleaned text and the array of tool calls.
 func ParseLLMResponse(response string, logger *logger.Logger) (string, []anyllm.ToolCall) {
+	// Layer 1: sanitise special tokens before any further processing
+	response = SanitiseSpecialTokens(response)
+
 	var toolCalls []anyllm.ToolCall
 	currentText := response
 
@@ -49,68 +147,142 @@ func ParseLLMResponse(response string, logger *logger.Logger) (string, []anyllm.
 	return strings.TrimSpace(currentText), toolCalls
 }
 
-// extractToolCall extracts a single tool call from the response
+// extractToolCall attempts to extract a single tool call from the response.
+// It tries multiple patterns in order of specificity.
 func extractToolCall(response string, log *logger.Logger) (*anyllm.ToolCall, string, bool) {
 	log.Debug("Checking for tool calls in response", "responseLength", len(response))
 
-	jsonPattern := regexp.MustCompile("(?s)```json\\s*\\n(.*?)\\n?```")
-	xmlPattern := regexp.MustCompile(`(?s)<tool>[\s\n]*(.*?)[\s\n]*</tool>`)
+	// Pattern registry: ordered from most-specific to least-specific
+	// to avoid false positives.
+	type pattern struct {
+		name  string
+		regex *regexp.Regexp
+	}
+
+	patterns := []pattern{
+		// Explicit tool_call wrapper tags (Llama 3.x, Qwen)
+		{name: "tool_call_tag", regex: regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)},
+		// Anthropic-style <invoke> XML blocks
+		{name: "invoke_xml", regex: regexp.MustCompile(`(?s)<invoke>(.*?)</invoke>`)},
+		// Standard markdown JSON block
+		{name: "json_block", regex: regexp.MustCompile("(?s)```json\\s*\\n(.*?)\\n?```")},
+		// Generic <tool> XML block
+		{name: "tool_xml", regex: regexp.MustCompile(`(?s)<tool>[\s\n]*(.*?)[\s\n]*</tool>`)},
+		// Bare JSON object at start of response (leaked raw call)
+		{name: "bare_json", regex: regexp.MustCompile(`(?s)^\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\})`)},
+		// to=functions.X{...} leak pattern (GPT-OSS, some Ollama models)
+		{name: "functions_leak", regex: regexp.MustCompile(`(?s)to=functions\.([a-zA-Z0-9_]+)\s*(\{.*?\})`)},
+	}
 
 	type match struct {
 		start      int
 		end        int
-		matchType  string
+		patternIdx int
 		submatches []string
 	}
 
-	var earliestMatch *match
+	var earliest *match
 
-	if loc := jsonPattern.FindStringSubmatchIndex(response); len(loc) >= 4 {
-		earliestMatch = &match{start: loc[0], end: loc[1], matchType: "json", submatches: jsonPattern.FindStringSubmatch(response)}
-	}
-	if loc := xmlPattern.FindStringSubmatchIndex(response); len(loc) >= 2 {
-		if earliestMatch == nil || loc[0] < earliestMatch.start {
-			earliestMatch = &match{start: loc[0], end: loc[1], matchType: "xml", submatches: xmlPattern.FindStringSubmatch(response)}
+	for i, p := range patterns {
+		loc := p.regex.FindStringSubmatchIndex(response)
+		if len(loc) < 2 {
+			continue
+		}
+		if earliest == nil || loc[0] < earliest.start {
+			earliest = &match{
+				start:      loc[0],
+				end:        loc[1],
+				patternIdx: i,
+				submatches: p.regex.FindStringSubmatch(response),
+			}
 		}
 	}
 
-	if earliestMatch == nil {
+	if earliest == nil {
 		return nil, response, false
 	}
 
-	remainingText := response[:earliestMatch.start] + response[earliestMatch.end:]
-	remainingText = strings.TrimSpace(remainingText)
-	id := fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), rand.Intn(1000)) //nolint:gosec // weak rng is fine for a tool call ID
+	remainingText := strings.TrimSpace(response[:earliest.start] + response[earliest.end:])
+	id := fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), rand.Intn(1000)) //nolint:gosec // weak rng is fine for tool call IDs
 
-	switch earliestMatch.matchType {
-	case "json":
-		if len(earliestMatch.submatches) >= 2 {
-			jsonContent := strings.TrimSpace(earliestMatch.submatches[1])
-			var jsonObj struct {
-				Tool   string                 `json:"tool"`
-				Name   string                 `json:"name"`
-				Params map[string]interface{} `json:"params"`
-			}
-			if err := json.Unmarshal([]byte(jsonContent), &jsonObj); err == nil {
-				name := jsonObj.Tool
-				if name == "" {
-					name = jsonObj.Name
-				}
-				if name != "" && jsonObj.Params != nil {
-					argsBytes, _ := json.Marshal(jsonObj.Params)
-					return &anyllm.ToolCall{
-						ID:   id,
-						Type: "function",
-						Function: providers.FunctionCall{
-							Name:      name,
-							Arguments: string(argsBytes),
-						},
-					}, remainingText, true
-				}
+	patternName := patterns[earliest.patternIdx].name
+	log.Debug("Tool call pattern matched", "pattern", patternName, "start", earliest.start)
+
+	switch patternName {
+	case "tool_call_tag":
+		// <tool_call>{"name":"X","arguments":{...}}</tool_call>
+		if len(earliest.submatches) >= 2 {
+			tc := tryParseToolCallJSON(earliest.submatches[1], id, log)
+			if tc != nil {
+				return tc, remainingText, true
 			}
 		}
-	case "xml":
-		toolXML := earliestMatch.submatches[0]
+
+	case "json_block":
+		// ```json\n{...}\n```
+		if len(earliest.submatches) >= 2 {
+			tc := tryParseToolCallJSON(earliest.submatches[1], id, log)
+			if tc != nil {
+				return tc, remainingText, true
+			}
+		}
+
+	case "bare_json":
+		// Raw JSON object at start of text, only if it looks like a tool call
+		if len(earliest.submatches) >= 2 {
+			jsonStr := strings.TrimSpace(earliest.submatches[1])
+			tc := tryParseToolCallJSON(jsonStr, id, log)
+			if tc != nil {
+				return tc, remainingText, true
+			}
+		}
+
+	case "functions_leak":
+		// to=functions.fileManage{"action":"read",...}
+		if len(earliest.submatches) >= 3 {
+			toolName := earliest.submatches[1]
+			argsStr := strings.TrimSpace(earliest.submatches[2])
+			var params map[string]interface{}
+			if err := json.Unmarshal([]byte(argsStr), &params); err == nil {
+				argsBytes, _ := json.Marshal(params)
+				return &anyllm.ToolCall{
+					ID:   id,
+					Type: "function",
+					Function: providers.FunctionCall{
+						Name:      toolName,
+						Arguments: string(argsBytes),
+					},
+				}, remainingText, true
+			}
+		}
+
+	case "invoke_xml":
+		// <invoke><tool_name>X</tool_name><parameters>...</parameters></invoke>
+		if len(earliest.submatches) >= 2 {
+			inner := "<invoke>" + earliest.submatches[1] + "</invoke>"
+			var invokeXML struct {
+				ToolName   string `xml:"tool_name"`
+				Parameters struct {
+					Inner []byte `xml:",innerxml"`
+				} `xml:"parameters"`
+			}
+			if err := xml.Unmarshal([]byte(inner), &invokeXML); err == nil && invokeXML.ToolName != "" {
+				params, _ := extractXMLParams(string(invokeXML.Parameters.Inner), log)
+				argsBytes, _ := json.Marshal(params)
+				return &anyllm.ToolCall{
+					ID:   id,
+					Type: "function",
+					Function: providers.FunctionCall{
+						Name:      invokeXML.ToolName,
+						Arguments: string(argsBytes),
+					},
+				}, remainingText, true
+			}
+		}
+
+	case "tool_xml":
+		// <tool>...</tool>
+		toolXML := earliest.submatches[0]
 		toolXML = strings.TrimPrefix(toolXML, "```xml")
 		toolXML = strings.TrimSuffix(toolXML, "```")
 		toolXML = strings.TrimSpace(toolXML)
@@ -120,8 +292,7 @@ func extractToolCall(response string, log *logger.Logger) (*anyllm.ToolCall, str
 		}
 
 		var xmlToolCall XMLToolCall
-		err := xml.Unmarshal([]byte(toolXML), &xmlToolCall)
-		if err == nil && xmlToolCall.Name != "" {
+		if err := xml.Unmarshal([]byte(toolXML), &xmlToolCall); err == nil && xmlToolCall.Name != "" {
 			params, _ := extractXMLParams(string(xmlToolCall.Params.XMLData), log)
 			argsBytes, _ := json.Marshal(params)
 			return &anyllm.ToolCall{
@@ -135,7 +306,131 @@ func extractToolCall(response string, log *logger.Logger) (*anyllm.ToolCall, str
 		}
 	}
 
-	return nil, remainingText, true // Match parsed badly, but it was found. Avoid infinite loop
+	return nil, remainingText, true // Match parsed badly but was found — avoid infinite loop
+}
+
+// tryParseToolCallJSON attempts to parse a JSON string as a tool call.
+// It handles multiple JSON schemas used by different model families.
+func tryParseToolCallJSON(jsonStr string, id string, log *logger.Logger) *anyllm.ToolCall {
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	// Schema 1: {"name":"toolName","arguments":{...}} — OpenAI native format
+	var schema1 struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &schema1); err == nil && schema1.Name != "" && schema1.Arguments != nil {
+		argsBytes, _ := json.Marshal(schema1.Arguments)
+		return &anyllm.ToolCall{
+			ID:   id,
+			Type: "function",
+			Function: providers.FunctionCall{
+				Name:      schema1.Name,
+				Arguments: string(argsBytes),
+			},
+		}
+	}
+
+	// Schema 2: {"tool":"toolName","params":{...}} or {"name":"toolName","params":{...}}
+	var schema2 struct {
+		Tool   string                 `json:"tool"`
+		Name   string                 `json:"name"`
+		Params map[string]interface{} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &schema2); err == nil {
+		name := schema2.Tool
+		if name == "" {
+			name = schema2.Name
+		}
+		if name != "" && schema2.Params != nil {
+			argsBytes, _ := json.Marshal(schema2.Params)
+			return &anyllm.ToolCall{
+				ID:   id,
+				Type: "function",
+				Function: providers.FunctionCall{
+					Name:      name,
+					Arguments: string(argsBytes),
+				},
+			}
+		}
+	}
+
+	// Schema 3: {"action":"read","path":"..."} — raw params with action as tool discriminator
+	// This is the leaked format seen from gpt-oss and some Ollama models
+	var rawParams map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &rawParams); err == nil {
+		// Try to infer the tool name from known discriminator keys
+		toolName := inferToolNameFromParams(rawParams)
+		if toolName != "" {
+			argsBytes, _ := json.Marshal(rawParams)
+			log.Info("Tool call recovered from raw params JSON", "inferred_tool", toolName)
+			return &anyllm.ToolCall{
+				ID:   id,
+				Type: "function",
+				Function: providers.FunctionCall{
+					Name:      toolName,
+					Arguments: string(argsBytes),
+				},
+			}
+		}
+	}
+
+	return nil
+}
+
+// inferToolNameFromParams tries to determine the tool name from raw parameter
+// objects where the tool name wasn't explicitly included. This handles the
+// common case where local models leak {"action":"read","path":"..."} without
+// wrapping it in a proper tool call structure.
+func inferToolNameFromParams(params map[string]interface{}) string {
+	action, _ := params["action"].(string)
+	_, hasPath := params["path"]
+	_, hasFilePath := params["file_path"]
+	_, hasCommand := params["command"]
+	_, hasQuery := params["query"]
+	_, hasURL := params["url"]
+	_, hasTask := params["task"]
+	_, hasContent := params["content"]
+	_, hasDir := params["dir"]
+	_, hasDirectory := params["directory"]
+
+	// fileManage: has "action" + "path"
+	if action != "" && (hasPath || hasFilePath || hasDir || hasDirectory) {
+		switch action {
+		case "read", "write", "delete", "copy", "move", "list", "mkdir":
+			return "fileManage"
+		}
+	}
+
+	// execute: has "command"
+	if hasCommand {
+		return "execute"
+	}
+
+	// webSearch: has "query" but not file-related keys
+	if hasQuery && !hasPath && !hasFilePath {
+		return "webSearch"
+	}
+
+	// fetchURL: has "url"
+	if hasURL {
+		return "fetchURL"
+	}
+
+	// subAgent: has "task"
+	if hasTask {
+		return "subAgent"
+	}
+
+	// fileWrite/fileRead: has "file_path" and "content"
+	if hasFilePath && hasContent {
+		return "fileWrite"
+	}
+	if hasFilePath {
+		return "fileRead"
+	}
+
+	return ""
 }
 
 func extractXMLParams(paramsXML string, log *logger.Logger) (map[string]interface{}, error) {
