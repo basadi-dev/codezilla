@@ -642,6 +642,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				display = "🔍 Analyze Project"
 			}
 			ui.UpdateThinkingStatus(fmt.Sprintf("preparing %s", display))
+			ui.ShowThinking()
 		},
 		OnContextSummarizing: func() {
 			ui.UpdateThinkingStatus("summarizing context buffer")
