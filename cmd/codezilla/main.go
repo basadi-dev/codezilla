@@ -17,7 +17,6 @@ func main() {
 	// Parse command line flags
 	var (
 		configPath  = flag.String("config", "", "Path to config file")
-		uiType      = flag.String("ui", "fancy", "UI type: minimal or fancy")
 		noColors    = flag.Bool("no-colors", false, "Disable colored output")
 		provider    = flag.String("provider", "", "Override LLM provider (ollama, openai, anthropic, gemini)")
 		model       = flag.String("model", "", "Override default model")
@@ -92,15 +91,8 @@ func main() {
 	// Get history file path
 	historyPath, _ := ui.GetDefaultHistoryFilePath()
 
-	// Create UI based on selection
-	var appUI ui.UI
-	switch *uiType {
-	case "minimal":
-		appUI, err = ui.NewMinimalUI(historyPath)
-	default:
-		// Default to fancy UI
-		appUI, err = ui.NewFancyUI(historyPath)
-	}
+	// Create unified BubbleTea UI 
+	appUI, err := ui.NewBubbleTeaUI(historyPath)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize UI: %v\n", err)
@@ -124,11 +116,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Run the application
-	if err := app.Run(ctx, cancel); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	// If the UI supports TUIRunner (BubbleTea), let it own the main goroutine.
+	// app.Run() will be called from the goroutine launched inside RunTUI.
+	if runner, ok := appUI.(ui.TUIRunner); ok {
+		if err := runner.RunTUI(ctx, func(ctx context.Context) error {
+			return app.Run(ctx, cancel)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
+
+
 }
 
 func getDefaultConfigPath() string {
@@ -152,21 +152,13 @@ Options:
   -temperature float   Override temperature (0.0-1.0)
   -max-tokens int      Override max tokens
   -session string      Session ID to resume
-  -ui string           UI type: fancy (default) or minimal
   -no-colors           Disable colored output
   -version             Show version information
   -help                Show this help message
 
-UI Types:
-  fancy     - Enhanced UI with animations and emoji (default)
-  minimal   - Minimal UI with no colors or special formatting
-
 Examples:
   # Run with default fancy UI
   codezilla
-
-  # Run with minimal UI
-  codezilla -ui minimal
 
   # Run without colors
   codezilla -no-colors

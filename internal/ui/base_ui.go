@@ -14,15 +14,16 @@ import (
 
 // BaseUI implements the UI interface with a base interface
 type BaseUI struct {
-	theme         Theme
-	reader        *FixedInput
-	writer        *bufio.Writer
-	spinnerStop   chan bool
-	spinnerMutex  sync.Mutex
-	spinnerStatus string // updated via UpdateThinkingStatus
-	width         int
-	currentModel  string
-	printMutex    sync.Mutex
+	theme             Theme
+	reader            *FixedInput
+	writer            *bufio.Writer
+	spinnerStop       chan bool
+	spinnerMutex      sync.Mutex
+	spinnerStatus     string // updated via UpdateThinkingStatus
+	spinnerTokenUsage string
+	width             int
+	currentModel      string
+	printMutex        sync.Mutex
 }
 
 // NewBaseUI creates a new base UI
@@ -151,6 +152,10 @@ func (ui *BaseUI) Info(format string, args ...interface{}) {
 	ui.Println("%s %s", ui.theme.StyleBlue.Render(ui.theme.IconInfo), msg)
 }
 
+func (ui *BaseUI) UpdateModel(model string) {
+	// BaseUI does not hold active model state by default.
+}
+
 // ShowThinking shows a thinking/loading indicator
 func (ui *BaseUI) ShowThinking() {
 	ui.spinnerMutex.Lock()
@@ -166,14 +171,53 @@ func (ui *BaseUI) ShowThinking() {
 	go func() {
 		chars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		i := 0
+		start := time.Now()
+		render := func(isFirst bool, i int) string {
+			elapsed := int(time.Since(start).Seconds())
+			ui.spinnerMutex.Lock()
+			status := ui.spinnerStatus
+			tokenUsage := ui.spinnerTokenUsage
+			ui.spinnerMutex.Unlock()
+
+			if status == "" {
+				status = "Thinking"
+			}
+
+			modelName := ui.currentModel
+			if modelName == "" {
+				modelName = "Unknown Model"
+			}
+
+			consoleWidth := 80
+			if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+				consoleWidth = w
+			}
+			if consoleWidth > 1 {
+				consoleWidth--
+			}
+
+			msg := fmt.Sprintf("🧠 %s  |  %s %s...  |  ⏱️ %ds", modelName, chars[i%len(chars)], status, elapsed)
+			if tokenUsage != "" {
+				msg += fmt.Sprintf("  |  📊 %s", tokenUsage)
+			}
+			renderedMsg := ui.theme.StyleCyan.Render(msg)
+			separator := ui.theme.StyleDim.Render(strings.Repeat("─", consoleWidth))
+
+			if isFirst {
+				return fmt.Sprintf("\r\033[K%s\n\033[K%s", separator, renderedMsg)
+			}
+			return fmt.Sprintf("\033[1A\r\033[K%s\n\033[K%s", separator, renderedMsg)
+		}
+
+		isFirstDraw := true
 		for {
 			select {
 			case <-stopChan:
-				// Clear spinner line
-				ui.Print("\r%s\r", strings.Repeat(" ", 20))
+				ui.Print("\r\033[2K\033[1A\033[2K")
 				return
 			default:
-				ui.Print("\r%s Thinking...", ui.theme.StyleCyan.Render(chars[i%len(chars)]))
+				ui.Print("%s", render(isFirstDraw, i))
+				isFirstDraw = false
 				i++
 				time.Sleep(100 * time.Millisecond)
 			}
@@ -187,6 +231,21 @@ func (ui *BaseUI) UpdateThinkingStatus(label string) {
 	ui.spinnerMutex.Lock()
 	ui.spinnerStatus = label
 	ui.spinnerMutex.Unlock()
+}
+
+// UpdateTokenUsage updates the token statistics displayed in the active spinner.
+// Safe to call from any goroutine.
+func (ui *BaseUI) UpdateTokenUsage(usage string) {
+	ui.spinnerMutex.Lock()
+	ui.spinnerTokenUsage = usage
+	ui.spinnerMutex.Unlock()
+}
+
+// SetPromptFooter assigns a dynamic string generator to be printed below the input prompt.
+func (ui *BaseUI) SetPromptFooter(fn func() string) {
+	if ui.reader != nil {
+		ui.reader.SetFooter(fn)
+	}
 }
 
 // RestartThinking stops and restarts the spinner so the elapsed timer resets.

@@ -62,9 +62,14 @@ type UI interface {
 	// UpdateThinkingStatus updates the label shown in the active spinner without
 	// stopping it. No-op if the spinner is not running.
 	UpdateThinkingStatus(label string)
+	// UpdateTokenUsage updates the token statistics displayed in the active spinner.
+	UpdateTokenUsage(usage string)
+	// SetPromptFooter assigns a dynamic string generator to be printed below the input prompt.
+	SetPromptFooter(func() string)
 	ShowResponse(response string)
 	ShowResponseStream(ch <-chan string)
 	ShowCode(language, code string)
+	UpdateModel(model string)
 
 	// Structured displays
 	ShowHelp()
@@ -114,6 +119,13 @@ type HistoryProvider interface {
 	SearchHistory(query string) []string
 	// ClearHistory removes all history entries and deletes the history file.
 	ClearHistory() error
+}
+
+// LiveStatusStopper is an optional interface for UIs that display a persistent
+// live status bar during processing. Call StopLiveStatus() once the
+// final response status line has been printed to the terminal.
+type LiveStatusStopper interface {
+	StopLiveStatus()
 }
 
 // Factory function type for creating UI instances

@@ -30,7 +30,9 @@ type FixedInput struct {
 	menuCandidates []Completion                   // cached results for the dropdown
 	menuLines      int                            // how many lines were printed below the prompt for the menu
 	cursorLine     int                            // tracks vertical offset of terminal cursor from prompt start
+	drawnBelow     int                            // total lines drawn below cursor (menu + footer)
 	theme          Theme                          // active theme for the UI
+	footerCallback func() string                  // dynamic footer text callback
 }
 
 // SetTheme updates the active theme dynamically
@@ -52,6 +54,13 @@ func (fi *FixedInput) SetCompleter(fn func(line string) []Completion) {
 	fi.mu.Lock()
 	defer fi.mu.Unlock()
 	fi.completer = fn
+}
+
+// SetFooter assigns a dynamic string generator to be printed below the input prompt.
+func (fi *FixedInput) SetFooter(fn func() string) {
+	fi.mu.Lock()
+	defer fi.mu.Unlock()
+	fi.footerCallback = fn
 }
 
 // promptDisplayWidth calculates the actual display width of the prompt
@@ -103,9 +112,6 @@ func (fi *FixedInput) ReadLine() (string, error) {
 		}
 	}()
 
-	// Print prompt
-	fmt.Print(fi.prompt)
-
 	// Buffer for the current line
 	var line []rune
 	pos := 0
@@ -113,9 +119,14 @@ func (fi *FixedInput) ReadLine() (string, error) {
 	// Reset state
 	fi.menuActive = false
 	fi.cursorLine = 0
+	fi.drawnBelow = 0
 	fi.menuLines = 0
 	fi.menuIndex = 0
 	fi.menuCandidates = nil
+
+	// Print initial prompt (and footer) before waiting for keys
+	fi.currentLines = 1 // Already set in NewFixedInput but just safe
+	fi.redrawLine(line, pos)
 
 	// History navigation state
 	fi.mu.Lock()
@@ -146,32 +157,41 @@ func (fi *FixedInput) ReadLine() (string, error) {
 				fi.menuActive = false
 			}
 
-			// Clear menu lines before returning so prompt stays clean
-			if fi.cursorLine > 0 {
-				fmt.Printf("\033[%dA", fi.cursorLine)
-			}
-			fmt.Print("\r\033[J")
+			// Clear menu, footer, and everything drawn below prompt
+			fi.clearDrawnContent()
+
+			// Re-print prompt and line cleanly with a final newline
 			fmt.Print(fi.prompt)
 			fmt.Print(string(line))
-
 			fmt.Print("\r\n")
+
 			result := string(line)
 			if result != "" {
 				fi.addHistory(result)
 			}
-			fi.currentLines = 1 // Reset for next input
+			fi.currentLines = 1
 			fi.cursorLine = 0
+			fi.drawnBelow = 0
 			return result, nil
 
 		case 0x03: // Ctrl-C
+			fi.clearDrawnContent()
+			fmt.Print(fi.prompt)
+			fmt.Print(string(line))
 			fmt.Print("^C\r\n")
-			fi.currentLines = 1 // Reset for next input
+			fi.currentLines = 1
+			fi.cursorLine = 0
+			fi.drawnBelow = 0
 			return "", io.EOF
 
 		case 0x04: // Ctrl-D
 			if len(line) == 0 {
+				fi.clearDrawnContent()
+				fmt.Print(fi.prompt)
 				fmt.Print("\r\n")
-				fi.currentLines = 1 // Reset for next input
+				fi.currentLines = 1
+				fi.cursorLine = 0
+				fi.drawnBelow = 0
 				return "", io.EOF
 			}
 			// Delete character at cursor
@@ -403,7 +423,23 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 	if fi.cursorLine > 0 {
 		fmt.Printf("\033[%dA", fi.cursorLine)
 	}
-	fmt.Print("\r\033[J") // Clear line and everything below
+	fmt.Print("\r")
+
+	// Explicitly clear all previously drawn lines one by one.
+	// This is more reliable than \033[J across terminal emulators,
+	// especially in raw mode where OPOST is disabled.
+	totalClear := fi.cursorLine + fi.drawnBelow + 1
+	for i := 0; i < totalClear; i++ {
+		fmt.Print("\033[2K") // Erase entire line
+		if i < totalClear-1 {
+			fmt.Print("\033[B") // Cursor down (CSI B), avoids \n raw-mode issues
+		}
+	}
+	// Move back to prompt start
+	if totalClear > 1 {
+		fmt.Printf("\033[%dA", totalClear-1)
+	}
+	fmt.Print("\r")
 
 	// Print prompt
 	fmt.Print(fi.prompt)
@@ -579,6 +615,21 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 		}
 	}
 
+	// Check and Draw Footer below menu
+	fi.mu.Lock()
+	footerCb := fi.footerCallback
+	fi.mu.Unlock()
+	if footerCb != nil {
+		footerStr := footerCb()
+		if footerStr != "" {
+			// Use explicit \r\n for raw-mode compatibility (OPOST disabled)
+			fmt.Print("\r\n" + footerStr)
+			footerLines := strings.Count(footerStr, "\n") + 1
+			currentCursorY += footerLines
+			menuDrawnLines += footerLines
+		}
+	}
+
 	fi.menuLines = menuDrawnLines
 
 	// Calculate target cursor position with wrapping
@@ -599,6 +650,34 @@ func (fi *FixedInput) redrawLine(line []rune, pos int) {
 
 	// Update tracked cursor line offset so we know where we are purely relative to prompt
 	fi.cursorLine = targetCursorLine
+	// Track total lines drawn below the cursor so Ctrl+C/D can clean up
+	fi.drawnBelow = currentCursorY - targetCursorLine
+}
+
+// clearDrawnContent moves the cursor back to the start of the prompt and erases
+// everything drawn below (menu, footer, ghost text). This must be called before
+// any exit path from ReadLine so subsequent output doesn't collide with stale
+// footer/menu content.
+func (fi *FixedInput) clearDrawnContent() {
+	// Move cursor up to prompt start (cursorLine tracks our offset within the text)
+	if fi.cursorLine > 0 {
+		fmt.Printf("\033[%dA", fi.cursorLine)
+	}
+	fmt.Print("\r")
+
+	// Explicitly clear all drawn lines (prompt + text lines + menu + footer)
+	totalClear := fi.cursorLine + fi.drawnBelow + 1
+	for i := 0; i < totalClear; i++ {
+		fmt.Print("\033[2K")
+		if i < totalClear-1 {
+			fmt.Print("\033[B")
+		}
+	}
+	// Move back to prompt start
+	if totalClear > 1 {
+		fmt.Printf("\033[%dA", totalClear-1)
+	}
+	fmt.Print("\r")
 }
 
 // longestCommonPrefix returns the longest string that is a prefix of all items.

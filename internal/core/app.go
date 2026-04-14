@@ -655,6 +655,11 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		OnLLMUsage: func(turn agent.TokenUsage, session agent.TokenUsage) {
 			appTurnUsage = turn
 			appSessionUsage = session
+
+			if appSessionUsage.TotalTokens > 0 {
+				tokenInfo := fmt.Sprintf("session: %s total", agent.FormatNumber(appSessionUsage.TotalTokens))
+				ui.UpdateTokenUsage(tokenInfo)
+			}
 		},
 		OnModelRouted: func(model, reason string) {
 			ui.UpdateThinkingStatus(fmt.Sprintf("routed → %s (%s)", model, reason))
@@ -722,11 +727,42 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	}
 	agentConfig.OnModelRouted = func(model, reason string) {
 		resultApp.routedModel = model
+		ui.UpdateModel(model)
 		ui.UpdateThinkingStatus(fmt.Sprintf("routed → %s (%s)", model, reason))
 	}
 	// Suppress unused variable warnings for the pre-wiring aliases
 	_ = appTurnUsage
 	_ = appSessionUsage
+
+	// Wire the persistent idle status footer below the input prompt.
+	// This shows model | idle | tokens when the user is at the prompt.
+	resultApp.ui.SetPromptFooter(func() string {
+		activeModel := resultApp.config.LLM.Models.Default
+		if resultApp.routedModel != "" {
+			activeModel = resultApp.routedModel
+		}
+
+		consoleWidth := 80
+		if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+			consoleWidth = w
+		}
+		if consoleWidth > 1 {
+			consoleWidth--
+		}
+
+		tokenInfo := "0 tokens"
+		if resultApp.lastTurnUsage.TotalTokens > 0 {
+			tokenInfo = resultApp.lastTurnUsage.String()
+			if resultApp.sessionUsage.TotalTokens > resultApp.lastTurnUsage.TotalTokens {
+				tokenInfo += fmt.Sprintf(" · session: %s total", agent.FormatNumber(resultApp.sessionUsage.TotalTokens))
+			}
+		}
+
+		separator := lipgloss.NewStyle().Faint(true).Render(strings.Repeat("─", consoleWidth))
+		statusLine := lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("🧠 %s  |  ⏱️ idle  |  📊 %s", activeModel, tokenInfo))
+
+		return separator + "\r\n" + statusLine
+	})
 
 	return resultApp, nil
 }
@@ -1045,6 +1081,10 @@ func (app *App) Run(ctx context.Context, rootCancel context.CancelFunc) error {
 				app.taskCancel()
 				app.taskCancel = nil
 				app.cancelMu.Unlock()
+				// Stop the live status ticker before showing the warning
+				if stopper, ok := app.ui.(ui.LiveStatusStopper); ok {
+					stopper.StopLiveStatus()
+				}
 				app.ui.Warning("\n⚠️  Task Cancelled")
 			} else {
 				// Idling -> Shutdown whole app
@@ -1167,10 +1207,19 @@ func (app *App) processInput(ctx context.Context, input string) error {
 			"text": input,
 		})
 	}
+
+	taskStart := time.Now()
+
 	for {
 		// Show thinking indicator while the connection is being established.
 		// Clear any previous status label from the last turn.
 		app.ui.UpdateThinkingStatus("")
+		if app.sessionUsage.TotalTokens > 0 {
+			tokenInfo := fmt.Sprintf("session: %s total", agent.FormatNumber(app.sessionUsage.TotalTokens))
+			app.ui.UpdateTokenUsage(tokenInfo)
+		} else {
+			app.ui.UpdateTokenUsage("0 tokens")
+		}
 		app.ui.ShowThinking()
 
 		// If context retention is disabled, clear previous conversation
@@ -1254,7 +1303,9 @@ func (app *App) processInput(ctx context.Context, input string) error {
 					thinkBuffer = ""
 				}
 				if streamingStarted && markdownLinesPrinted > 0 {
-					app.ui.Print("\033[%dA\033[0J", markdownLinesPrinted)
+					// In BubbleTea viewport mode, we can't erase previously appended lines.
+					// The streamed raw text stays visible; ShowResponse appends the
+					// glamour-rendered version below it with a visual separator.
 					markdownLinesPrinted = 0
 					markdownCharsPrinted = 0
 				}
@@ -1311,9 +1362,9 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						// Disable think style
 						inThink = false
 
-						// Wipe the stream if it were over the compress limit so the orchestrator's summary replaces it nicely
+						// When the think block exceeds the compress threshold, note that
+						// it was summarised inline (viewport can't erase previous lines).
 						if app.config.ThinkCompressThreshold > 0 && thinkCharsPrinted > app.config.ThinkCompressThreshold {
-							app.ui.Print("\033[%dA\033[0J", thinkLinesPrinted)
 							app.ui.Print("\n%s\n\n", lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Italic(true).Render("🤔 Thinking (Summarising...)"))
 						} else {
 							app.ui.Print("\n\n")
@@ -1383,25 +1434,40 @@ func (app *App) processInput(ctx context.Context, input string) error {
 
 			// Add a clear separator if we streamed raw text, then render the
 			// full final response with Glamour for proper markdown formatting.
-			if !streamingStarted {
-				// Non-streaming path: render full response normally.
-				modelLabel := app.config.LLM.Models.Default
-				if app.routedModel != "" {
-					modelLabel = app.routedModel
-				}
-				app.ui.Info("  model: %s", lipgloss.NewStyle().Faint(true).Render(modelLabel))
-			}
 			app.ui.ShowResponse(sanitizeAgentResponse(cleanResponse))
 
-			// Show token usage summary after response
+			// Draw horizontal separator line
+			separator := lipgloss.NewStyle().Faint(true).Render(strings.Repeat("─", consoleWidth))
+			app.ui.Print("%s\n", separator)
+
+			// Determine active model
+			activeModel := app.config.LLM.Models.Default
+			if app.routedModel != "" {
+				activeModel = app.routedModel
+			}
+
+			// Calculate duration
+			taskDuration := time.Since(taskStart).Round(time.Second)
+
+			// Show single line status: Model | Time | Tokens
 			if app.lastTurnUsage.TotalTokens > 0 {
-				usageLine := fmt.Sprintf("📊 tokens: %s", app.lastTurnUsage.String())
+				tokenInfo := app.lastTurnUsage.String()
 				if app.sessionUsage.TotalTokens > app.lastTurnUsage.TotalTokens {
-					usageLine += fmt.Sprintf(" · session: %s total", agent.FormatNumber(app.sessionUsage.TotalTokens))
+					tokenInfo += fmt.Sprintf(" · session: %s total", agent.FormatNumber(app.sessionUsage.TotalTokens))
 				}
-				app.ui.Print("%s\n", lipgloss.NewStyle().Faint(true).Render(usageLine))
-				// Reset per-turn usage after display
-				app.lastTurnUsage = agent.TokenUsage{}
+
+				statusLine := fmt.Sprintf("🧠 %s  |  ⏱️ %v  |  📊 %s", activeModel, taskDuration, tokenInfo)
+				app.ui.Print("%s\n", lipgloss.NewStyle().Faint(true).Render(statusLine))
+
+				app.lastTurnUsage = agent.TokenUsage{} // Reset per-turn usage after display
+			} else {
+				statusLine := fmt.Sprintf("🧠 %s  |  ⏱️ %v  |  📊 0 tokens", activeModel, taskDuration)
+				app.ui.Print("%s\n", lipgloss.NewStyle().Faint(true).Render(statusLine))
+			}
+
+			// Stop live status ticker now that we've printed the final status line
+			if stopper, ok := app.ui.(ui.LiveStatusStopper); ok {
+				stopper.StopLiveStatus()
 			}
 
 			app.ui.Print("\n") // breathing room at bottom
