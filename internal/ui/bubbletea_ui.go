@@ -59,9 +59,10 @@ type appModel struct {
 	stepStart     time.Time
 
 	// Input state
-	inputEnabled bool
-	inputChan    chan string // signals ReadLine
-	eofChan      chan struct{}
+	inputEnabled  bool
+	inputChan     chan string // signals ReadLine
+	eofChan       chan struct{}
+	interruptChan chan struct{}
 
 	// History
 	history      []string
@@ -102,11 +103,12 @@ func newAppModel(theme Theme, prompt string) appModel {
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#7DCFFF", Dark: "#7DCFFF"})
 
 	return appModel{
-		input:        ti,
-		spinner:      sp,
-		inputChan:    make(chan string, 1),
-		eofChan:      make(chan struct{}, 1),
-		theme:        theme,
+		input:         ti,
+		spinner:       sp,
+		inputChan:     make(chan string, 1),
+		eofChan:       make(chan struct{}, 1),
+		interruptChan: make(chan struct{}, 1),
+		theme:         theme,
 		prompt:       prompt,
 		inputEnabled: true,
 		history:      nil,
@@ -134,8 +136,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			if !m.inputEnabled {
-				// Task running — Ctrl+C is handled by the signal handler in app.go.
-				// We do nothing here so BubbleTea doesn't quit the program.
+				// Task running — send interrupt to cancel agent processing
+				select {
+				case m.interruptChan <- struct{}{}:
+				default:
+				}
 				return m, nil
 			}
 			// At prompt — signal EOF to ReadLine
@@ -147,8 +152,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyEsc:
 			if !m.inputEnabled {
-				// ESC during task: send interrupt (same as Ctrl+C during task)
-				// Handled by signal handler, nothing to do here
+				// Task running — send interrupt to cancel agent processing
+				select {
+				case m.interruptChan <- struct{}{}:
+				default:
+				}
 			}
 			return m, nil
 
@@ -499,8 +507,9 @@ type BubbleTeaUI struct {
 	historyFile  string
 
 	// ReadLine synchronization — these channels are in the appModel
-	inputChan chan string
-	eofChan   chan struct{}
+	inputChan     chan string
+	eofChan       chan struct{}
+	interruptChan chan struct{}
 }
 
 // TUIRunner is an optional interface satisfied by BubbleTeaUI.
@@ -534,11 +543,12 @@ func NewBubbleTeaUI(historyFile string) (UI, error) {
 	}
 
 	ui := &BubbleTeaUI{
-		theme:       theme,
-		historyFile: historyFile,
-		inputChan:   model.inputChan,
-		eofChan:     model.eofChan,
-		model:       &model,
+		theme:         theme,
+		historyFile:   historyFile,
+		inputChan:     model.inputChan,
+		eofChan:       model.eofChan,
+		interruptChan: model.interruptChan,
+		model:         &model,
 	}
 
 	return ui, nil
@@ -574,6 +584,10 @@ func (ui *BubbleTeaUI) RunTUI(ctx context.Context, appFn func(context.Context) e
 // ──────────────────────────────────────────────────────────────────────────────
 // ui.UI interface implementation
 // ──────────────────────────────────────────────────────────────────────────────
+
+func (ui *BubbleTeaUI) InterruptChan() <-chan struct{} {
+	return ui.interruptChan
+}
 
 func (ui *BubbleTeaUI) Clear() {
 	if ui.program != nil {

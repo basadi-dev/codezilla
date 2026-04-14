@@ -1073,6 +1073,29 @@ func (app *App) Run(ctx context.Context, rootCancel context.CancelFunc) error {
 	// Setup task-aware signal handler for graceful interruption
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Intercept UI-level interrupts (e.g. BubbleTea intercepting ESC/Ctrl+C in raw mode)
+	if intUI, ok := app.ui.(interface{ InterruptChan() <-chan struct{} }); ok {
+		go func() {
+			for range intUI.InterruptChan() {
+				app.cancelMu.Lock()
+				if app.taskCancel != nil {
+					// We are in the middle of a task -> Cancel it!
+					app.taskCancel()
+					app.taskCancel = nil
+					app.cancelMu.Unlock()
+					// Stop the live status ticker before showing the warning
+					if stopper, ok := app.ui.(ui.LiveStatusStopper); ok {
+						stopper.StopLiveStatus()
+					}
+					app.ui.Warning("\n⚠️  Task Cancelled via UI")
+				} else {
+					app.cancelMu.Unlock()
+				}
+			}
+		}()
+	}
+
 	go func() {
 		for range sigChan {
 			app.cancelMu.Lock()
