@@ -160,6 +160,7 @@ func (ui *BaseUI) ShowThinking() {
 	}
 
 	ui.spinnerStop = make(chan bool)
+	stopChan := ui.spinnerStop
 	ui.spinnerMutex.Unlock()
 
 	go func() {
@@ -167,7 +168,7 @@ func (ui *BaseUI) ShowThinking() {
 		i := 0
 		for {
 			select {
-			case <-ui.spinnerStop:
+			case <-stopChan:
 				// Clear spinner line
 				ui.Print("\r%s\r", strings.Repeat(" ", 20))
 				return

@@ -169,6 +169,7 @@ func (ui *FancyUI) ShowThinking() {
 	ui.spinnerStop = make(chan bool, 1) // Buffered channel
 	ui.spinnerDone = make(chan bool)
 	doneChan := ui.spinnerDone
+	stopChan := ui.spinnerStop
 	ui.spinnerMutex.Unlock()
 
 	go func() {
@@ -215,7 +216,7 @@ func (ui *FancyUI) ShowThinking() {
 
 		for {
 			select {
-			case <-ui.spinnerStop:
+			case <-stopChan:
 				ui.Print("\r\033[K")
 				ui.writer.Flush()
 				return
