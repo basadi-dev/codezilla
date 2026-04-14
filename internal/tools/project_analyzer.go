@@ -1,7 +1,10 @@
 package tools
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -625,43 +628,47 @@ func NewErrorHandler(maxRetries int, retryDelay time.Duration, fallbackAnalyzer 
 	}
 }
 
-// HandleAnalysisError handles errors during file analysis with retry logic
+// HandleAnalysisError handles errors during file analysis with retry logic.
+// IMPORTANT: the first attempt is made immediately with NO delay. Backoff
+// sleep only applies on genuine failures between retry attempts.
 func (h *ErrorHandler) HandleAnalysisError(ctx context.Context, filePath string, content string, userQuery string, analyzer FileAnalyzer, err error) (*FileAnalysis, error) {
 	// Check circuit breaker
 	if !h.circuitBreaker.Allow() {
-		// Use fallback analyzer immediately
 		return h.fallbackAnalyzer.AnalyzeFile(ctx, filePath, content, userQuery)
 	}
 
-	// Retry logic
+	// ── First attempt: call immediately, no delay ────────────────────────────
+	analysisCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	result, firstErr := analyzer.AnalyzeFile(analysisCtx, filePath, content, userQuery)
+	cancel()
+	if firstErr == nil {
+		h.circuitBreaker.Success()
+		return result, nil
+	}
+
+	// ── Retries with backoff — only reached on genuine failure ───────────────
 	for attempt := 1; attempt <= h.maxRetries; attempt++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(h.retryDelay * time.Duration(attempt)):
-			// Exponential backoff
+			// exponential backoff between retries
 		}
 
-		// Create timeout context (45 seconds for V2)
-		analysisCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		defer cancel()
-
+		analysisCtx, cancel = context.WithTimeout(ctx, 45*time.Second)
 		result, retryErr := analyzer.AnalyzeFile(analysisCtx, filePath, content, userQuery)
+		cancel()
 		if retryErr == nil {
 			h.circuitBreaker.Success()
 			return result, nil
 		}
 
-		// Log retry attempt
 		if logger, ok := analyzer.(*LLMFileAnalyzer); ok && logger.logger != nil {
 			logger.logger.Warn("Retry %d/%d failed for %s: %v", attempt, h.maxRetries, filePath, retryErr)
 		}
 	}
 
-	// All retries failed
 	h.circuitBreaker.Failure()
-
-	// Use fallback analyzer
 	return h.fallbackAnalyzer.AnalyzeFile(ctx, filePath, content, userQuery)
 }
 
@@ -801,9 +808,11 @@ type CategoryMetrics struct {
 // ProjectScanAnalyzer is an enhanced version with all improvements
 type ProjectScanAnalyzer struct {
 	*EnhancedProjectScanAnalyzer
-	errorHandler     *ErrorHandler
-	progressReporter SimpleProgressReporter
-	analysisMetrics  *AnalysisMetrics
+	errorHandler       *ErrorHandler
+	progressReporter   SimpleProgressReporter
+	analysisMetrics    *AnalysisMetrics
+	toolExecutionCache sync.Map // map[string]*EnhancedProjectScanResult
+
 	// printFunc is called for all progress output. Override via SetPrintFunc to
 	// coordinate with terminal UI (e.g. hide/show spinner around each line).
 	printFunc     func(format string, args ...interface{})
@@ -895,15 +904,207 @@ func (a *ProjectScanAnalyzer) ParameterSchema() JSONSchema {
 	// Update concurrency description for sequential processing
 	baseSchema.Properties["concurrency"] = JSONSchema{
 		Type:        "integer",
-		Description: "Number of files to analyze concurrently (processes sequentially, so this is ignored)",
-		Default:     1,
+		Description: "Number of files to analyze concurrently (default: 5)",
+		Default:     5,
+	}
+
+	baseSchema.Properties["maxAnalysisFiles"] = JSONSchema{
+		Type:        "integer",
+		Description: "Maximum number of files to send to LLM analysis after local pre-filtering (default: 25). Lower values are faster; raise for broader coverage on large repos.",
+		Default:     25,
 	}
 
 	return baseSchema
 }
 
+// getCacheKey generates a hash for tool parameters
+func (a *ProjectScanAnalyzer) getCacheKey(params map[string]interface{}) string {
+	b, _ := json.Marshal(params)
+	hash := sha256.Sum256(b)
+	return hex.EncodeToString(hash[:])
+}
+
+// scoreAndRankFiles replaces the old binary pre-filter with a two-pass ranked scorer.
+//
+// Pass 1 — path scoring (zero I/O, runs in microseconds):
+//
+//	Every component of the file path (dir names + basename without extension) is
+//	scored against the query tokens. Weights:
+//	  +10  exact base-name match  (e.g. query token "router" matches "router.go")
+//	  +3   directory-component match
+//	  +1   substring anywhere in the path
+//
+// Pass 2 — streaming content scoring (I/O only for files that scored 0 in pass 1):
+//
+//	Reads lines via bufio.Scanner. Stops after maxContentHits token hits to avoid
+//	reading huge files entirely. Binary files are skipped entirely (null byte in
+//	first 512 bytes). Each content token hit adds +1 to the score.
+//
+// Files scoring 0 across both passes are dropped.
+// The result is sorted descending by score, so the maxAnalysisFiles cap (Fix 3)
+// always passes the most-relevant files to the LLM, not just the first N alphabetically.
+func (a *ProjectScanAnalyzer) scoreAndRankFiles(files []string, userQuery string) []string {
+	queryTokens := extractKeywords(userQuery)
+	if len(queryTokens) == 0 {
+		// No extractable tokens — can't score; pass everything through unchanged.
+		return files
+	}
+
+	const maxContentHits = 3 // stop scanning content after this many hits per file
+
+	type scored struct {
+		path  string
+		score int
+	}
+
+	results := make([]scored, 0, len(files))
+
+	for _, filePath := range files {
+		score := 0
+
+		// ── Pass 1: path scoring (zero I/O) ────────────────────────────────
+		base := strings.ToLower(strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)))
+		pathLower := strings.ToLower(filePath)
+
+		for _, token := range queryTokens {
+			// Exact basename match is the strongest signal
+			if base == token {
+				score += 10
+				continue
+			}
+			// Token appears in basename
+			if strings.Contains(base, token) {
+				score += 5
+				continue
+			}
+			// Token appears somewhere in the directory path
+			if strings.Contains(pathLower, token) {
+				score += 3
+			}
+		}
+
+		// ── Pass 2: streaming content scoring (only for zero-score files) ───────
+		if score == 0 {
+			f, err := os.Open(filePath)
+			if err != nil {
+				// Can't read: include with score 0 so the LLM can attempt it
+				results = append(results, scored{filePath, 0})
+				continue
+			}
+
+			// Check for binary file: read first 512 bytes
+			header := make([]byte, 512)
+			n, _ := f.Read(header)
+			if isBinaryContent(header[:n]) {
+				f.Close()
+				continue // skip binary files
+			}
+
+			// Seek back to start and stream lines
+			_, _ = f.Seek(0, 0)
+			scanner := bufio.NewScanner(f)
+			hits := 0
+			for scanner.Scan() && hits < maxContentHits {
+				lineLower := strings.ToLower(scanner.Text())
+				for _, token := range queryTokens {
+					if strings.Contains(lineLower, token) {
+						score++
+						hits++
+						break // one token match per line is enough
+					}
+				}
+			}
+			f.Close()
+		}
+
+		if score > 0 {
+			results = append(results, scored{filePath, score})
+		}
+	}
+
+	if len(results) == 0 {
+		return nil
+	}
+
+	// Sort descending by score so the hard cap picks the best files
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].score > results[j].score
+	})
+
+	paths := make([]string, len(results))
+	for i, r := range results {
+		paths[i] = r.path
+	}
+
+	dropped := len(files) - len(paths)
+	if dropped > 0 {
+		a.printFunc("🎯 Ranked pre-filter: kept %d/%d files (dropped %d zero-score)\n", len(paths), len(files), dropped)
+	}
+	return paths
+}
+
+// isBinaryContent returns true if the byte slice contains a null byte,
+// which is a reliable heuristic for binary (non-text) files.
+func isBinaryContent(b []byte) bool {
+	for _, c := range b {
+		if c == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func extractKeywords(query string) []string {
+	// Generic English stopwords + instruction verbs that carry no content signal.
+	// NOTE: "code", "project", "file" are intentionally NOT in this list —
+	// they are meaningful domain tokens in a coding assistant context.
+	stopwords := map[string]bool{
+		// Articles / conjunctions / prepositions
+		"a": true, "an": true, "the": true, "and": true, "or": true, "but": true,
+		"in": true, "on": true, "at": true, "to": true, "from": true, "with": true,
+		"of": true, "by": true, "as": true, "into": true, "via": true,
+		// Auxiliary verbs
+		"is": true, "are": true, "was": true, "were": true, "be": true, "been": true,
+		"do": true, "does": true, "did": true, "have": true, "has": true, "had": true,
+		"can": true, "could": true, "will": true, "would": true, "should": true, "may": true,
+		// Question words
+		"how": true, "what": true, "where": true, "when": true, "why": true, "who": true,
+		// Instruction verbs — tell the assistant what to do, not what to find
+		"show": true, "find": true, "search": true, "look": true, "get": true,
+		"give": true, "tell": true, "explain": true, "list": true, "describe": true,
+		"print": true, "display": true, "output": true, "return": true,
+		// Filler pronouns / determiners
+		"this": true, "that": true, "these": true, "those": true, "all": true,
+		"any": true, "some": true, "each": true, "every": true, "which": true,
+		"there": true, "here": true, "then": true, "just": true, "also": true,
+		"not": true, "its": true, "their": true,
+	}
+
+	query = strings.ToLower(query)
+	for _, p := range []string{",", ".", "!", "?", ";", ":", `"`, "'", "(", ")", "[", "]", "{", "}"} {
+		query = strings.ReplaceAll(query, p, " ")
+	}
+
+	words := strings.Fields(query)
+	var keywords []string
+	seen := make(map[string]bool)
+	for _, w := range words {
+		if !stopwords[w] && len(w) > 2 && !seen[w] {
+			seen[w] = true
+			keywords = append(keywords, w)
+		}
+	}
+	return keywords
+}
+
 // Execute performs the enhanced file-by-file analysis
 func (a *ProjectScanAnalyzer) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+	cacheKey := a.getCacheKey(params)
+	if cached, ok := a.toolExecutionCache.Load(cacheKey); ok {
+		a.printFunc("🎯 Using cached project scan results for identical parameters\n")
+		return cached, nil
+	}
+
 	a.analysisMetrics.overallStartTime = time.Now()
 	defer func() {
 		a.analysisMetrics.overallEndTime = time.Now()
@@ -962,6 +1163,7 @@ func (a *ProjectScanAnalyzer) Execute(ctx context.Context, params map[string]int
 	maxFileSize := getIntParam(params, "maxFileSize", 1024*1024) // 1MB default
 	relevanceThreshold := getFloatParam(params, "relevanceThreshold", 0.3)
 	timeout := time.Duration(getIntParam(params, "analysisTimeout", 45)) * time.Second
+	concurrency := getIntParam(params, "concurrency", 5)
 
 	// Get exclude patterns
 	excludePatterns := getDefaultExcludePatterns()
@@ -997,6 +1199,18 @@ func (a *ProjectScanAnalyzer) Execute(ctx context.Context, params map[string]int
 			Message:  "failed to scan directory",
 			Err:      err,
 		}
+	}
+
+	// RANKED PRE-FILTER: score files by path + content relevance, drop zero-score.
+	// Returns files sorted by relevance descending so the cap below picks the best.
+	files = a.scoreAndRankFiles(files, userQuery)
+
+	// HARD CAP: limit LLM queue to prevent runaway scan times on large repos.
+	// At 5 workers and ~4s/file, 25 files = ~20s wall clock.
+	maxFiles := getIntParam(params, "maxAnalysisFiles", 25)
+	if maxFiles > 0 && len(files) > maxFiles {
+		a.printFunc("🎯 Capping LLM analysis to top %d files (from %d candidates after pre-filter)\n", maxFiles, len(files))
+		files = files[:maxFiles]
 	}
 
 	if len(files) == 0 {
@@ -1042,8 +1256,8 @@ func (a *ProjectScanAnalyzer) Execute(ctx context.Context, params map[string]int
 	// Start progress reporting
 	a.progressReporter.StartAnalysis(len(files))
 
-	// Analyze files sequentially
-	err = a.analyzeFilesSequential(ctx, files, fileCategories, userQuery, relevanceThreshold, timeout, result)
+	// Analyze files concurrently
+	err = a.analyzeFilesConcurrently(ctx, files, fileCategories, userQuery, relevanceThreshold, timeout, concurrency, result)
 	if err != nil {
 		return nil, err
 	}
@@ -1057,63 +1271,94 @@ func (a *ProjectScanAnalyzer) Execute(ctx context.Context, params map[string]int
 	failed := result.SkippedFiles
 	a.progressReporter.AnalysisComplete(duration, successful, failed)
 
+	// Save to cache
+	a.toolExecutionCache.Store(cacheKey, result)
+
 	return result, nil
 }
 
-// analyzeFilesSequential performs sequential analysis of files
-func (a *ProjectScanAnalyzer) analyzeFilesSequential(ctx context.Context, files []string,
+// analyzeFilesConcurrently performs concurrent analysis of files
+func (a *ProjectScanAnalyzer) analyzeFilesConcurrently(ctx context.Context, files []string,
 	fileCategories map[string]FileCategory, userQuery string,
-	relevanceThreshold float64, timeout time.Duration, result *EnhancedProjectScanResult) error {
+	relevanceThreshold float64, timeout time.Duration, concurrency int, result *EnhancedProjectScanResult) error {
 
+	if concurrency < 1 {
+		concurrency = 1
+	}
+
+	var mu sync.Mutex
+	sem := make(chan struct{}, concurrency)
+	errCh := make(chan error, 1)
+
+	var wg sync.WaitGroup
 	for idx, filePath := range files {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
+		case err := <-errCh:
+			return err
+		case sem <- struct{}{}:
 		}
 
-		// Update progress
-		a.progressReporter.UpdateFile(filepath.Base(filePath), idx+1, len(files))
+		wg.Add(1)
+		go func(i int, path string) {
+			defer wg.Done()
+			defer func() { <-sem }()
 
-		// Create timeout context for this file (45 seconds)
-		fileCtx, cancel := context.WithTimeout(ctx, timeout)
+			// Update progress
+			a.progressReporter.UpdateFile(filepath.Base(path), i+1, len(files))
 
-		// Analyze the file
-		fileResult, timelineEvent := a.analyzeFileWithMetrics(fileCtx, filePath, fileCategories[filePath], userQuery)
+			// Create timeout context for this file
+			fileCtx, cancel := context.WithTimeout(ctx, timeout)
 
-		cancel() // Clean up the context
+			// Analyze the file
+			fileResult, timelineEvent := a.analyzeFileWithMetrics(fileCtx, path, fileCategories[path], userQuery)
 
-		// Record timeline event
-		result.Timeline = append(result.Timeline, timelineEvent)
+			cancel() // Clean up the context
 
-		// Update category stats
-		category := fileCategories[filePath]
-		stats := result.CategoryStats[category]
-		stats.FileCount++
+			mu.Lock()
+			defer mu.Unlock()
 
-		if fileResult.Error == "" {
-			result.AnalyzedFiles++
+			// Record timeline event
+			result.Timeline = append(result.Timeline, timelineEvent)
 
-			// Only include results above threshold
-			if fileResult.Analysis.Relevance >= relevanceThreshold {
-				result.FileResults = append(result.FileResults, fileResult)
-				stats.RelevantCount++
+			// Update category stats
+			category := fileCategories[path]
+			stats := result.CategoryStats[category]
+			stats.FileCount++
+
+			if fileResult.Error == "" {
+				result.AnalyzedFiles++
+
+				// Only include results above threshold
+				if fileResult.Analysis.Relevance >= relevanceThreshold {
+					result.FileResults = append(result.FileResults, fileResult)
+					stats.RelevantCount++
+				}
+
+				// Update stats
+				stats.AvgRelevance = (stats.AvgRelevance*float64(stats.FileCount-1) + fileResult.Analysis.Relevance) / float64(stats.FileCount)
+				stats.TotalIssues += len(fileResult.Analysis.Issues)
+				stats.ProcessingTimeMs += timelineEvent.DurationMs
+
+				// Report completion
+				a.progressReporter.FileCompleted(filepath.Base(path), true, fileResult.Analysis.Relevance)
+			} else {
+				result.SkippedFiles++
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %s", path, fileResult.Error))
+
+				// Report failure
+				a.progressReporter.FileCompleted(filepath.Base(path), false, 0)
 			}
+		}(idx, filePath)
+	}
 
-			// Update stats
-			stats.AvgRelevance = (stats.AvgRelevance*float64(stats.FileCount-1) + fileResult.Analysis.Relevance) / float64(stats.FileCount)
-			stats.TotalIssues += len(fileResult.Analysis.Issues)
-			stats.ProcessingTimeMs += timelineEvent.DurationMs
+	wg.Wait()
 
-			// Report completion
-			a.progressReporter.FileCompleted(filepath.Base(filePath), true, fileResult.Analysis.Relevance)
-		} else {
-			result.SkippedFiles++
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: %s", filePath, fileResult.Error))
-
-			// Report failure
-			a.progressReporter.FileCompleted(filepath.Base(filePath), false, 0)
-		}
+	select {
+	case err := <-errCh:
+		return err
+	default:
 	}
 
 	return nil

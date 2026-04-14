@@ -481,6 +481,8 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			}
 		case "projectScanAnalyzer":
 			displayName = "🔍 Analyze Project"
+		case "repoMapGenerator":
+			displayName = "🗺️ Repo Map"
 		}
 
 		if displayName == "" {
@@ -640,6 +642,8 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 				display = "📋 Manage Plan"
 			case "projectScanAnalyzer":
 				display = "🔍 Analyze Project"
+			case "repoMapGenerator":
+				display = "🗺️ Repo Map"
 			}
 			ui.UpdateThinkingStatus(fmt.Sprintf("preparing %s", display))
 			ui.ShowThinking()
@@ -2102,6 +2106,7 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	// Unified File operation tool
 	registry.RegisterTool(tools.NewFileManageTool())
 	registry.RegisterTool(tools.NewGrepSearchTool())
+	registry.RegisterTool(tools.NewRepoMapGeneratorTool())
 
 	// Create analyzer factory and register analyzer tool
 	analyzerModel := cfg.LLM.Models.Fast
@@ -2129,6 +2134,7 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("grepSearch", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("projectScanAnalyzer", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("repoMapGenerator", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("execute", tools.NeverAsk)
 
 	registry.RegisterTool(tools.NewExecuteTool(30))
