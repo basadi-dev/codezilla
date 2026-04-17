@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"codezilla/internal/config"
@@ -21,6 +22,7 @@ func main() {
 		provider    = flag.String("provider", "", "Override LLM provider (ollama, openai, anthropic, gemini)")
 		model       = flag.String("model", "", "Override default model")
 		sessionID   = flag.String("session", "", "Session ID to resume")
+		resumeFlag  = flag.Bool("resume", false, "Resume the most recent session")
 		ollamaURL   = flag.String("ollama-url", "", "Override Ollama API URL")
 		temperature = flag.Float64("temperature", -1, "Override temperature (0.0-1.0)")
 		maxTokens   = flag.Int("max-tokens", 0, "Override max tokens")
@@ -34,6 +36,9 @@ func main() {
 	if len(args) > 0 {
 		if args[0] == "resume" && len(args) > 1 {
 			*sessionID = args[1]
+		} else if args[0] == "resume" && len(args) == 1 {
+			// "codezilla resume" with no ID → pick latest
+			*resumeFlag = true
 		} else if strings.HasPrefix(args[0], "codezilla://session/") {
 			*sessionID = strings.TrimPrefix(args[0], "codezilla://session/")
 		}
@@ -72,6 +77,16 @@ func main() {
 	}
 	if *sessionID != "" {
 		cfg.ResumeSessionID = *sessionID
+	} else if *resumeFlag {
+		// Find the most recently modified .jsonl session file
+		if latest, err := latestSessionFile(cfg.SessionEventsDir); err == nil && latest != "" {
+			cfg.ResumeSessionID = latest
+		} else if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not find latest session: %v\n", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "No sessions found to resume.")
+			os.Exit(1)
+		}
 	}
 	if *ollamaURL != "" {
 		cfg.LLM.Ollama.BaseURL = *ollamaURL
@@ -138,6 +153,35 @@ func getDefaultConfigPath() string {
 	return "config.yaml"
 }
 
+// latestSessionFile returns the basename of the most recently modified .jsonl
+// file in dir, or an empty string if none exist.
+func latestSessionFile(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("reading sessions dir %s: %w", dir, err)
+	}
+	type entry struct {
+		name    string
+		modTime int64
+	}
+	var files []entry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			files = append(files, entry{name: e.Name(), modTime: info.ModTime().UnixNano()})
+		}
+	}
+	if len(files) == 0 {
+		return "", nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime > files[j].modTime
+	})
+	return files[0].name, nil
+}
+
 func printHelp() {
 	fmt.Print(`Codezilla - Modular AI-powered coding assistant
 
@@ -152,6 +196,7 @@ Options:
   -temperature float   Override temperature (0.0-1.0)
   -max-tokens int      Override max tokens
   -session string      Session ID to resume
+  -resume              Resume the most recent session (same as 'resume' with no ID)
   -no-colors           Disable colored output
   -version             Show version information
   -help                Show this help message
@@ -160,23 +205,13 @@ Examples:
   # Run with default fancy UI
   codezilla
 
-  # Run without colors
-  codezilla -no-colors
+  # Resume the last session
+  codezilla -resume
+  codezilla resume
 
-  # Use custom config
-  codezilla -config /path/to/config.yaml
-
-  # Override model
-  codezilla -model "llama3:latest"
-
-  # Override provider
-  codezilla -provider openai -model "gpt-4o"
-
-  # Override Ollama URL
-  codezilla -ollama-url "http://192.168.1.100:11434"
-
-  # Override temperature
-  codezilla -temperature 0.8
+  # Resume a specific session
+  codezilla -session session_20260417_190927_dff5cc42.jsonl
+  codezilla resume session_20260417_190927_dff5cc42.jsonl
 
 The modular architecture allows easy switching between different UI implementations
 while keeping the core functionality unchanged.

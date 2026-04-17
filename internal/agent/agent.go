@@ -66,9 +66,10 @@ type Config struct {
 	OnContextSummarizing func()
 	// OnLLMStreamEnd is called immediately after a text/tool stream completes natively, before parsing.
 	OnLLMStreamEnd func()
-	// OnLLMUsage is called after each LLM call with the per-turn and cumulative session token usage.
+	// OnLLMUsage is called after each LLM call with the per-turn and cumulative session token usage,
+	// plus a per-model breakdown of tokens used in this turn (model name → usage with in/out split).
 	// Providers that don't return usage data will not trigger this callback.
-	OnLLMUsage func(turn TokenUsage, session TokenUsage)
+	OnLLMUsage func(turn TokenUsage, session TokenUsage, turnModels map[string]TokenUsage)
 
 	// Loop detection: stops the run loop if a tool is called with identical args consecutively.
 	// 0 = use defaults (window=10, max_repeat=3).

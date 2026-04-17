@@ -430,13 +430,13 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 			// Capture token usage from the completion response
 			if completion.Usage != nil {
-				o.tokens.Record(completion.Usage)
+				o.tokens.Record(o.effectiveModel(), completion.Usage)
 				o.logger.Info("LLM token usage",
 					"prompt", completion.Usage.PromptTokens,
 					"completion", completion.Usage.CompletionTokens,
 					"total", completion.Usage.TotalTokens)
 				if o.agent.config.OnLLMUsage != nil {
-					o.agent.config.OnLLMUsage(o.tokens.LastTurn(), o.tokens.SessionTotal())
+					o.agent.config.OnLLMUsage(o.tokens.LastTurn(), o.tokens.SessionTotal(), o.tokens.TurnModelBreakdown())
 				}
 			}
 
@@ -585,13 +585,13 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 			// Capture token usage from stream
 			if streamUsage != nil {
-				o.tokens.Record(streamUsage)
+				o.tokens.Record(o.effectiveModel(), streamUsage)
 				o.logger.Info("LLM token usage (stream)",
 					"prompt", streamUsage.PromptTokens,
 					"completion", streamUsage.CompletionTokens,
 					"total", streamUsage.TotalTokens)
 				if o.agent.config.OnLLMUsage != nil {
-					o.agent.config.OnLLMUsage(o.tokens.LastTurn(), o.tokens.SessionTotal())
+					o.agent.config.OnLLMUsage(o.tokens.LastTurn(), o.tokens.SessionTotal(), o.tokens.TurnModelBreakdown())
 				}
 			}
 

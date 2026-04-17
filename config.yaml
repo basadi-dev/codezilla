@@ -19,7 +19,7 @@ llm:
 
     # Heavy model — the most powerful model for complex multi-step tasks (refactors, migrations, architecture).
     # The auto-router sends clearly complex inputs here. Falls back to default if unset.
-    heavy: "glm-5.1"
+    heavy: "qwen3.5"
 
   # Ollama-specific settings
   ollama:

@@ -124,32 +124,20 @@ func (t TodoCreateTool) Execute(ctx context.Context, params map[string]interface
 			if strItem, ok := item.(string); ok {
 				contentStr = strItem
 			} else if itemMap, ok := item.(map[string]interface{}); ok {
-				if c, ok := itemMap["content"].(string); ok && c != "" {
-					contentStr = c
-				}
-				if contentStr == "Untitled Task" {
-					if c, ok := itemMap["name"].(string); ok && c != "" {
+				// Try known field names in priority order
+				for _, key := range []string{"content", "name", "title", "item", "task", "description", "text", "label"} {
+					if c, ok := itemMap[key].(string); ok && c != "" {
 						contentStr = c
+						break
 					}
 				}
+				// Last-resort: pick the first non-empty string value in the map
 				if contentStr == "Untitled Task" {
-					if c, ok := itemMap["title"].(string); ok && c != "" {
-						contentStr = c
-					}
-				}
-				if contentStr == "Untitled Task" {
-					if c, ok := itemMap["item"].(string); ok && c != "" {
-						contentStr = c
-					}
-				}
-				if contentStr == "Untitled Task" {
-					if c, ok := itemMap["task"].(string); ok && c != "" {
-						contentStr = c
-					}
-				}
-				if contentStr == "Untitled Task" {
-					if c, ok := itemMap["description"].(string); ok && c != "" {
-						contentStr = c
+					for _, v := range itemMap {
+						if s, ok := v.(string); ok && s != "" {
+							contentStr = s
+							break
+						}
 					}
 				}
 
