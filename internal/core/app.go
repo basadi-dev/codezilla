@@ -1355,12 +1355,12 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 
 	app.ui.HideThinking()
 	app.ui.Info("🔀 Dispatching %d parallel agents...\n", len(tasks))
-	for _, t := range tasks {
+	for i, t := range tasks {
 		role := "Generic"
 		if r, ok := t.Inputs["role_hint"].(string); ok && r != "" {
 			role = r
 		}
-		app.ui.Info("   • [%s] %s", role, t.Description)
+		app.ui.Info("   %d. [%s] %s", i+1, role, t.Description)
 	}
 	app.ui.Print("\n")
 
@@ -1419,17 +1419,37 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 	}
 
 	// ── Step 4: Aggregate results and feed back into main context ──
+	// Build lookup from taskID → numbered description for consistent display
+	taskIndex := make(map[string]string, len(tasks))
+	for i, t := range tasks {
+		taskIndex[t.ID] = fmt.Sprintf("Task %d", i+1)
+	}
+	taskDesc := make(map[string]string, len(tasks))
+	for _, t := range tasks {
+		desc := t.Description
+		if len(desc) > 80 {
+			desc = desc[:77] + "..."
+		}
+		taskDesc[t.ID] = desc
+	}
+
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("## Parallel Execution Results (%d agents)\n\n", len(results)))
 
 	successCount := 0
 	for _, r := range results {
+		label := taskIndex[r.TaskID]
+		if label == "" {
+			label = r.TaskID
+		}
+		desc := taskDesc[r.TaskID]
+
 		if r.Error != nil {
-			summary.WriteString(fmt.Sprintf("### ❌ %s (failed after %s)\n", r.TaskID, r.Duration.Round(time.Millisecond)))
+			summary.WriteString(fmt.Sprintf("### ❌ %s — %s (failed after %s)\n", label, desc, r.Duration.Round(time.Millisecond)))
 			summary.WriteString(fmt.Sprintf("Error: %v\n\n", r.Error))
 		} else {
 			successCount++
-			summary.WriteString(fmt.Sprintf("### ✅ %s (%s)\n", r.TaskID, r.Duration.Round(time.Millisecond)))
+			summary.WriteString(fmt.Sprintf("### ✅ %s — %s (%s)\n", label, desc, r.Duration.Round(time.Millisecond)))
 			output := r.Output
 			if len(output) > 2000 {
 				output = output[:2000] + "\n\n[... truncated ...]"
