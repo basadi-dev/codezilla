@@ -469,7 +469,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		case "fileEdit":
 			displayName = "✏️ Edit File"
 		case "fileManage":
-			displayName = "🏗️ Manage Files"
+			displayName = "🏗️  Manage Files"
 		case "todoCreate":
 			displayName = "📋 Plan"
 		case "todoManage":
@@ -641,7 +641,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			case "fileEdit":
 				display = "✏️ Edit File"
 			case "fileManage":
-				display = "🏗️ Manage Files"
+				display = "🏗️  Manage Files"
 			case "todoCreate":
 				display = "📋 Plan"
 			case "todoManage":

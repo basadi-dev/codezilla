@@ -806,12 +806,11 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			o.logger.Error("LLM Error Recovery",
 				"iter", iter,
 				"error", currentLLMError)
+
 			if errors.Is(currentLLMError, llm.ErrContextLengthExceeded) {
-				finalResponse = "I'm sorry, the prompt is too long for this model's context window. Try `/clear` to reset the conversation, or switch to a model with a larger context window."
-			} else {
-				finalResponse = "I'm sorry, an error occurred communicating with the model: " + currentLLMError.Error()
+				return "", fmt.Errorf("the prompt is too long for this model's context window. Try `/clear` to reset the conversation, or switch to a model with a larger context window: %w", currentLLMError)
 			}
-			state = StateComplete
+			return "", currentLLMError
 
 		case StateComplete:
 			if finalResponse != "" {

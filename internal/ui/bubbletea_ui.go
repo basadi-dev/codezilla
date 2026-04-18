@@ -378,6 +378,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					_ = err
 				}
 				m.copyNoticeAt = time.Now()
+				m.clearSelection() // Clear selection so UI state doesn't stay stuck
 				return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
 					return clearCopyNoticeMsg{}
 				})
