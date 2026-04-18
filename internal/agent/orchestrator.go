@@ -171,6 +171,9 @@ func (o *AgentOrchestrator) preFlightContextTrim(ctx context.Context, toolCount 
 		}
 	}
 
+	// Update the Agent's context limit to dynamically scale UI feedback
+	o.agent.context.SetMaxTokens(budget)
+
 	// Reserve space for tool schemas + response
 	schemaOverhead := EstimateToolSchemaTokens(toolCount)
 	responseReserve := 1024 // leave room for the LLM to generate a response
@@ -369,6 +372,11 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			}
 			iter++
 			// blocking complete
+			llmTools := o.agent.buildLLMTools()
+
+			// Proactively trim context before sending to LLM
+			o.preFlightContextTrim(ctx, len(llmTools))
+
 			if o.agent.config.OnLLMCall != nil {
 				msgsForCount := o.agent.buildChatMessages()
 				totalChars := 0
@@ -379,10 +387,6 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				}
 				o.agent.config.OnLLMCall(iter, len(msgsForCount), totalChars/4)
 			}
-			llmTools := o.agent.buildLLMTools()
-
-			// Proactively trim context before sending to LLM
-			o.preFlightContextTrim(ctx, len(llmTools))
 
 			var toolNames []string
 			for _, t := range llmTools {

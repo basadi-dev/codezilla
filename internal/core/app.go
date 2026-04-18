@@ -720,7 +720,10 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 
 		// Update the UI status bar with live token counts
 		if session.TotalTokens > 0 {
-			tokenInfo := fmt.Sprintf("%s · session: %s", agent.FormatModelBreakdown(turnModels), agent.CompactNumber(session.TotalTokens))
+			tokenInfo := resultApp.buildContextTokenStr(fmt.Sprintf("%s · session: %s", agent.FormatModelBreakdown(turnModels), agent.CompactNumber(session.TotalTokens)))
+			ui.UpdateTokenUsage(tokenInfo)
+		} else {
+			tokenInfo := resultApp.buildContextTokenStr("")
 			ui.UpdateTokenUsage(tokenInfo)
 		}
 	}
@@ -729,6 +732,30 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 		ui.UpdateModel(model)
 		ui.UpdateThinkingStatus(fmt.Sprintf("routed → %s (%s)", model, reason))
 	}
+	
+	originalOnLLMCall := agentConfig.OnLLMCall
+	agentConfig.OnLLMCall = func(callNum, msgCount, approxToks int) {
+		if originalOnLLMCall != nil {
+			originalOnLLMCall(callNum, msgCount, approxToks)
+		}
+		
+		// Actively refresh the context % string in the UI during mid-stream tool execution jumps.
+		// Since preFlightContextTrim runs immediately before this callback, this mathematically 
+		// guarantees the status bar accurately reflects the trimmed budget and latest token total 
+		// while the spinner spins for the next LLM call.
+		var tokenInfo string
+		if resultApp.sessionUsage.TotalTokens > 0 {
+			baseInfo := fmt.Sprintf("session: %s", agent.CompactNumber(resultApp.sessionUsage.TotalTokens))
+			if len(resultApp.turnModels) > 0 {
+				baseInfo = fmt.Sprintf("%s · %s", agent.FormatModelBreakdown(resultApp.turnModels), baseInfo)
+			}
+			tokenInfo = resultApp.buildContextTokenStr(baseInfo)
+		} else {
+			tokenInfo = resultApp.buildContextTokenStr("")
+		}
+		ui.UpdateTokenUsage(tokenInfo)
+	}
+
 	// Suppress unused variable warnings for the pre-wiring aliases
 	_ = appTurnUsage
 	_ = appSessionUsage
@@ -1208,6 +1235,25 @@ func (app *App) Run(ctx context.Context, rootCancel context.CancelFunc) error {
 	}
 }
 
+func (app *App) buildContextTokenStr(baseInfo string) string {
+	if app.agent == nil {
+		return baseInfo
+	}
+	_, curCtx, maxCtx := app.agent.ContextStats()
+	var ctxStr string
+	if maxCtx > 0 {
+		pct := (curCtx * 100) / maxCtx
+		ctxStr = fmt.Sprintf("ctx: %d%% (%s/%s)", pct, agent.CompactNumber(curCtx), agent.CompactNumber(maxCtx))
+	} else {
+		ctxStr = fmt.Sprintf("ctx: %s", agent.CompactNumber(curCtx))
+	}
+	
+	if baseInfo == "" {
+		return ctxStr
+	}
+	return ctxStr + " · " + baseInfo
+}
+
 // processInput processes user input with the AI using streaming.
 func (app *App) processInput(ctx context.Context, input string) error {
 	ctx, cancelTask := context.WithCancel(ctx)
@@ -1234,10 +1280,10 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		// Clear any previous status label from the last turn.
 		app.ui.UpdateThinkingStatus("")
 		if app.sessionUsage.TotalTokens > 0 {
-			tokenInfo := fmt.Sprintf("session: %s", agent.CompactNumber(app.sessionUsage.TotalTokens))
+			tokenInfo := app.buildContextTokenStr(fmt.Sprintf("session: %s", agent.CompactNumber(app.sessionUsage.TotalTokens)))
 			app.ui.UpdateTokenUsage(tokenInfo)
 		} else {
-			app.ui.UpdateTokenUsage("")
+			app.ui.UpdateTokenUsage(app.buildContextTokenStr(""))
 		}
 		app.ui.ShowThinking()
 
@@ -1471,6 +1517,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 				if app.sessionUsage.TotalTokens > app.lastTurnUsage.TotalTokens {
 					tokenInfo += fmt.Sprintf(" · session: %s", agent.CompactNumber(app.sessionUsage.TotalTokens))
 				}
+				tokenInfo = app.buildContextTokenStr(tokenInfo)
 				app.lastTurnUsage = agent.TokenUsage{} // Reset per-turn usage after display
 				app.turnModels = nil
 			} else {

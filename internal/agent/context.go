@@ -67,6 +67,12 @@ func NewContext(maxTokens int, log *logger.Logger) *Context {
 	}
 }
 
+func (c *Context) SetMaxTokens(maxTokens int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.MaxTokens = maxTokens
+}
+
 // Clone creates a deep copy of the context suitable for initializing a parallel 
 // agent without sharing mutable state.
 func (c *Context) Clone() *Context {

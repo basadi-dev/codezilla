@@ -38,6 +38,7 @@ type Agent interface {
 	SetMaxTokens(maxTokens int)
 	SetSessionRecorder(recorder *session.Recorder)
 	SetAutoRoute(enabled bool)
+	ContextStats() (msgCount int, currentTokens int, maxTokens int)
 	Clone() Agent
 }
 
@@ -272,6 +273,11 @@ func (a *agent) ClearContext() {
 	a.context.ClearContext()
 }
 
+func (a *agent) ContextStats() (int, int, int) {
+	msgCount, estimatedTokens := a.context.ContextStats()
+	return msgCount, estimatedTokens, a.context.MaxTokens
+}
+
 func (a *agent) ClearLastUserMessage() {
 	a.context.ClearLastUserMessage()
 }
@@ -330,6 +336,7 @@ func (a *agent) SetTemperature(temperature float64) {
 func (a *agent) SetMaxTokens(maxTokens int) {
 	a.logger.Info("Changing max tokens", "from", a.config.MaxTokens, "to", maxTokens)
 	a.config.MaxTokens = maxTokens
+	a.context.SetMaxTokens(maxTokens)
 }
 
 func (a *agent) SetSessionRecorder(recorder *session.Recorder) {

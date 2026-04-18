@@ -98,50 +98,54 @@ func GenerateDiff(contentA, contentB string, contextLines int) string {
 	styleLineNum := lipgloss.NewStyle()
 	styleHeaderLeft := lipgloss.NewStyle()
 	styleHeaderRight := lipgloss.NewStyle()
-	styleBorder := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 
 	if style.UseColors {
 		styleRed = styleRed.Foreground(lipgloss.Color("#FF5F87"))
 		styleGreen = styleGreen.Foreground(lipgloss.Color("#00D787"))
 		styleDim = styleDim.Foreground(lipgloss.Color("#626262"))
 		styleLineNum = styleLineNum.Foreground(lipgloss.Color("#626262"))
-		styleHeaderLeft = styleHeaderLeft.Background(lipgloss.Color("#FF5F87")).Foreground(lipgloss.Color("#000000"))
-		styleHeaderRight = styleHeaderRight.Background(lipgloss.Color("#00D787")).Foreground(lipgloss.Color("#000000"))
-		styleBorder = styleBorder.BorderForeground(lipgloss.Color("#626262"))
+		styleHeaderLeft = styleHeaderLeft.Foreground(lipgloss.Color("#FF5F87")).Bold(true)
+		styleHeaderRight = styleHeaderRight.Foreground(lipgloss.Color("#00D787")).Bold(true)
 	}
 
-	var result strings.Builder
-
-	// Header
-	headerLeft := styleHeaderLeft.Render(" - ") + " Removed"
-	headerRight := styleHeaderRight.Render(" + ") + " Added"
-
-	result.WriteString(fmt.Sprintf("%s   %s\n\n", headerLeft, headerRight))
-
-	var outputLines []string
-	wasShowing := false
-
+	// Calculate available width for text
 	width, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || width <= 0 {
 		width = 120 // fallback width
 	}
 
-	maxTextWidth := width - (lineNumWidth*2 + 10)
+	// Prefix width: lineNumA + " │ " + lineNumB + " │ " = lineNumWidth*2 + 6
+	prefixWidth := lineNumWidth*2 + 6
+	maxTextWidth := width - prefixWidth
 	if maxTextWidth < 20 {
 		maxTextWidth = 20
 	}
 
+	var result strings.Builder
+
+	// Header line aligned with content columns
+	// Format: "  lnA │ lnB │ text"
+	// Header: "  - │ + │"
+	headerLnA := styleHeaderLeft.Render(strings.Repeat("-", lineNumWidth))
+	headerLnB := styleHeaderRight.Render(strings.Repeat("+", lineNumWidth))
+	result.WriteString(fmt.Sprintf("%s │ %s │\n", headerLnA, headerLnB))
+
+	var outputLines []string
+	wasShowing := false
+
 	for i, dl := range allLines {
 		if !showMap[i] {
 			if wasShowing {
-				outputLines = append(outputLines, styleDim.Render(strings.Repeat("╌", lineNumWidth*2+5)))
+				// Separator line matching prefix width
+				sep := strings.Repeat("╌", prefixWidth)
+				outputLines = append(outputLines, styleDim.Render(sep))
 			}
 			wasShowing = false
 			continue
 		}
 		wasShowing = true
 
-		// Truncate to avoid breaking the surrounding lipgloss border
+		// Truncate long lines
 		text := truncateRight(dl.Text, maxTextWidth-1)
 
 		if dl.Type == diffmatchpatch.DiffEqual {
@@ -163,7 +167,7 @@ func GenerateDiff(contentA, contentB string, contextLines int) string {
 
 	result.WriteString(strings.Join(outputLines, "\n"))
 
-	return styleBorder.Render(result.String())
+	return result.String()
 }
 
 func splitLines(s string) []string {
