@@ -668,6 +668,16 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				continue
 			}
 
+			// Ensure all tool calls have a valid ID. Some providers (e.g. Ollama via any-llm-go)
+			// may natively emit tool calls without IDs depending on the model tier,
+			// causing "400 Bad Request: Not the same number of function calls and responses"
+			// if the subsequent ToolResult role messages appear orphaned.
+			for i := range toolsToExecute {
+				if toolsToExecute[i].ID == "" {
+					toolsToExecute[i].ID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
+				}
+			}
+
 			thinkContent := ""
 			if finalResponse != "" {
 				thinkContent = finalResponse

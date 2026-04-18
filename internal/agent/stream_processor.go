@@ -66,7 +66,10 @@ func (sp *StreamProcessor) ProcessChannel(
 						// Don't forward content to UI once tool calls have started;
 						// such content is usually LLM preamble noise.
 						if onTextToken != nil && !sentFirstTool {
-							onTextToken(delta.Content)
+							cleanToken := stripSpecialTokens(delta.Content)
+							if cleanToken != "" {
+								onTextToken(cleanToken)
+							}
 						}
 					} else if delta.Reasoning != nil && delta.Reasoning.Content != "" {
 						if !inReasoning {
@@ -79,7 +82,10 @@ func (sp *StreamProcessor) ProcessChannel(
 						reasoningChunks++
 						fullResponse += delta.Reasoning.Content
 						if onTextToken != nil {
-							onTextToken(delta.Reasoning.Content)
+							cleanReasoning := stripSpecialTokens(delta.Reasoning.Content)
+							if cleanReasoning != "" {
+								onTextToken(cleanReasoning)
+							}
 						}
 					} else if len(delta.ToolCalls) > 0 {
 						sentFirstTool = true

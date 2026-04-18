@@ -31,11 +31,11 @@ type XMLParams struct {
 // further processing.
 var specialTokenPatterns = []*regexp.Regexp{
 	// Chat template tokens (Llama, Qwen, Mistral variants)
-	regexp.MustCompile(`<\|im_start\|>[a-z]*\n?`),
-	regexp.MustCompile(`<\|im_end\|>\n?`),
+	regexp.MustCompile(`<\|?im_start\|?>[a-zA-Z]*\n?`),
+	regexp.MustCompile(`<\|?im_end\|?>\n?`),
 	regexp.MustCompile(`<\|message\|>`),
-	regexp.MustCompile(`<\|tool_call\|>`),
-	regexp.MustCompile(`<\|tool_call_end\|>`),
+	regexp.MustCompile(`<\|?tool_call\|?>`),
+	regexp.MustCompile(`<\|?tool_call_end\|?>`),
 	regexp.MustCompile(`<\|end_of_turn\|>`),
 	regexp.MustCompile(`<\|eot_id\|>`),
 	regexp.MustCompile(`<\|start_header_id\|>[a-z]*<\|end_header_id\|>\n?`),
@@ -49,13 +49,18 @@ var specialTokenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`to=functions\.[a-zA-Z0-9_]+\s*`),
 }
 
-// SanitiseSpecialTokens strips leaked model-internal formatting tokens from
-// text before it is shown to the user or processed further.
-func SanitiseSpecialTokens(text string) string {
+// stripSpecialTokens strips tokens but preserves leading/trailing whitespace (used for live streaming UI)
+func stripSpecialTokens(text string) string {
 	for _, pattern := range specialTokenPatterns {
 		text = pattern.ReplaceAllString(text, "")
 	}
-	return strings.TrimSpace(text)
+	return text
+}
+
+// SanitiseSpecialTokens strips leaked model-internal formatting tokens from
+// text before it is shown to the user or processed further.
+func SanitiseSpecialTokens(text string) string {
+	return strings.TrimSpace(stripSpecialTokens(text))
 }
 
 // looksLikeLeakedToolCall checks if text contains suspicious patterns that
