@@ -409,13 +409,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerLabel = msg.label
 		if msg.active {
 			// Do not reset taskStart here, so timer reflects total duration since user input
-			return m, m.spinner.Tick
+			cmds = append(cmds, m.spinner.Tick)
 		}
-		return m, nil
 
 	case setTokenUsageMsg:
 		m.tokenUsage = msg.usage
-		return m, nil
 
 	case enableInputMsg:
 		m.inputEnabled = true
@@ -427,14 +425,21 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case setModelMsg:
 		m.activeModel = msg.model
-		return m, nil
 
 	case spinner.TickMsg:
-		if m.spinnerActive {
-			var cmd tea.Cmd
-			m.spinner, cmd = m.spinner.Update(msg)
-			cmds = append(cmds, cmd)
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		// If the agent is busy (!m.inputEnabled), we keep the tick loop
+		// alive even if the spinner is visually hidden. This acts as a
+		// heartbeat to continuously update the elapsed timers in the status bar.
+		if m.spinnerActive || !m.inputEnabled {
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			} else {
+				cmds = append(cmds, m.spinner.Tick)
+			}
 		}
+		
 	case appQuitMsg:
 		// App finished (or error) — quit the tea program
 		return m, tea.Quit
