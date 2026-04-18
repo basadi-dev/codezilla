@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"codezilla/internal/agent"
+	"codezilla/internal/agent/multiagent"
 	"codezilla/internal/config"
 	"codezilla/internal/core/llm"
 	"codezilla/internal/db"
@@ -28,6 +29,7 @@ import (
 	"codezilla/internal/ui"
 	"codezilla/pkg/logger"
 
+	anyllm "github.com/mozilla-ai/any-llm-go"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -1254,6 +1256,198 @@ func (app *App) buildContextTokenStr(baseInfo string) string {
 	return ctxStr + " · " + baseInfo
 }
 
+// processParallelInput decomposes a user prompt into independent sub-tasks,
+// dispatches them to parallel worker agents, and feeds the aggregated results
+// back into the main conversation context.
+func (app *App) processParallelInput(ctx context.Context, prompt string) error {
+	ctx, cancelTask := context.WithCancel(ctx)
+	app.cancelMu.Lock()
+	app.taskCancel = cancelTask
+	app.cancelMu.Unlock()
+	defer func() {
+		app.cancelMu.Lock()
+		app.taskCancel = nil
+		app.cancelMu.Unlock()
+		cancelTask()
+	}()
+
+	app.ui.UpdateThinkingStatus("decomposing tasks for parallel execution")
+	app.ui.ShowThinking()
+
+	// ── Step 1: Use a direct LLM call (no tools) to decompose the prompt ──
+	// We bypass app.agent.ProcessMessage() because that has full tool access,
+	// and models will use tools (Repo Map, etc.) instead of returning JSON.
+	decomposerModel := app.config.LLM.Models.Fast
+	if decomposerModel == "" {
+		decomposerModel = app.config.LLM.Models.Default
+	}
+
+	decomposePrompt := fmt.Sprintf(
+		`You are a task decomposer. Break the following user request into independent, parallelizable sub-tasks.
+Return ONLY a JSON array of objects with "id", "description", and "role" fields.
+Valid roles: "Researcher", "Developer", "Reviewer", "Generic".
+
+IMPORTANT: Each task must be fully independent — no task should depend on the output of another.
+If the request cannot be parallelized, return a single-element array.
+
+User request: %s
+
+Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
+
+	decomposeMessages := []anyllm.Message{
+		{Role: "user", Content: decomposePrompt},
+	}
+	temperature := 0.1 // low temperature for deterministic JSON output
+	completion, err := app.llmClient.Complete(ctx, app.config.LLM.Provider, decomposerModel, decomposeMessages, temperature, nil)
+	if err != nil {
+		app.ui.HideThinking()
+		return fmt.Errorf("task decomposition failed: %w", err)
+	}
+	decomposeResult := ""
+	if len(completion.Choices) > 0 {
+		if s, ok := completion.Choices[0].Message.Content.(string); ok {
+			decomposeResult = s
+		}
+	}
+
+
+	// Parse the JSON array of tasks
+	// Strip markdown fences if the model wrapped it
+	cleaned := strings.TrimSpace(decomposeResult)
+	cleaned = strings.TrimPrefix(cleaned, "```json")
+	cleaned = strings.TrimPrefix(cleaned, "```")
+	cleaned = strings.TrimSuffix(cleaned, "```")
+	cleaned = strings.TrimSpace(cleaned)
+
+	var taskDefs []struct {
+		ID          string `json:"id"`
+		Description string `json:"description"`
+		Role        string `json:"role"`
+	}
+	if err := json.Unmarshal([]byte(cleaned), &taskDefs); err != nil {
+		app.ui.HideThinking()
+		app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
+		app.logger.Warn("Parallel decomposition JSON parse failed", "error", err, "raw", cleaned)
+		return app.processInput(ctx, prompt)
+	}
+
+	if len(taskDefs) == 0 {
+		app.ui.HideThinking()
+		app.ui.Warning("No sub-tasks identified — falling back to single agent")
+		return app.processInput(ctx, prompt)
+	}
+
+	// ── Step 2: Build multiagent tasks ──
+	tasks := make([]multiagent.Task, len(taskDefs))
+	for i, td := range taskDefs {
+		id := td.ID
+		if id == "" {
+			id = fmt.Sprintf("task-%d", i+1)
+		}
+		tasks[i] = multiagent.Task{
+			ID:          id,
+			Description: td.Description,
+			Inputs: map[string]interface{}{
+				"role_hint": td.Role,
+			},
+		}
+	}
+
+	app.ui.HideThinking()
+	app.ui.Info("🔀 Dispatching %d parallel agents...\n", len(tasks))
+	for _, t := range tasks {
+		role := "Generic"
+		if r, ok := t.Inputs["role_hint"].(string); ok && r != "" {
+			role = r
+		}
+		app.ui.Info("   • [%s] %s", role, t.Description)
+	}
+	app.ui.Print("\n")
+
+	// ── Step 3: Launch orchestrator with bus→UI bridge ──
+	app.ui.UpdateThinkingStatus(fmt.Sprintf("running %d agents in parallel", len(tasks)))
+	app.ui.ShowThinking()
+
+	orch := multiagent.NewOrchestrator(app.agent, app.logger)
+
+	// Wire bus events to the BubbleTea UI worker status lines
+	if btUI, ok := app.ui.(*ui.BubbleTeaUI); ok {
+		eventCh := make(chan multiagent.Event, 50)
+		orch.Bus().Subscribe(multiagent.EventTaskStarted, eventCh)
+		orch.Bus().Subscribe(multiagent.EventTaskCompleted, eventCh)
+
+		go func() {
+			for evt := range eventCh {
+				role := "Generic"
+				if r, ok := evt.Payload["role"].(string); ok {
+					role = r
+				}
+				label := ""
+				if l, ok := evt.Payload["label"].(string); ok {
+					if len(l) > 50 {
+						l = l[:47] + "..."
+					}
+					label = l
+				}
+				hasError := false
+				if he, ok := evt.Payload["has_error"].(bool); ok {
+					hasError = he
+				}
+
+				btUI.UpdateWorkerStatus(ui.WorkerStatus{
+					WorkerID: evt.WorkerID,
+					Role:     role,
+					Label:    label,
+					Done:     evt.Type == multiagent.EventTaskCompleted,
+					HasError: hasError,
+					Started:  time.Now(),
+				})
+			}
+		}()
+	}
+
+	results, err := orch.ExecuteParallel(ctx, tasks)
+	app.ui.HideThinking()
+
+	// Clear worker status lines
+	if btUI, ok := app.ui.(*ui.BubbleTeaUI); ok {
+		btUI.ClearWorkerStatuses()
+	}
+
+	if err != nil {
+		return fmt.Errorf("parallel execution failed: %w", err)
+	}
+
+	// ── Step 4: Aggregate results and feed back into main context ──
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("## Parallel Execution Results (%d agents)\n\n", len(results)))
+
+	successCount := 0
+	for _, r := range results {
+		if r.Error != nil {
+			summary.WriteString(fmt.Sprintf("### ❌ %s (failed after %s)\n", r.TaskID, r.Duration.Round(time.Millisecond)))
+			summary.WriteString(fmt.Sprintf("Error: %v\n\n", r.Error))
+		} else {
+			successCount++
+			summary.WriteString(fmt.Sprintf("### ✅ %s (%s)\n", r.TaskID, r.Duration.Round(time.Millisecond)))
+			output := r.Output
+			if len(output) > 2000 {
+				output = output[:2000] + "\n\n[... truncated ...]"
+			}
+			summary.WriteString(output + "\n\n")
+		}
+	}
+
+	app.ui.Info("🔀 Parallel execution complete: %d/%d succeeded\n", successCount, len(results))
+	app.ui.ShowResponse(summary.String())
+
+	// Inject the aggregated results as an assistant message so the main agent
+	// has awareness of what the parallel workers discovered/produced.
+	app.agent.AddAssistantMessage("[Parallel Agent Results]\n" + summary.String())
+
+	return nil
+}
+
 // processInput processes user input with the AI using streaming.
 func (app *App) processInput(ctx context.Context, input string) error {
 	ctx, cancelTask := context.WithCancel(ctx)
@@ -1853,6 +2047,19 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			}
 		} else {
 			app.showRouterStatus()
+		}
+
+	case "/parallel":
+		if len(parts) < 2 {
+			app.ui.Warning("Usage: /parallel <task description>")
+			app.ui.Info("Example: /parallel review internal/agent/agent.go, internal/agent/context.go, and internal/agent/orchestrator.go")
+		} else {
+			prompt := strings.Join(parts[1:], " ")
+			if err := app.processParallelInput(ctx, prompt); err != nil {
+				if err != context.Canceled {
+					app.ui.Error("Parallel execution failed: %v", err)
+				}
+			}
 		}
 
 	default:

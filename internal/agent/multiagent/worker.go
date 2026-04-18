@@ -74,7 +74,11 @@ func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, resul
 		w.bus.Publish(Event{
 			Type:     EventTaskStarted,
 			WorkerID: w.id,
-			Payload:  map[string]interface{}{"task_id": task.ID},
+			Payload: map[string]interface{}{
+				"task_id": task.ID,
+				"role":    string(w.role),
+				"label":   task.Description,
+			},
 		})
 	}
 
@@ -104,8 +108,9 @@ func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, resul
 			Type:     EventTaskCompleted,
 			WorkerID: w.id,
 			Payload: map[string]interface{}{
-				"task_id":  task.ID,
-				"duration": result.Duration.String(),
+				"task_id":   task.ID,
+				"role":      string(w.role),
+				"duration":  result.Duration.String(),
 				"has_error": err != nil,
 			},
 		})

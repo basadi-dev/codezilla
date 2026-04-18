@@ -39,6 +39,19 @@ type clearViewportMsg struct{}
 type clearCopyNoticeMsg struct{}
 type appQuitMsg struct{ err error }
 
+// WorkerStatus represents the visible state of a single multi-agent worker
+type WorkerStatus struct {
+	WorkerID string
+	Role     string
+	Label    string
+	Done     bool
+	HasError bool
+	Started  time.Time
+}
+
+type updateWorkerStatusMsg struct{ status WorkerStatus }
+type clearWorkerStatusesMsg struct{}
+
 // selPoint is a position inside the wrapped content grid — independent of
 // viewport scroll offset. line indexes into appModel.wrappedLines; col is a
 // visible-column offset (ANSI-aware, counted in display cells).
@@ -85,6 +98,9 @@ type appModel struct {
 	activeModel   string
 	taskStart     time.Time
 	stepStart     time.Time
+
+	// Multi-agent parallel worker statuses (stacked status lines)
+	workerStatuses []WorkerStatus
 
 	// Input state
 	inputEnabled  bool
@@ -446,6 +462,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Reset()
 		m = m.resizeViews(false)
 		cmds = append(cmds, m.input.Focus())
+		m.workerStatuses = nil // clear worker statuses when input re-enables
 		return m, tea.Batch(cmds...)
 
 	case setModelMsg:
@@ -464,6 +481,24 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.spinner.Tick)
 			}
 		}
+
+	case updateWorkerStatusMsg:
+		found := false
+		for i, ws := range m.workerStatuses {
+			if ws.WorkerID == msg.status.WorkerID {
+				m.workerStatuses[i] = msg.status
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.workerStatuses = append(m.workerStatuses, msg.status)
+		}
+		return m, nil
+
+	case clearWorkerStatusesMsg:
+		m.workerStatuses = nil
+		return m, nil
 
 	case appQuitMsg:
 		// App finished (or error) — quit the tea program
@@ -799,7 +834,60 @@ func (m appModel) renderThinkingLine() string {
 	}
 	label = strings.ReplaceAll(label, "\n", " ")
 	hint := dim.Render("  esc/^c to interrupt")
-	return " " + icon + " " + accent.Render(label) + hint
+	mainLine := " " + icon + " " + accent.Render(label) + hint
+
+	// If multi-agent workers are active, render stacked status lines below
+	if len(m.workerStatuses) > 0 {
+		lines := []string{mainLine}
+		for _, ws := range m.workerStatuses {
+			lines = append(lines, m.renderWorkerStatusLine(ws))
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	return mainLine
+}
+
+// renderWorkerStatusLine produces a single colored line for a parallel worker.
+//
+//	⠋ [Researcher]  Scanning internal/tools/...       (12s)
+//	✓ [Developer]   Completed                          (8s)
+//	✗ [Reviewer]    Error: context deadline exceeded    (3s)
+func (m appModel) renderWorkerStatusLine(ws WorkerStatus) string {
+	dim := lipgloss.NewStyle().Foreground(colMuted)
+	roleStyle := lipgloss.NewStyle().Foreground(colPurple).Bold(true)
+	labelStyle := lipgloss.NewStyle().Foreground(colCyan)
+	greenStyle := lipgloss.NewStyle().Foreground(colGreen)
+	redFg := lipgloss.AdaptiveColor{Light: "#F7768E", Dark: "#F7768E"}
+	redStyle := lipgloss.NewStyle().Foreground(redFg)
+
+	var icon string
+	switch {
+	case ws.Done && ws.HasError:
+		icon = redStyle.Render("✗")
+	case ws.Done:
+		icon = greenStyle.Render("✓")
+	default:
+		icon = m.spinner.View()
+	}
+
+	role := roleStyle.Render("[" + ws.Role + "]")
+
+	label := ws.Label
+	if label == "" && ws.Done && ws.HasError {
+		label = "failed"
+	} else if label == "" && ws.Done {
+		label = "completed"
+	} else if label == "" {
+		label = "working"
+	}
+
+	elapsed := ""
+	if !ws.Started.IsZero() {
+		elapsed = dim.Render(fmt.Sprintf("(%s)", time.Since(ws.Started).Round(time.Second)))
+	}
+
+	return "   " + icon + " " + role + "  " + labelStyle.Render(label) + "  " + elapsed
 }
 
 // renderViewportWithScrollbar composites the viewport output with a
@@ -904,7 +992,7 @@ func (m appModel) resizeViews(forceReflow bool) appModel {
 	headerHeight := 1
 	inputHeight := m.input.Height() + 2 // rounded border top+bottom
 	if !m.inputEnabled {
-		inputHeight = 1 // borderless thinking line
+		inputHeight = 1 + len(m.workerStatuses) // thinking line + stacked worker lines
 	}
 	statusHeight := 1
 
@@ -1228,6 +1316,24 @@ func (ui *BubbleTeaUI) UpdateTokenUsage(usage string) {
 
 func (ui *BubbleTeaUI) SetPromptFooter(fn func() string) {
 	// No-op: BubbleTea handles the footer natively in View()
+}
+
+// ── Multi-Agent Worker Status ────────────────────────────────────────────────
+
+// UpdateWorkerStatus pushes a worker's current state to the TUI. Call this
+// from the multi-agent orchestrator's bus event listener to show stacked
+// per-worker status lines during parallel execution.
+func (ui *BubbleTeaUI) UpdateWorkerStatus(status WorkerStatus) {
+	if ui.program != nil {
+		ui.program.Send(updateWorkerStatusMsg{status: status})
+	}
+}
+
+// ClearWorkerStatuses removes all worker status lines from the display.
+func (ui *BubbleTeaUI) ClearWorkerStatuses() {
+	if ui.program != nil {
+		ui.program.Send(clearWorkerStatusesMsg{})
+	}
 }
 
 // ── Response display ─────────────────────────────────────────────────────────
