@@ -21,6 +21,11 @@ type ConcreteWorker struct {
 func NewWorker(id string, role WorkerRole, baseAgent agent.Agent, bus *MemoryBus) *ConcreteWorker {
 	clonedAgent := baseAgent.Clone()
 
+	// Strip tools — parallel workers do pure LLM completions.
+	// The shared tool registry contains closures over the single-threaded TUI
+	// (ui.Print, ui.HideThinking, etc.) which would cause garbled output.
+	clonedAgent.ClearTools()
+
 	// Prepend specialized identity to the system prompt based on role
 	roleInstruction := map[WorkerRole]string{
 		RoleGeneric:    "You are a general-purpose assistant. Fulfill the user's request.",

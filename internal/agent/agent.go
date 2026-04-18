@@ -40,6 +40,7 @@ type Agent interface {
 	SetAutoRoute(enabled bool)
 	ContextStats() (msgCount int, currentTokens int, maxTokens int)
 	Clone() Agent
+	ClearTools() // strips all tools from this agent so it does plain LLM completions
 }
 
 type Config struct {
@@ -376,4 +377,8 @@ func (a *agent) Clone() Agent {
 	}
 
 	return newAgent
+}
+
+func (a *agent) ClearTools() {
+	a.toolRegistry = tools.NewToolRegistry()
 }

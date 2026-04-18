@@ -50,6 +50,7 @@ func (m *MockAgent) SetSessionRecorder(recorder *session.Recorder) {}
 func (m *MockAgent) SetAutoRoute(enabled bool)              {}
 func (m *MockAgent) ContextStats() (int, int, int)           { return 0, 0, 0 }
 func (m *MockAgent) Clone() agent.Agent                     { return &MockAgent{} }
+func (m *MockAgent) ClearTools()                             {}
 
 func TestOrchestrator_ExecuteParallel(t *testing.T) {
 	mockAgent := &MockAgent{}
