@@ -27,6 +27,7 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 type appendOutputMsg struct{ text string }
+type flushOutputMsg struct{}
 type setSpinnerMsg struct {
 	active bool
 	label  string
@@ -62,6 +63,8 @@ type appModel struct {
 
 	// Content buffer for the viewport
 	outputLines []string
+	pendingOutput  string
+	flushScheduled bool
 	// Wrapped form of outputLines, split by "\n". Kept in sync with whatever
 	// is set on the viewport so selection math and copy-extraction can operate
 	// on exactly what the user sees.
@@ -396,11 +399,26 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case appendOutputMsg:
-		m.appendOutput(msg.text)
+		m.pendingOutput += msg.text
+		if !m.flushScheduled {
+			m.flushScheduled = true
+			return m, tea.Tick(30*time.Millisecond, func(time.Time) tea.Msg {
+				return flushOutputMsg{}
+			})
+		}
+		return m, nil
+
+	case flushOutputMsg:
+		m.flushScheduled = false
+		if m.pendingOutput != "" {
+			m.appendOutput(m.pendingOutput)
+			m.pendingOutput = ""
+		}
 		return m, nil
 
 	case clearViewportMsg:
 		m.outputLines = nil
+		m.pendingOutput = ""
 		if m.ready {
 			m.viewport.SetContent("")
 			m.viewport.GotoTop()

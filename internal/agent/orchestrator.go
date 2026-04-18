@@ -600,6 +600,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			}
 
 		case StateParsing:
+			strippedContent, _ := extractAndStripThinkBlocks(finalResponse)
 			cleanedText, parsedTools := ParseLLMResponse(finalResponse, o.logger)
 			if len(parsedTools) > 0 {
 				toolsToExecute = parsedTools
@@ -620,6 +621,23 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 						"The malformed text was: %q. Please retry using the proper tool format.",
 					finalResponse[:min(len(finalResponse), 200)],
 				)
+				o.agent.context.AddToolResultMessage("", map[string]interface{}{
+					"correction": correctionMsg,
+				}, nil)
+				finalResponse = ""
+				state = StatePrompting
+			} else if strings.TrimSpace(strippedContent) == "" && toolFormatRetries < 2 {
+				// The model exhausted its output solely on internal thoughts, missing its tool call entirely
+				// or abruptly cutting off. Retain its reasoning so it doesn't lose context, and forcefully re-prompt.
+				toolFormatRetries++
+				o.logger.Warn("Model output only thoughts and no visible content or tools. Reprompting.", "retry", toolFormatRetries)
+				
+				// Stash the incomplete thoughts onto the context so it remembers its work so far
+				o.agent.context.AddAssistantMessageWithThink("", finalResponse)
+				
+				correctionMsg := "[SYSTEM PROMPT] Your previous response consisted entirely of internal thoughts with no actual output or tool call. If you reached a decision, please execute your tool call now, or provide a text response."
+				
+				// Push as an un-id'd tool result error to trick the flow into bouncing back a warning
 				o.agent.context.AddToolResultMessage("", map[string]interface{}{
 					"correction": correctionMsg,
 				}, nil)
