@@ -1311,24 +1311,58 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 	}
 
 
-	// Parse the JSON array of tasks
-	// Strip markdown fences if the model wrapped it
-	cleaned := strings.TrimSpace(decomposeResult)
+	// Parse the JSON array of tasks from the LLM response.
+	// Models often wrap output in <think> blocks, markdown fences, or
+	// explanatory text. We aggressively extract the JSON array.
+	cleaned := decomposeResult
+
+	// 1. Strip <think>...</think> blocks
+	for {
+		start := strings.Index(cleaned, "<think>")
+		end := strings.Index(cleaned, "</think>")
+		if start != -1 && end != -1 && end > start {
+			cleaned = cleaned[:start] + cleaned[end+len("</think>"):]
+		} else {
+			break
+		}
+	}
+
+	// 2. Strip markdown fences
+	cleaned = strings.TrimSpace(cleaned)
 	cleaned = strings.TrimPrefix(cleaned, "```json")
 	cleaned = strings.TrimPrefix(cleaned, "```")
 	cleaned = strings.TrimSuffix(cleaned, "```")
 	cleaned = strings.TrimSpace(cleaned)
 
+	// 3. If still not valid JSON, find the first [...] bracket pair
 	var taskDefs []struct {
 		ID          string `json:"id"`
 		Description string `json:"description"`
 		Role        string `json:"role"`
 	}
 	if err := json.Unmarshal([]byte(cleaned), &taskDefs); err != nil {
-		app.ui.HideThinking()
-		app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
-		app.logger.Warn("Parallel decomposition JSON parse failed", "error", err, "raw", cleaned)
-		return app.processInput(ctx, prompt)
+		// Fallback: extract first JSON array via bracket matching
+		if start := strings.Index(cleaned, "["); start != -1 {
+			if end := strings.LastIndex(cleaned, "]"); end > start {
+				extracted := cleaned[start : end+1]
+				if jsonErr := json.Unmarshal([]byte(extracted), &taskDefs); jsonErr != nil {
+					app.ui.HideThinking()
+					app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
+					app.logger.Warn("Parallel decomposition JSON parse failed", "error", jsonErr, "raw", decomposeResult)
+					return app.processInput(ctx, prompt)
+				}
+			} else {
+				app.ui.HideThinking()
+				app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
+				app.logger.Warn("Parallel decomposition: no JSON array found", "raw", decomposeResult)
+				return app.processInput(ctx, prompt)
+			}
+		} else {
+			app.ui.HideThinking()
+			app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
+			app.logger.Warn("Parallel decomposition JSON parse failed", "error", err, "raw", decomposeResult)
+			return app.processInput(ctx, prompt)
+		}
 	}
 
 	if len(taskDefs) == 0 {
