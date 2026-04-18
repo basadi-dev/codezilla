@@ -265,7 +265,8 @@ func (o *AgentOrchestrator) summarizeEvictedMessages(ctx context.Context, existi
 - Current task state and progress
 - Tool results that matter for future turns
 
-Be extremely concise (max 300 tokens). Use bullet points. Never include raw file contents or full tool outputs. Focus on facts the agent will need to continue working.`},
+Be extremely concise (max 300 tokens). Use bullet points. Never include raw file contents or full tool outputs. 
+IMPORTANT: You MUST end your summary with a single line starting with "Current goal: " that explicitly states what the user originally asked for and what the agent is currently trying to accomplish.`},
 		{Role: "user", Content: userContent},
 	}
 

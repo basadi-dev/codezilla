@@ -410,6 +410,16 @@ func (c *Context) PreFlightTrim(budgetTokens int) (int, []Message) {
 	var keptNonSystem []Message
 	var evicted []Message
 
+	// Find the index of the most recent user message so we can protect it.
+	// The model MUST always be able to see what the user most recently asked,
+	// even after aggressive eviction triggered by large tool results.
+	lastUserIdx := -1
+	for i, msg := range nonSystemMsgs {
+		if msg.Role == RoleUser {
+			lastUserIdx = i
+		}
+	}
+
 	if totalTokens <= budgetTokens {
 		// No eviction needed
 		keptNonSystem = nonSystemMsgs
@@ -417,13 +427,20 @@ func (c *Context) PreFlightTrim(budgetTokens int) (int, []Message) {
 		tokensToEvict := totalTokens - budgetTokens
 		evictedTokens := 0
 
-		for _, msg := range nonSystemMsgs {
+		for i, msg := range nonSystemMsgs {
 			msgToks := estimateTokens(msg.Content)
 			if len(msg.ToolCalls) > 0 {
 				msgToks += estimateToolCallsTokens(msg.ToolCalls)
 			}
 			if msg.ToolResult != nil {
 				msgToks += estimateToolResultTokens(msg.ToolResult)
+			}
+
+			// Always preserve the most recent user message: the model must know what
+			// was asked even after tool calls push context over budget.
+			if i == lastUserIdx {
+				keptNonSystem = append(keptNonSystem, msg)
+				continue
 			}
 
 			// We drop this message if we haven't met the eviction quota yet,
@@ -437,6 +454,10 @@ func (c *Context) PreFlightTrim(budgetTokens int) (int, []Message) {
 				keptNonSystem = append(keptNonSystem, msg)
 			}
 		}
+		// If protecting the last user message caused it to appear out of order
+		// (i.e. it was inserted before messages that come after it in the original
+		// slice), sort keptNonSystem back into original chronological order.
+		sortMessages(keptNonSystem, nonSystemMsgs)
 	}
 
 	// Reassemble with system messages
@@ -497,17 +518,26 @@ func (c *Context) SlidingWindowEvict() []Message {
 	evictedCount := 0
 	foundFirstUser := false
 
-	for _, msg := range c.Messages {
+	// Find the last user message index to protect it — the model must always
+	// be able to see the most recent user request.
+	lastUserMsgIdx := -1
+	for i, msg := range c.Messages {
+		if msg.Role == RoleUser {
+			lastUserMsgIdx = i
+		}
+	}
+
+	for i, msg := range c.Messages {
 		if msg.Role == RoleSystem {
 			kept = append(kept, msg)
 			continue
 		}
-		if evictedCount < toEvict {
+		if evictedCount < toEvict && i != lastUserMsgIdx {
 			evicted = append(evicted, msg)
 			evictedCount++
 		} else if !foundFirstUser {
 			// Strict LLMs require alternating sequences starting with a user message.
-			if msg.Role != RoleUser {
+			if msg.Role != RoleUser && i != lastUserMsgIdx {
 				evicted = append(evicted, msg)
 				evictedCount++
 			} else {
@@ -861,9 +891,42 @@ func estimateToolCallsTokens(calls []anyllm.ToolCall) int {
 	return tokens
 }
 
-func estimateToolResultTokens(tr *ToolResult) int {
-	tokens := 20
-	tokens += len(tr.Error)
-	tokens += estimateValueTokens(tr.Result)
-	return tokens
+func estimateToolResultTokens(result *ToolResult) int {
+	if result == nil {
+		return 0
+	}
+	s := fmt.Sprintf("%v", result.Result)
+	if result.Error != "" {
+		s += result.Error
+	}
+	return estimateTokens(s)
+}
+
+// sortMessages sorts a slice of messages based on their index in a reference slice.
+// This is used to restore chronological order if eviction protection caused messages
+// to be appended out of order.
+func sortMessages(target []Message, reference []Message) {
+	// Build a map of message pointer (using timestamp and content as a proxy for identity)
+	// to its original index in the reference slice.
+	refIndex := make(map[string]int)
+	for i, msg := range reference {
+		// Create a synthetic key
+		key := fmt.Sprintf("%d-%s-%s", msg.Timestamp.UnixNano(), msg.Role, msg.Content)
+		refIndex[key] = i
+	}
+
+	for i := 0; i < len(target); i++ {
+		for j := i + 1; j < len(target); j++ {
+			keyI := fmt.Sprintf("%d-%s-%s", target[i].Timestamp.UnixNano(), target[i].Role, target[i].Content)
+			keyJ := fmt.Sprintf("%d-%s-%s", target[j].Timestamp.UnixNano(), target[j].Role, target[j].Content)
+			
+			idxI, okI := refIndex[keyI]
+			idxJ, okJ := refIndex[keyJ]
+			
+			if okI && okJ && idxI > idxJ {
+				// Swap
+				target[i], target[j] = target[j], target[i]
+			}
+		}
+	}
 }
