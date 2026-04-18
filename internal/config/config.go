@@ -55,8 +55,9 @@ type Config struct {
 	ToolPermissions     map[string]string `json:"tool_permissions" yaml:"tool_permissions"`
 
 	// UI settings
-	ForceColor bool `json:"force_color" yaml:"force_color"`
-	NoColor    bool `json:"no_color" yaml:"no_color"`
+	ForceColor   bool `json:"force_color" yaml:"force_color"`
+	NoColor      bool `json:"no_color" yaml:"no_color"`
+	DisableMouse bool `json:"disable_mouse" yaml:"disable_mouse"`
 
 	// Working directory
 	WorkingDirectory string `json:"working_directory" yaml:"working_directory"`
@@ -195,6 +196,7 @@ func DefaultConfig() *Config {
 		},
 		ForceColor:       false,
 		NoColor:          false,
+		DisableMouse:     false,
 		WorkingDirectory: cwd,
 		Metasearch: MetasearchSettings{
 			EnableBing:     false,

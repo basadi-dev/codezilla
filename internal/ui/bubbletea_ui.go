@@ -3,12 +3,14 @@ package ui
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -16,6 +18,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -31,7 +34,17 @@ type setSpinnerMsg struct {
 type setTokenUsageMsg struct{ usage string }
 type enableInputMsg struct{}
 type setModelMsg struct{ model string }
+type clearViewportMsg struct{}
+type clearCopyNoticeMsg struct{}
 type appQuitMsg struct{ err error }
+
+// selPoint is a position inside the wrapped content grid — independent of
+// viewport scroll offset. line indexes into appModel.wrappedLines; col is a
+// visible-column offset (ANSI-aware, counted in display cells).
+type selPoint struct {
+	line int
+	col  int
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // appModel — the core BubbleTea Model
@@ -49,6 +62,18 @@ type appModel struct {
 
 	// Content buffer for the viewport
 	outputLines []string
+	// Wrapped form of outputLines, split by "\n". Kept in sync with whatever
+	// is set on the viewport so selection math and copy-extraction can operate
+	// on exactly what the user sees.
+	wrappedLines []string
+
+	// Selection state (drag-to-select + copy). Coordinates are in wrappedLines
+	// space so scrolling doesn't invalidate them.
+	selStart     selPoint
+	selEnd       selPoint
+	selecting    bool // left button currently held
+	hasSelection bool // a finalized or in-progress selection exists
+	copyNoticeAt time.Time
 
 	// Spinner / status bar state
 	spinnerActive bool
@@ -63,6 +88,12 @@ type appModel struct {
 	inputChan     chan string // signals ReadLine
 	eofChan       chan struct{}
 	interruptChan chan struct{}
+
+	// Mouse capture state — toggled at runtime via F2
+	mouseEnabled bool
+
+	// Cached working directory for the header bar
+	cwd string
 
 	// History
 	history      []string
@@ -102,6 +133,8 @@ func newAppModel(theme Theme, prompt string) appModel {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#7DCFFF", Dark: "#7DCFFF"})
 
+	cwd, _ := os.Getwd()
+
 	return appModel{
 		input:         ti,
 		spinner:       sp,
@@ -109,12 +142,14 @@ func newAppModel(theme Theme, prompt string) appModel {
 		eofChan:       make(chan struct{}, 1),
 		interruptChan: make(chan struct{}, 1),
 		theme:         theme,
-		prompt:       prompt,
-		inputEnabled: true,
-		history:      nil,
-		historyIndex: 0,
-		taskStart:    time.Now(),
-		stepStart:    time.Now(),
+		prompt:        prompt,
+		inputEnabled:  true,
+		mouseEnabled:  true,
+		cwd:           cwd,
+		history:       nil,
+		historyIndex:  0,
+		taskStart:     time.Now(),
+		stepStart:     time.Now(),
 	}
 }
 
@@ -135,6 +170,27 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			// If at the prompt with a live selection, Ctrl+C acts as
+			// "copy" rather than EOF — belt-and-suspenders for users who
+			// miss the copy-on-release, and it matches the usual shell
+			// gesture. During a running task Ctrl+C always interrupts
+			// regardless of any stray selection.
+			if m.inputEnabled && m.hasSelection && !m.selecting {
+				text := m.selectionText()
+				if strings.TrimSpace(text) != "" {
+					_ = clipboard.WriteAll(text)
+					if _, err := os.Stderr.WriteString(osc52Copy(text)); err != nil {
+						_ = err
+					}
+					m.copyNoticeAt = time.Now()
+					m.clearSelection()
+					return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+						return clearCopyNoticeMsg{}
+					})
+				}
+				m.clearSelection()
+				return m, nil
+			}
 			if !m.inputEnabled {
 				// Task running — send interrupt to cancel agent processing
 				select {
@@ -151,6 +207,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case tea.KeyEsc:
+			if m.hasSelection {
+				m.clearSelection()
+				return m, nil
+			}
 			if !m.inputEnabled {
 				// Task running — send interrupt to cancel agent processing
 				select {
@@ -159,6 +219,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+
+		case tea.KeyF2:
+			m.mouseEnabled = !m.mouseEnabled
+			if m.mouseEnabled {
+				return m, tea.EnableMouseCellMotion
+			}
+			return m, tea.DisableMouse
 
 		case tea.KeyEnter:
 			if m.inputEnabled {
@@ -239,8 +306,98 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = val
 		}
 
+	case tea.MouseMsg:
+		// Wheel events drive scrolling — fall through to viewport. Selection
+		// is stored in content-line coordinates, so it stays correct as the
+		// viewport scrolls underneath it.
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown ||
+			msg.Button == tea.MouseButtonWheelLeft || msg.Button == tea.MouseButtonWheelRight {
+			break
+		}
+
+		headerH := 1
+		vpY0 := headerH
+		vpY1 := headerH + m.viewport.Height - 1
+		inViewport := msg.Y >= vpY0 && msg.Y <= vpY1 && msg.X >= 0 && msg.X < m.viewport.Width
+
+		switch msg.Action {
+		case tea.MouseActionPress:
+			if msg.Button == tea.MouseButtonLeft && inViewport {
+				contentLine := (msg.Y - vpY0) + m.viewport.YOffset
+				p := selPoint{line: contentLine, col: msg.X}
+				m.selecting = true
+				m.hasSelection = true
+				m.selStart = p
+				m.selEnd = p
+				return m, nil
+			}
+			// Press anywhere else (header, input, status) cancels any live
+			// selection so the user can click to dismiss.
+			if m.hasSelection {
+				m.clearSelection()
+				return m, nil
+			}
+
+		case tea.MouseActionMotion:
+			if m.selecting {
+				// Clamp drag position into the viewport so selection extends
+				// cleanly when the user drags past the edges.
+				y := msg.Y
+				if y < vpY0 {
+					y = vpY0
+				}
+				if y > vpY1 {
+					y = vpY1
+				}
+				x := msg.X
+				if x < 0 {
+					x = 0
+				}
+				if x > m.viewport.Width {
+					x = m.viewport.Width
+				}
+				m.selEnd = selPoint{line: (y - vpY0) + m.viewport.YOffset, col: x}
+				return m, nil
+			}
+
+		case tea.MouseActionRelease:
+			if m.selecting {
+				m.selecting = false
+				text := m.selectionText()
+				if strings.TrimSpace(text) == "" {
+					// Empty selection (just a click) — dismiss without notice.
+					m.clearSelection()
+					return m, nil
+				}
+				_ = clipboard.WriteAll(text)
+				// Also emit OSC 52 so the copy works over SSH when the
+				// outer terminal supports it. bubbletea renders via stdout
+				// so we write the escape to stderr to avoid interleaving
+				// with the frame buffer.
+				if _, err := os.Stderr.WriteString(osc52Copy(text)); err != nil {
+					_ = err
+				}
+				m.copyNoticeAt = time.Now()
+				return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+					return clearCopyNoticeMsg{}
+				})
+			}
+		}
+
+	case clearCopyNoticeMsg:
+		m.copyNoticeAt = time.Time{}
+		return m, nil
+
 	case appendOutputMsg:
 		m.appendOutput(msg.text)
+		return m, nil
+
+	case clearViewportMsg:
+		m.outputLines = nil
+		if m.ready {
+			m.viewport.SetContent("")
+			m.viewport.GotoTop()
+		}
 		return m, nil
 
 	case setSpinnerMsg:
@@ -264,6 +421,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputEnabled = true
 		m.historyIndex = len(m.history)
 		m.input.Reset()
+		m = m.resizeViews(false)
 		cmds = append(cmds, m.input.Focus())
 		return m, tea.Batch(cmds...)
 
@@ -325,52 +483,315 @@ func (m *appModel) appendOutput(text string) {
 		width := m.width
 		if width > 0 {
 			// Sub margin for perfect wrapping
-			width -= 2 
+			width -= 2
 		}
-		
+
 		content := strings.Join(m.outputLines, "\n")
 		// Fast ANSI-aware wrap
 		wrapped := lipgloss.NewStyle().Width(width).Render(content)
+		m.wrappedLines = strings.Split(wrapped, "\n")
 		m.viewport.SetContent(wrapped)
 		m.viewport.GotoBottom()
 	}
 }
+
+// selectionRange returns the normalized [start, end] endpoints such that
+// start comes strictly before end in reading order. Returns !ok when there
+// is no active selection.
+func (m appModel) selectionRange() (start, end selPoint, ok bool) {
+	if !m.hasSelection {
+		return selPoint{}, selPoint{}, false
+	}
+	a, b := m.selStart, m.selEnd
+	if a.line > b.line || (a.line == b.line && a.col > b.col) {
+		a, b = b, a
+	}
+	return a, b, true
+}
+
+// selectionText extracts the current selection as plain text (ANSI codes
+// stripped). Returns "" when the selection is empty.
+func (m appModel) selectionText() string {
+	start, end, ok := m.selectionRange()
+	if !ok {
+		return ""
+	}
+	if len(m.wrappedLines) == 0 {
+		return ""
+	}
+	const farRight = 1 << 30
+	if start.line == end.line {
+		if start.line < 0 || start.line >= len(m.wrappedLines) {
+			return ""
+		}
+		return ansi.Strip(ansi.Cut(m.wrappedLines[start.line], start.col, end.col))
+	}
+	var b strings.Builder
+	for li := start.line; li <= end.line; li++ {
+		if li < 0 || li >= len(m.wrappedLines) {
+			if li < end.line {
+				b.WriteByte('\n')
+			}
+			continue
+		}
+		line := m.wrappedLines[li]
+		switch {
+		case li == start.line:
+			b.WriteString(ansi.Strip(ansi.Cut(line, start.col, farRight)))
+		case li == end.line:
+			b.WriteString(ansi.Strip(ansi.Cut(line, 0, end.col)))
+		default:
+			b.WriteString(ansi.Strip(line))
+		}
+		if li < end.line {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// renderSelectedViewport returns the viewport's current frame with the
+// active selection painted as a highlighted background. When there is no
+// selection, returns viewport.View() unchanged.
+func (m appModel) renderSelectedViewport() string {
+	v := m.viewport.View()
+	start, end, ok := m.selectionRange()
+	if !ok {
+		return v
+	}
+	lines := strings.Split(v, "\n")
+	yOff := m.viewport.YOffset
+	highlight := lipgloss.NewStyle().Background(colSelectionBg).Foreground(colSelectionFg)
+	const farRight = 1 << 30
+
+	for i := range lines {
+		contentLine := i + yOff
+		if contentLine < start.line || contentLine > end.line {
+			continue
+		}
+		l := lines[i]
+		width := ansi.StringWidth(l)
+		var startCol, endCol int
+		switch {
+		case contentLine == start.line && contentLine == end.line:
+			startCol, endCol = start.col, end.col
+		case contentLine == start.line:
+			startCol, endCol = start.col, width
+		case contentLine == end.line:
+			startCol, endCol = 0, end.col
+		default:
+			startCol, endCol = 0, width
+		}
+		if endCol > width {
+			endCol = width
+		}
+		if startCol < 0 {
+			startCol = 0
+		}
+		if startCol >= endCol {
+			continue
+		}
+		before := ansi.Cut(l, 0, startCol)
+		sel := ansi.Cut(l, startCol, endCol)
+		after := ansi.Cut(l, endCol, farRight)
+		lines[i] = before + highlight.Render(sel) + after
+	}
+	return strings.Join(lines, "\n")
+}
+
+// clearSelection wipes any active selection state.
+func (m *appModel) clearSelection() {
+	m.selecting = false
+	m.hasSelection = false
+	m.selStart = selPoint{}
+	m.selEnd = selPoint{}
+}
+
+// osc52Copy returns the OSC 52 escape sequence that asks the outer terminal
+// to set its clipboard to text. Works over SSH when the terminal supports
+// OSC 52 (iTerm2, kitty, WezTerm, recent Terminal.app, etc.).
+func osc52Copy(text string) string {
+	enc := base64.StdEncoding.EncodeToString([]byte(text))
+	return "\x1b]52;c;" + enc + "\a"
+}
+
+// Palette — adaptive colors used across the shell chrome.
+var (
+	colAccent      = lipgloss.AdaptiveColor{Light: "#7AA2F7", Dark: "#7AA2F7"}
+	colCyan        = lipgloss.AdaptiveColor{Light: "#0DB9D7", Dark: "#7DCFFF"}
+	colGreen       = lipgloss.AdaptiveColor{Light: "#4F6832", Dark: "#9ECE6A"}
+	colPurple      = lipgloss.AdaptiveColor{Light: "#9D7CD8", Dark: "#BB9AF7"}
+	colMuted       = lipgloss.AdaptiveColor{Light: "#565F89", Dark: "#565F89"}
+	colBorderDim   = lipgloss.AdaptiveColor{Light: "#292E42", Dark: "#3B4261"}
+	colBgContrast  = lipgloss.AdaptiveColor{Light: "#1A1B26", Dark: "#1A1B26"}
+	colSelectionBg = lipgloss.AdaptiveColor{Light: "#A7C2E7", Dark: "#364A82"}
+	colSelectionFg = lipgloss.AdaptiveColor{Light: "#1A1B26", Dark: "#C0CAF5"}
+)
 
 func (m appModel) View() string {
 	if !m.ready {
 		return "Loading..."
 	}
 
-	// Viewport (scrollable output)
-	vpView := m.viewport.View()
+	header := m.buildHeader()
 
-	// Separator
-	sepWidth := m.width
-	if sepWidth > 1 {
-		sepWidth--
-	}
-	separator := lipgloss.NewStyle().Faint(true).Render(strings.Repeat("─", sepWidth))
+	vpView := m.renderSelectedViewport()
+	scrollbar := renderScrollbar(m.viewport)
+	viewportRow := lipgloss.JoinHorizontal(lipgloss.Top, vpView, scrollbar)
 
-	// Input line
-	var inputView string
-	baseStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).PaddingLeft(1)
-	if m.inputEnabled {
-		inputView = baseStyle.BorderForeground(lipgloss.Color("240")).Render(m.input.View())
-	} else {
-		// During processing, keep the box structure but dim it
-		inputView = baseStyle.BorderForeground(lipgloss.Color("236")).Faint(true).Render(m.input.View())
-	}
-
-	// Status bar
-	statusContent := m.buildStatusBar()
+	inputView := m.renderInputBox()
+	status := m.buildStatusBar()
 
 	return lipgloss.JoinVertical(lipgloss.Left,
-		vpView,
-		separator,
+		header,
+		viewportRow,
 		inputView,
-		separator,
-		statusContent,
+		status,
 	)
+}
+
+func (m appModel) buildHeader() string {
+	if m.width <= 0 {
+		return ""
+	}
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colBgContrast).
+		Background(colPurple).
+		Padding(0, 1)
+	title := titleStyle.Render("✨ codezilla")
+
+	model := m.activeModel
+	if model == "" {
+		model = "—"
+	}
+	cwd := m.shortCwd()
+
+	sep := lipgloss.NewStyle().Foreground(colMuted).Render("  ·  ")
+	modelSeg := lipgloss.NewStyle().Foreground(colCyan).Render(model)
+	cwdSeg := lipgloss.NewStyle().Foreground(colGreen).Render(cwd)
+	info := modelSeg + sep + cwdSeg
+
+	titleW := lipgloss.Width(title)
+	infoW := lipgloss.Width(info)
+	space := m.width - titleW - infoW - 1
+
+	// If too narrow, progressively truncate cwd (as plain) and re-render.
+	if space < 0 {
+		overflow := -space
+		cwdRunes := []rune(cwd)
+		if overflow+1 < len(cwdRunes) {
+			cwd = string(cwdRunes[:len(cwdRunes)-(overflow+1)]) + "…"
+		} else {
+			cwd = "…"
+		}
+		cwdSeg = lipgloss.NewStyle().Foreground(colGreen).Render(cwd)
+		info = modelSeg + sep + cwdSeg
+		infoW = lipgloss.Width(info)
+		space = m.width - titleW - infoW - 1
+		if space < 0 {
+			space = 0
+		}
+	}
+
+	gap := strings.Repeat(" ", space)
+	return title + gap + info + " "
+}
+
+func (m appModel) shortCwd() string {
+	cwd := m.cwd
+	if cwd == "" {
+		return "—"
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(cwd, home) {
+		return "~" + strings.TrimPrefix(cwd, home)
+	}
+	return cwd
+}
+
+func (m appModel) renderInputBox() string {
+	// While a task is running we don't accept input — drop the bordered box
+	// and show a lightweight colored status line with the spinner + label.
+	// Mirrors how Claude Code / Codex / Copilot CLI render "thinking".
+	if !m.inputEnabled {
+		return m.renderThinkingLine()
+	}
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colAccent).
+		Padding(0, 1)
+	// Inner width = total - 2 (border) - 2 (padding)
+	inner := m.width - 4
+	if inner < 1 {
+		inner = 1
+	}
+	style = style.Width(inner)
+	return style.Render(m.input.View())
+}
+
+// renderThinkingLine produces the borderless status line shown in place of
+// the input box while the agent is processing. Single line, no frame, just
+// colored indicator + label so it reads like a hint rather than a boxed
+// control.
+func (m appModel) renderThinkingLine() string {
+	dim := lipgloss.NewStyle().Foreground(colMuted)
+	accent := lipgloss.NewStyle().Foreground(colCyan)
+
+	var icon string
+	if m.spinnerActive {
+		icon = m.spinner.View()
+	} else {
+		icon = accent.Render("◆")
+	}
+	label := m.spinnerLabel
+	if label == "" {
+		label = "thinking"
+	}
+	label = strings.ReplaceAll(label, "\n", " ")
+	hint := dim.Render("  esc/^c to interrupt")
+	return " " + icon + " " + accent.Render(label) + hint
+}
+
+// renderScrollbar returns a single-column vertical scrollbar sized to the
+// viewport's height. Uses ▐ for the thumb and │ for the track. When there
+// is no content to scroll, the column is blank so layout stays stable.
+func renderScrollbar(vp viewport.Model) string {
+	h := vp.Height
+	if h <= 0 {
+		return ""
+	}
+	trackStyle := lipgloss.NewStyle().Foreground(colBorderDim)
+	thumbStyle := lipgloss.NewStyle().Foreground(colAccent)
+
+	total := vp.TotalLineCount()
+	visible := vp.VisibleLineCount()
+	lines := make([]string, h)
+
+	if total <= visible {
+		blank := " "
+		for i := range lines {
+			lines[i] = blank
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	thumbSize := h * visible / total
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	if thumbSize > h {
+		thumbSize = h
+	}
+	thumbPos := int(float64(h-thumbSize) * vp.ScrollPercent())
+	for i := 0; i < h; i++ {
+		if i >= thumbPos && i < thumbPos+thumbSize {
+			lines[i] = thumbStyle.Render("▐")
+		} else {
+			lines[i] = trackStyle.Render("│")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m appModel) getRequiredInputHeight() int {
@@ -405,92 +826,128 @@ func (m appModel) getRequiredInputHeight() int {
 }
 
 func (m appModel) resizeViews(forceReflow bool) appModel {
-	m.input.SetWidth(m.width)
+	// Input textarea content area: total - 2 (rounded border) - 2 (padding)
+	inputContentWidth := m.width - 4
+	if inputContentWidth < 1 {
+		inputContentWidth = 1
+	}
+	m.input.SetWidth(inputContentWidth)
 	m.input.SetHeight(m.getRequiredInputHeight())
 
-	headerHeight := 0
-	inputHeight := m.input.Height()
-	if inputHeight < 1 {
-		inputHeight = 1
+	headerHeight := 1
+	inputHeight := m.input.Height() + 2 // rounded border top+bottom
+	if !m.inputEnabled {
+		inputHeight = 1 // borderless thinking line
 	}
+	statusHeight := 1
 
-	// Calculate visible wrapper height (adding padding/margins)
-	// Border top+bottom + padding
-	inputWrapperHeight := inputHeight + 0 // our border style doesn't add vertical height currently
-	statusHeight := 2 // separator + status line
-	
-	vpHeight := m.height - headerHeight - inputWrapperHeight - statusHeight
+	vpHeight := m.height - headerHeight - inputHeight - statusHeight
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
 
-	wrapped := lipgloss.NewStyle().Width(m.width - 2).Render(strings.Join(m.outputLines, "\n"))
+	// Viewport leaves one column on the right for the scrollbar.
+	vpWidth := m.width - 1
+	if vpWidth < 1 {
+		vpWidth = 1
+	}
+
+	// Wrap text with one cell of right padding inside the viewport.
+	wrapWidth := vpWidth - 1
+	if wrapWidth < 1 {
+		wrapWidth = 1
+	}
+	wrapped := lipgloss.NewStyle().Width(wrapWidth).Render(strings.Join(m.outputLines, "\n"))
+	m.wrappedLines = strings.Split(wrapped, "\n")
 
 	if !m.ready {
-		m.viewport = viewport.New(m.width, vpHeight)
+		m.viewport = viewport.New(vpWidth, vpHeight)
 		m.viewport.SetContent(wrapped)
 		m.viewport.GotoBottom()
 		m.ready = true
 	} else {
 		oldHeight := m.viewport.Height
-		m.viewport.Width = m.width
+		m.viewport.Width = vpWidth
 		m.viewport.Height = vpHeight
 		if forceReflow {
 			m.viewport.SetContent(wrapped)
 		} else if oldHeight != vpHeight {
-			// If height changed, we might need to jump back to bottom if we were pinned
 			m.viewport.GotoBottom()
 		}
 	}
 	return m
 }
 
+// buildStatusBar renders a single fixed-width line with left-aligned activity
+// info and right-aligned meta (tokens + keybinding hints). Widths are stable
+// across frames so the line never jumps.
 func (m appModel) buildStatusBar() string {
-	model := m.activeModel
-	if model == "" {
-		model = "..."
+	if m.width <= 0 {
+		return ""
 	}
 
-	if !m.inputEnabled {
-		label := m.spinnerLabel
-		if label == "" {
-			label = "streaming"
-		}
+	dim := lipgloss.NewStyle().Foreground(colMuted)
+	accent := lipgloss.NewStyle().Foreground(colCyan)
+	key := lipgloss.NewStyle().Foreground(colPurple).Bold(true)
+	sepStr := dim.Render(" · ")
 
-		// Truncate overly long labels to prevent unwanted line wrapping that breaks layout math
-		maxLabel := m.width - 50 // Reserve ~50 chars for model, tokens, time
-		if maxLabel < 15 {
-			maxLabel = 15
+	// ── Left: activity state ──
+	var left string
+	switch {
+	case !m.copyNoticeAt.IsZero() && time.Since(m.copyNoticeAt) < 3*time.Second:
+		left = lipgloss.NewStyle().Foreground(colGreen).Render("✓ copied to clipboard") + sepStr + dim.Render("drag to select · esc to clear")
+	case m.hasSelection:
+		start, end, _ := m.selectionRange()
+		lineCount := end.line - start.line + 1
+		label := fmt.Sprintf("selection · %d line", lineCount)
+		if lineCount != 1 {
+			label += "s"
 		}
-		// Strip newlines or ansi just in case, though label should be clean
-		label = strings.ReplaceAll(label, "\n", " ")
-		if len(label) > maxLabel {
-			label = label[:maxLabel-3] + "..."
-		}
-
-		totalElapsed := time.Since(m.taskStart).Round(time.Second)
-		stepElapsed := time.Since(m.stepStart).Round(time.Second)
-
-		statusIcon := "💬"
-		if m.spinnerActive {
-			statusIcon = m.spinner.View()
-		}
-
-		msg := fmt.Sprintf("%s 🧠 %s  |  ⏳ %s (%s)  |  ⏱️ %s",
-			statusIcon, model, label, stepElapsed, totalElapsed)
-		if m.tokenUsage != "" {
-			msg += fmt.Sprintf("  |  📊 %s", m.tokenUsage)
-		}
-		return m.theme.StyleCyan.Render(msg)
+		left = lipgloss.NewStyle().Foreground(colPurple).Render("▎ ") + accent.Render(label) + sepStr + dim.Render("release to copy · esc to clear")
+	case !m.inputEnabled:
+		// The thinking line above already shows spinner + label; here we
+		// just surface the elapsed timers so the user can see the task is
+		// still progressing.
+		step := time.Since(m.stepStart).Round(time.Second)
+		total := time.Since(m.taskStart).Round(time.Second)
+		left = dim.Render(fmt.Sprintf("step %s · total %s", step, total))
+	default:
+		left = dim.Render("●") + " " + lipgloss.NewStyle().Foreground(colGreen).Render("ready") + sepStr + dim.Render("enter to send · alt+enter for newline")
 	}
 
-	// Idle status
-	tokenInfo := m.tokenUsage
-	if tokenInfo == "" {
-		tokenInfo = "0 tokens"
+	// ── Right: tokens + keybindings ──
+	tok := m.tokenUsage
+	if tok == "" {
+		tok = "0 tok"
 	}
-	msg := fmt.Sprintf("🧠 %s  |  ⏱️ idle  |  📊 %s", model, tokenInfo)
-	return lipgloss.NewStyle().Faint(true).Render(msg)
+	mouseLabel := "mouse on"
+	if !m.mouseEnabled {
+		mouseLabel = "mouse off"
+	}
+	right := dim.Render(tok) + sepStr + key.Render("F2") + " " + dim.Render(mouseLabel) + sepStr + key.Render("^C") + " " + dim.Render("interrupt")
+
+	// ── Compose with stable total width ──
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+	gap := m.width - leftW - rightW - 2 // 1-char pad on each side
+
+	if gap < 1 {
+		// Drop the keybinding hints from the right side when too narrow.
+		right = dim.Render(tok) + sepStr + key.Render("F2") + " " + dim.Render(mouseLabel)
+		rightW = lipgloss.Width(right)
+		gap = m.width - leftW - rightW - 2
+	}
+	if gap < 1 {
+		// Drop the right side entirely.
+		right = ""
+		rightW = 0
+		gap = m.width - leftW - 1
+	}
+	if gap < 0 {
+		gap = 0
+	}
+
+	return " " + left + strings.Repeat(" ", gap) + right + " "
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -505,6 +962,16 @@ type BubbleTeaUI struct {
 	theme        Theme
 	currentModel string
 	historyFile  string
+
+	// inline, when true, runs on the main terminal buffer instead of the
+	// alt-screen. Trade-off: scrollback survives exit, but rendering can
+	// feel busier during the session.
+	inline bool
+
+	// mouseEnabled is the initial mouse-capture state applied when the tea
+	// program starts. F2 flips it at runtime; this field is not kept in
+	// sync with that toggle.
+	mouseEnabled bool
 
 	// ReadLine synchronization — these channels are in the appModel
 	inputChan     chan string
@@ -521,7 +988,25 @@ type TUIRunner interface {
 }
 
 // NewBubbleTeaUI creates a new BubbleTea-based UI implementation.
-func NewBubbleTeaUI(historyFile string) (UI, error) {
+//
+// inline=true renders on the main terminal buffer instead of the alt-screen.
+// disableMouse=true skips mouse capture at launch so native text selection
+// keeps working — the F2 keybinding still flips mouse mode at runtime.
+//
+// CODEZILLA_INLINE=1 and CODEZILLA_NO_MOUSE=1 env vars are equivalent opt-ins
+// for scripts when the flags aren't set.
+func NewBubbleTeaUI(historyFile string, inline, disableMouse bool) (UI, error) {
+	if !inline {
+		if v := strings.ToLower(strings.TrimSpace(os.Getenv("CODEZILLA_INLINE"))); v == "1" || v == "true" || v == "yes" {
+			inline = true
+		}
+	}
+	if !disableMouse {
+		if v := strings.ToLower(strings.TrimSpace(os.Getenv("CODEZILLA_NO_MOUSE"))); v == "1" || v == "true" || v == "yes" {
+			disableMouse = true
+		}
+	}
+
 	theme := ThemeTokyoNight()
 	// Use fancy icons
 	theme.IconSuccess = "✨"
@@ -533,6 +1018,7 @@ func NewBubbleTeaUI(historyFile string) (UI, error) {
 	prompt := "codezilla " + theme.IconPrompt + " "
 
 	model := newAppModel(theme, prompt)
+	model.mouseEnabled = !disableMouse
 
 	// Load history from file
 	if historyFile != "" {
@@ -545,6 +1031,8 @@ func NewBubbleTeaUI(historyFile string) (UI, error) {
 	ui := &BubbleTeaUI{
 		theme:         theme,
 		historyFile:   historyFile,
+		inline:        inline,
+		mouseEnabled:  !disableMouse,
 		inputChan:     model.inputChan,
 		eofChan:       model.eofChan,
 		interruptChan: model.interruptChan,
@@ -557,11 +1045,14 @@ func NewBubbleTeaUI(historyFile string) (UI, error) {
 // RunTUI starts the BubbleTea program on the calling goroutine and runs
 // appFn concurrently. Blocks until the tea program exits.
 func (ui *BubbleTeaUI) RunTUI(ctx context.Context, appFn func(context.Context) error) error {
-	ui.program = tea.NewProgram(
-		*ui.model,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+	var opts []tea.ProgramOption
+	if ui.mouseEnabled {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+	if !ui.inline {
+		opts = append(opts, tea.WithAltScreen())
+	}
+	ui.program = tea.NewProgram(*ui.model, opts...)
 
 	// Run the application logic in a background goroutine.
 	// When it finishes, send appQuitMsg to shut down the tea program.
@@ -591,7 +1082,7 @@ func (ui *BubbleTeaUI) InterruptChan() <-chan struct{} {
 
 func (ui *BubbleTeaUI) Clear() {
 	if ui.program != nil {
-		ui.program.Send(appendOutputMsg{text: ""})
+		ui.program.Send(clearViewportMsg{})
 	}
 }
 
@@ -712,12 +1203,30 @@ func (ui *BubbleTeaUI) ShowResponseStream(ch <-chan string) {
 }
 
 func (ui *BubbleTeaUI) ShowCode(language, code string) {
-	ui.appendToViewport(ui.theme.StylePurple.Render("```"+language) + "\n")
-	ui.appendToViewport(code)
-	if !strings.HasSuffix(code, "\n") {
-		ui.appendToViewport("\n")
+	width := 80
+	if ui.model != nil && ui.model.width > 0 {
+		width = ui.model.width - 4
 	}
-	ui.appendToViewport(ui.theme.StylePurple.Render("```") + "\n")
+	md := "```" + language + "\n" + code
+	if !strings.HasSuffix(md, "\n") {
+		md += "\n"
+	}
+	md += "```\n"
+
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStyles(styles.DarkStyleConfig),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		ui.appendToViewport(md)
+		return
+	}
+	rendered, err := renderer.Render(md)
+	if err != nil {
+		ui.appendToViewport(md)
+		return
+	}
+	ui.appendToViewport(rendered)
 }
 
 // ── Startup & Banners ────────────────────────────────────────────────────────
@@ -731,30 +1240,29 @@ func (ui *BubbleTeaUI) ShowBanner() {
 		"  \\____\\___/ \\__,_|\\___/___|_|_|_|\\__,_|",
 	}
 
-	for i, line := range banner {
-		ui.appendToViewport(ui.theme.StyleCyan.Render(line) + "\n")
-		time.Sleep(100 * time.Millisecond)
-
-		if i == len(banner)-1 {
-			ui.appendToViewport("\n" + ui.theme.StyleYellow.Render("✨ ") + "AI-Powered Coding Assistant ✨\n")
-		}
+	var out strings.Builder
+	for _, line := range banner {
+		out.WriteString(ui.theme.StyleCyan.Render(line))
+		out.WriteByte('\n')
 	}
+	out.WriteByte('\n')
+	out.WriteString(ui.theme.StyleYellow.Render("✨ "))
+	out.WriteString("AI-Powered Coding Assistant ✨\n")
 
-	// Animated gradient separator
+	// Gradient separator, built in one pass.
 	colors := []lipgloss.Style{ui.theme.StylePurple, ui.theme.StyleBlue, ui.theme.StyleCyan, ui.theme.StyleBlue, ui.theme.StylePurple}
 	separatorChars := []string{"═", "╪", "╬", "╪", "═"}
-
-	var sep strings.Builder
 	for i := 0; i < 80; i++ {
 		colorIndex := (i * len(colors)) / 80
 		charIndex := (i * len(separatorChars)) / 80
 		if charIndex >= len(separatorChars) {
 			charIndex = len(separatorChars) - 1
 		}
-		sep.WriteString(colors[colorIndex].Render(separatorChars[charIndex]))
+		out.WriteString(colors[colorIndex].Render(separatorChars[charIndex]))
 	}
-	ui.appendToViewport(sep.String() + "\n")
-	time.Sleep(100 * time.Millisecond)
+	out.WriteByte('\n')
+
+	ui.appendToViewport(out.String())
 }
 
 func (ui *BubbleTeaUI) ShowWelcome(model, ollamaURL string, contextEnabled bool) {
@@ -808,6 +1316,11 @@ func (ui *BubbleTeaUI) ShowHelp() {
 		{"/skill list", "List all available skills"},
 		{"/skill <name>", "Toggle a skill on/off"},
 		{"/tokens", "Show session token usage"},
+		{"Drag in viewport", "Select text · release to copy to clipboard"},
+		{"Esc (with selection)", "Clear selection highlight"},
+		{"F2", "Toggle mouse capture (off = native terminal selection)"},
+		{"Ctrl+C", "Copy active selection · interrupt task · exit at empty prompt"},
+		{"Alt+Enter", "Insert newline in the input box"},
 	}
 
 	out := "\n" + ui.theme.StyleBold.Render("Available Commands:") + "\n"

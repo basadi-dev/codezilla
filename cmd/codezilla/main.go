@@ -26,6 +26,9 @@ func main() {
 		ollamaURL   = flag.String("ollama-url", "", "Override Ollama API URL")
 		temperature = flag.Float64("temperature", -1, "Override temperature (0.0-1.0)")
 		maxTokens   = flag.Int("max-tokens", 0, "Override max tokens")
+		inline      = flag.Bool("inline", false, "Render on the main terminal buffer instead of the alt-screen (conversation persists in shell scrollback on exit). Also settable via CODEZILLA_INLINE=1.")
+		noMouse     = flag.Bool("no-mouse", false, "Disable mouse capture at launch (restores native text selection). Also settable via CODEZILLA_NO_MOUSE=1 or disable_mouse: true in config.")
+		mouseMode   = flag.String("mouse", "", "Mouse capture mode: 'on' or 'off'. Overrides --no-mouse when set.")
 		version     = flag.Bool("version", false, "Show version")
 		help        = flag.Bool("help", false, "Show help")
 	)
@@ -103,11 +106,30 @@ func main() {
 		cfg.NoColor = true
 	}
 
+	// Apply mouse settings. Precedence: explicit --mouse flag, then
+	// --no-mouse, then CODEZILLA_NO_MOUSE env, then whatever the config file
+	// said (default false = mouse on, matching GitHub Copilot CLI).
+	switch strings.ToLower(strings.TrimSpace(*mouseMode)) {
+	case "off", "false", "0", "no":
+		cfg.DisableMouse = true
+	case "on", "true", "1", "yes":
+		cfg.DisableMouse = false
+	case "":
+		if *noMouse {
+			cfg.DisableMouse = true
+		} else if v := strings.ToLower(strings.TrimSpace(os.Getenv("CODEZILLA_NO_MOUSE"))); v == "1" || v == "true" || v == "yes" {
+			cfg.DisableMouse = true
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "Invalid --mouse value %q (expected 'on' or 'off')\n", *mouseMode)
+		os.Exit(2)
+	}
+
 	// Get history file path
 	historyPath, _ := ui.GetDefaultHistoryFilePath()
 
-	// Create unified BubbleTea UI 
-	appUI, err := ui.NewBubbleTeaUI(historyPath)
+	// Create unified BubbleTea UI
+	appUI, err := ui.NewBubbleTeaUI(historyPath, *inline, cfg.DisableMouse)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize UI: %v\n", err)
