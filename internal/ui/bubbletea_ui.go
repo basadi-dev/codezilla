@@ -115,7 +115,7 @@ func newAppModel(theme Theme, prompt string) appModel {
 	ti.Placeholder = prompt
 	// Textarea uses slightly different styling properties
 	ti.Prompt = " " // We don't want a default internal prompt since we'll draw it ourselves or use placeholder
-	
+
 	// Ensure transparent background for clean integration
 	ti.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#2E3C64", Dark: "#7AA2F7"}).Background(lipgloss.NoColor{})
 	ti.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.NoColor{})
@@ -404,7 +404,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.spinnerLabel != msg.label || (!m.spinnerActive && msg.active) {
 			m.stepStart = time.Now()
 		}
-		
+
 		m.spinnerActive = msg.active
 		m.spinnerLabel = msg.label
 		if msg.active {
@@ -472,18 +472,18 @@ func (m *appModel) appendOutput(text string) {
 	} else {
 		m.outputLines = append(m.outputLines, lines[0])
 	}
-	
+
 	// Any subsequent segments are new lines
 	if len(lines) > 1 {
 		m.outputLines = append(m.outputLines, lines[1:]...)
 	}
 
 	if m.ready {
-		// Wrap text to terminal width to prevent truncation and format cleanly
-		width := m.width
-		if width > 0 {
-			// Sub margin for perfect wrapping
-			width -= 2
+		// Wrap text to viewport content width to prevent truncation.
+		// vpWidth = m.width - 2 (scrollbar + margin), wrapWidth = vpWidth - 1 (text padding)
+		width := m.width - 3
+		if width < 1 {
+			width = 1
 		}
 
 		content := strings.Join(m.outputLines, "\n")
@@ -635,19 +635,31 @@ func (m appModel) View() string {
 
 	header := m.buildHeader()
 
-	vpView := m.renderSelectedViewport()
-	scrollbar := renderScrollbar(m.viewport)
-	viewportRow := lipgloss.JoinHorizontal(lipgloss.Top, vpView, scrollbar)
+	viewportRow := m.renderViewportWithScrollbar()
 
 	inputView := m.renderInputBox()
 	status := m.buildStatusBar()
 
-	return lipgloss.JoinVertical(lipgloss.Left,
+	out := lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		viewportRow,
 		inputView,
 		status,
 	)
+
+	// Final safety clamp: ensure no line exceeds terminal width.
+	// This prevents any rendering artifact from JoinVertical padding,
+	// emoji width mismatches, or ANSI code interactions.
+	if m.width > 0 {
+		lines := strings.Split(out, "\n")
+		for i, l := range lines {
+			if ansi.StringWidth(l) > m.width {
+				lines[i] = ansi.Truncate(l, m.width, "")
+			}
+		}
+		out = strings.Join(lines, "\n")
+	}
+	return out
 }
 
 func (m appModel) buildHeader() string {
@@ -753,45 +765,63 @@ func (m appModel) renderThinkingLine() string {
 	return " " + icon + " " + accent.Render(label) + hint
 }
 
-// renderScrollbar returns a single-column vertical scrollbar sized to the
-// viewport's height. Uses ▐ for the thumb and │ for the track. When there
-// is no content to scroll, the column is blank so layout stays stable.
-func renderScrollbar(vp viewport.Model) string {
-	h := vp.Height
-	if h <= 0 {
-		return ""
-	}
-	trackStyle := lipgloss.NewStyle().Foreground(colBorderDim)
-	thumbStyle := lipgloss.NewStyle().Foreground(colAccent)
+// renderViewportWithScrollbar composites the viewport output with a
+// single-column scrollbar by appending the scrollbar glyph to each
+// viewport line individually. This avoids lipgloss.JoinHorizontal
+// which can misalign the scrollbar when viewport lines have varying
+// visible widths due to ANSI escape sequences.
+func (m appModel) renderViewportWithScrollbar() string {
+	vpView := m.renderSelectedViewport()
+	vpLines := strings.Split(vpView, "\n")
+	h := m.viewport.Height
 
-	total := vp.TotalLineCount()
-	visible := vp.VisibleLineCount()
-	lines := make([]string, h)
+	// Use background-colored spaces for the scrollbar to avoid any
+	// ambiguous-width Unicode character issues with block characters.
+	thumbGlyph := lipgloss.NewStyle().Background(colAccent).Render(" ")
+	trackGlyph := lipgloss.NewStyle().Foreground(colBorderDim).Render(" ")
 
-	if total <= visible {
-		blank := " "
-		for i := range lines {
-			lines[i] = blank
+	total := m.viewport.TotalLineCount()
+	visible := m.viewport.VisibleLineCount()
+
+	scrollGlyphs := make([]string, h)
+	if total <= visible || h <= 0 {
+		for i := range scrollGlyphs {
+			scrollGlyphs[i] = " "
 		}
-		return strings.Join(lines, "\n")
+	} else {
+		thumbSize := h * visible / total
+		if thumbSize < 1 {
+			thumbSize = 1
+		}
+		if thumbSize > h {
+			thumbSize = h
+		}
+		thumbPos := int(float64(h-thumbSize) * m.viewport.ScrollPercent())
+		for i := 0; i < h; i++ {
+			if i >= thumbPos && i < thumbPos+thumbSize {
+				scrollGlyphs[i] = thumbGlyph
+			} else {
+				scrollGlyphs[i] = trackGlyph
+			}
+		}
 	}
 
-	thumbSize := h * visible / total
-	if thumbSize < 1 {
-		thumbSize = 1
-	}
-	if thumbSize > h {
-		thumbSize = h
-	}
-	thumbPos := int(float64(h-thumbSize) * vp.ScrollPercent())
+	// Use ANSI CHA (Cursor Horizontal Absolute, \x1b[nG) to position the
+	// scrollbar at a fixed terminal column. This completely bypasses content
+	// width calculations, eliminating emoji/Unicode measurement mismatches
+	// between Go libraries and the terminal. The scrollbar always appears
+	// at the same column regardless of how wide the terminal renders content.
+	scrollCol := m.width - 1 // 1-indexed; second-to-last column (last = margin)
+	cha := fmt.Sprintf("\x1b[%dG", scrollCol)
+	result := make([]string, h)
 	for i := 0; i < h; i++ {
-		if i >= thumbPos && i < thumbPos+thumbSize {
-			lines[i] = thumbStyle.Render("▐")
-		} else {
-			lines[i] = trackStyle.Render("│")
+		var line string
+		if i < len(vpLines) {
+			line = vpLines[i]
 		}
+		result[i] = line + cha + scrollGlyphs[i]
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(result, "\n")
 }
 
 func (m appModel) getRequiredInputHeight() int {
@@ -811,7 +841,7 @@ func (m appModel) getRequiredInputHeight() int {
 			height += (l + width - 1) / width
 		}
 	}
-	
+
 	if height < 1 {
 		height = 1
 	}
@@ -846,8 +876,11 @@ func (m appModel) resizeViews(forceReflow bool) appModel {
 		vpHeight = 1
 	}
 
-	// Viewport leaves one column on the right for the scrollbar.
-	vpWidth := m.width - 1
+	// Viewport leaves two columns on the right: one for the scrollbar
+	// glyph and one trailing space buffer so the scrollbar never sits
+	// at the terminal's very last column (which causes rendering artifacts
+	// with auto-margin / line-wrapping in many terminals).
+	vpWidth := m.width - 2
 	if vpWidth < 1 {
 		vpWidth = 1
 	}
@@ -1085,8 +1118,6 @@ func (ui *BubbleTeaUI) Clear() {
 		ui.program.Send(clearViewportMsg{})
 	}
 }
-
-
 
 func (ui *BubbleTeaUI) ShowPrompt() string {
 	return "codezilla " + ui.theme.IconPrompt + " "
