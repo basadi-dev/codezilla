@@ -38,6 +38,7 @@ type Agent interface {
 	SetMaxTokens(maxTokens int)
 	SetSessionRecorder(recorder *session.Recorder)
 	SetAutoRoute(enabled bool)
+	Clone() Agent
 }
 
 type Config struct {
@@ -334,4 +335,25 @@ func (a *agent) SetMaxTokens(maxTokens int) {
 func (a *agent) SetSessionRecorder(recorder *session.Recorder) {
 	a.logger.Info("Changing session recorder")
 	a.config.SessionRecorder = recorder
+}
+
+func (a *agent) Clone() Agent {
+	// Provide a copy of the config so agents don't mutate the global config
+	newConfig := *a.config
+
+	newAgent := &agent{
+		config:        &newConfig,
+		context:       a.context.Clone(),
+		llmClient:     a.llmClient, // Shared thread-safe client
+		toolRegistry:  a.toolRegistry, // Shared thread-safe registry
+		logger:        a.logger,
+		permissionMgr: a.permissionMgr,
+	}
+
+	if a.router != nil {
+		newRouter := *a.router
+		newAgent.router = &newRouter
+	}
+
+	return newAgent
 }

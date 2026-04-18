@@ -67,6 +67,47 @@ func NewContext(maxTokens int, log *logger.Logger) *Context {
 	}
 }
 
+// Clone creates a deep copy of the context suitable for initializing a parallel 
+// agent without sharing mutable state.
+func (c *Context) Clone() *Context {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	newCtx := &Context{
+		Messages:          make([]Message, len(c.Messages)),
+		RollingSummary:    c.RollingSummary,
+		SlidingWindowSize: c.SlidingWindowSize,
+		MaxTokens:         c.MaxTokens,
+		CurrentTokens:     c.CurrentTokens,
+		TruncateOldest:    c.TruncateOldest,
+		logger:            c.logger,
+	}
+	
+	// Deep copy messages mapping
+	for i, msg := range c.Messages {
+		newMsg := Message{
+			Role:         msg.Role,
+			Content:      msg.Content,
+			Timestamp:    msg.Timestamp,
+			ThinkContent: msg.ThinkContent,
+		}
+		if len(msg.ToolCalls) > 0 {
+			newMsg.ToolCalls = make([]anyllm.ToolCall, len(msg.ToolCalls))
+			copy(newMsg.ToolCalls, msg.ToolCalls)
+		}
+		if msg.ToolResult != nil {
+			newMsg.ToolResult = &ToolResult{
+				ToolCallID: msg.ToolResult.ToolCallID,
+				Result:     msg.ToolResult.Result, // Keep result as is (interface limit)
+				Error:      msg.ToolResult.Error,
+			}
+		}
+		newCtx.Messages[i] = newMsg
+	}
+
+	return newCtx
+}
+
 func (c *Context) ClearContext() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
