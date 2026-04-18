@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -154,6 +155,23 @@ func (c *Client) buildOllamaProvider() (anyllm.Provider, error) {
 		opts = append(opts, anyllm.WithBaseURL(c.cfg.LLM.Ollama.BaseURL))
 	}
 
+	// ALWAYS build a custom HTTP client and robust transport to ensure
+	// fast connection drop detection (e.g., hanging connections to cloud providers).
+	baseTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second, // Fast drop if TCP connection hangs
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second, // Fast drop if TLS handshake hangs
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Minute, // Fast drop if LLM stuck and sends no headers
+	}
+	transport := http.RoundTripper(baseTransport)
+
 	// Build a custom HTTP client that injects auth headers, since the
 	// Ollama SDK's own auth mechanism (SSH keys) doesn't support cloud tokens.
 	needsCustomTransport := c.cfg.LLM.APIKeys.Ollama != "" ||
@@ -161,8 +179,6 @@ func (c *Client) buildOllamaProvider() (anyllm.Provider, error) {
 		len(c.cfg.LLM.Ollama.Headers) > 0
 
 	if needsCustomTransport {
-		transport := http.RoundTripper(http.DefaultTransport)
-
 		// Layer 1: custom headers
 		if len(c.cfg.LLM.Ollama.Headers) > 0 {
 			transport = &headerTransport{
@@ -194,17 +210,17 @@ func (c *Client) buildOllamaProvider() (anyllm.Provider, error) {
 				}
 			}
 		}
-
-		httpClient := &http.Client{
-			Transport: transport,
-			// Upper-bound timeout. For streaming the SDK reads chunks
-			// incrementally, so 5 min guards against dead connections
-			// without killing long-running streams that are actively
-			// producing output.
-			Timeout: 5 * time.Minute,
-		}
-		opts = append(opts, anyllm.WithHTTPClient(httpClient))
 	}
+
+	httpClient := &http.Client{
+		Transport: transport,
+		// Upper-bound timeout. For streaming the SDK reads chunks
+		// incrementally, so 5 min guards against dead connections
+		// without killing long-running streams that are actively
+		// producing output.
+		Timeout: 5 * time.Minute,
+	}
+	opts = append(opts, anyllm.WithHTTPClient(httpClient))
 
 	return ollama.New(opts...)
 }
