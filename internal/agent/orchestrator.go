@@ -452,22 +452,6 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				text = SanitiseSpecialTokens(text)
 				finalResponse = text
 
-				// Think compression logic
-				if threshold := o.agent.config.ThinkCompressThreshold; threshold > 0 {
-					startIdx := strings.Index(finalResponse, "<think>")
-					endIdx := strings.Index(finalResponse, "</think>")
-					if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
-						thinkContent := finalResponse[startIdx+7 : endIdx]
-						if len(thinkContent) > threshold {
-							summary := o.summarizeThink(ctx, thinkContent)
-							if summary != "" {
-								finalResponse = finalResponse[:startIdx+7] + "\n[Thought Process Summarized]\n" + summary + "\n" + finalResponse[endIdx:]
-								o.logger.Info("Compressed <think> block", "original_len", len(thinkContent), "summary_len", len(summary))
-							}
-						}
-					}
-				}
-
 				if onToken != nil && text != "" {
 					onToken(text)
 				}
@@ -599,24 +583,6 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			// Layer 1: sanitise leaked special tokens before any further processing
 			finalResponse = SanitiseSpecialTokens(strings.TrimSpace(fullResp))
 
-			// Think compression logic
-			if threshold := o.agent.config.ThinkCompressThreshold; threshold > 0 {
-				startIdx := strings.Index(finalResponse, "<think>")
-				endIdx := strings.Index(finalResponse, "</think>")
-				if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
-					thinkContent := finalResponse[startIdx+7 : endIdx]
-					if len(thinkContent) > threshold {
-						// Summarize the think block to save memory context
-						summary := o.summarizeThink(ctx, thinkContent)
-						if summary != "" {
-							// Replace the large block with the summary
-							finalResponse = finalResponse[:startIdx+7] + "\n[Thought Process Summarized]\n" + summary + "\n" + finalResponse[endIdx:]
-							o.logger.Info("Compressed <think> block", "original_len", len(thinkContent), "summary_len", len(summary))
-						}
-					}
-				}
-			}
-
 			o.logger.DumpPretty("Received LLM Response (Streaming)", map[string]any{
 				"content":            finalResponse,
 				"native_tools_count": len(nativeTools),
@@ -678,13 +644,13 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				}
 			}
 
-			thinkContent := ""
-			if finalResponse != "" {
-				thinkContent = finalResponse
-			} else {
-				thinkContent = fmt.Sprintf("I am calling %d tools natively...", len(toolsToExecute))
+			// Extract and strip <think> blocks — keep content for logging,
+			// but never include it in what's sent to the LLM.
+			msgContent, thinkContent := extractAndStripThinkBlocks(finalResponse)
+			if msgContent == "" {
+				msgContent = fmt.Sprintf("I am calling %d tools natively...", len(toolsToExecute))
 			}
-			o.agent.context.AddToolCallsMessage(thinkContent, toolsToExecute)
+			o.agent.context.AddToolCallsMessageWithThink(msgContent, thinkContent, toolsToExecute)
 
 			type ToolResult struct {
 				ID     string
@@ -824,7 +790,12 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 		case StateComplete:
 			if finalResponse != "" {
-				o.agent.AddAssistantMessage(finalResponse)
+				// Extract and strip <think> blocks — keep content for logging,
+				// but never include it in what's sent to the LLM.
+				stored, thinkContent := extractAndStripThinkBlocks(finalResponse)
+				if stored != "" {
+					o.agent.context.AddAssistantMessageWithThink(stored, thinkContent)
+				}
 			}
 			return finalResponse, nil
 		}
@@ -856,4 +827,30 @@ func (o *AgentOrchestrator) summarizeThink(ctx context.Context, thinkText string
 		return strings.TrimSpace(comp.Choices[0].Message.ContentString())
 	}
 	return ""
+}
+
+// stripThinkBlocks removes all <think>...</think> blocks from a response.
+// Think blocks are internal reasoning meant for display only — they should
+// not be stored in conversation context where they confuse subsequent turns.
+func stripThinkBlocks(s string) string {
+	stripped, _ := extractAndStripThinkBlocks(s)
+	return stripped
+}
+
+// extractAndStripThinkBlocks extracts the content of all <think>...</think> blocks
+// and returns the stripped response alongside the joined think content.
+// The think content is suitable for storing on a Message for logging and future
+// analysis; the stripped response is what gets sent to the LLM.
+func extractAndStripThinkBlocks(s string) (stripped, thinkContent string) {
+	var thinks []string
+	for {
+		start := strings.Index(s, "<think>")
+		end := strings.Index(s, "</think>")
+		if start == -1 || end == -1 || end <= start {
+			break
+		}
+		thinks = append(thinks, strings.TrimSpace(s[start+7:end]))
+		s = s[:start] + s[end+len("</think>"):]
+	}
+	return strings.TrimSpace(s), strings.Join(thinks, "\n---\n")
 }

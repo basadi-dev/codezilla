@@ -22,11 +22,14 @@ const (
 )
 
 type Message struct {
-	Role       Role              `json:"role"`
-	Content    string            `json:"content"`
-	ToolCalls  []anyllm.ToolCall `json:"tool_calls,omitempty"`
-	ToolResult *ToolResult       `json:"tool_result,omitempty"`
-	Timestamp  time.Time         `json:"timestamp"`
+	Role         Role              `json:"role"`
+	Content      string            `json:"content"`
+	ToolCalls    []anyllm.ToolCall `json:"tool_calls,omitempty"`
+	ToolResult   *ToolResult       `json:"tool_result,omitempty"`
+	Timestamp    time.Time         `json:"timestamp"`
+	// ThinkContent stores the raw <think>...</think> block produced by the model.
+	// It is preserved for logging and future analysis but is never sent to the LLM.
+	ThinkContent string            `json:"think_content,omitempty"`
 }
 
 type ToolResult struct {
@@ -217,12 +220,37 @@ func (c *Context) AddAssistantMessage(content string) {
 	})
 }
 
+// AddAssistantMessageWithThink stores the assistant's response together with
+// the raw <think> block it produced. ThinkContent is persisted for logging and
+// future analysis but is never forwarded to the LLM.
+func (c *Context) AddAssistantMessageWithThink(content, thinkContent string) {
+	c.AddMessage(Message{
+		Role:         RoleAssistant,
+		Content:      content,
+		ThinkContent: thinkContent,
+		Timestamp:    time.Now(),
+	})
+}
+
 func (c *Context) AddToolCallsMessage(content string, calls []anyllm.ToolCall) {
 	c.AddMessage(Message{
 		Role:      RoleAssistant,
 		Content:   content,
 		ToolCalls: calls,
 		Timestamp: time.Now(),
+	})
+}
+
+// AddToolCallsMessageWithThink stores the tool-calling message together with
+// the raw <think> block that preceded it. ThinkContent is persisted for logging
+// and future analysis but is never forwarded to the LLM.
+func (c *Context) AddToolCallsMessageWithThink(content, thinkContent string, calls []anyllm.ToolCall) {
+	c.AddMessage(Message{
+		Role:         RoleAssistant,
+		Content:      content,
+		ToolCalls:    calls,
+		ThinkContent: thinkContent,
+		Timestamp:    time.Now(),
 	})
 }
 
