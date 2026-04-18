@@ -1266,26 +1266,23 @@ func (app *App) processInput(ctx context.Context, input string) error {
 		}
 
 		thinkLineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89")).Italic(true)
-		thinkBarStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#414868"))
 		var thinkLineBuffer string // accumulates the current partial think line
 
 		flushThinkLine := func(complete bool) {
 			// Emit whatever is in thinkLineBuffer.
-			// If complete=true a newline terminates the line (add │ prefix).
+			// If complete=true a newline terminates the line.
 			// If complete=false we're mid-line; just print the fragment raw (no newline yet).
 			if thinkLineBuffer == "" {
 				return
 			}
 			if complete {
-				app.ui.Print("%s%s\n",
-					thinkBarStyle.Render("│ "),
+				app.ui.Print("  %s\n",
 					thinkLineStyle.Render(thinkLineBuffer))
 				thinkLinesPrinted++
 				thinkLineBuffer = ""
 			} else {
-				// mid-line: print prefix only on first fragment of the line
-				app.ui.Print("%s%s",
-					thinkBarStyle.Render("│ "),
+				// mid-line: print the fragment raw
+				app.ui.Print("  %s",
 					thinkLineStyle.Render(thinkLineBuffer))
 				thinkLineBuffer = ""
 			}
@@ -1303,8 +1300,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 				}
 				// Got a newline: complete the current line
 				thinkLineBuffer += s[:nl]
-				app.ui.Print("%s%s\n",
-					thinkBarStyle.Render("│ "),
+				app.ui.Print("  %s\n",
 					thinkLineStyle.Render(thinkLineBuffer))
 				thinkLinesPrinted++
 				thinkLineBuffer = ""
@@ -1391,7 +1387,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						app.ui.HideThinking()
 						thinkLinesPrinted = 2
 						app.ui.Print("\n%s\n",
-							lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89")).Italic(true).Render("┌─ 🤔 thinking "))
+							lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89")).Italic(true).Render("🤔 thinking"))
 						thinkBuffer = thinkBuffer[idx+len("<think>"):]
 					}
 				}
@@ -1405,8 +1401,7 @@ func (app *App) processInput(ctx context.Context, input string) error {
 						flushThinkLine(true) // flush any partial line before closing
 						// Close the think block
 						inThink = false
-						app.ui.Print("%s\n\n",
-							lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89")).Italic(true).Render("└─────────────── "))
+						app.ui.Print("\n")
 
 						// When the think block exceeds the compress threshold, note it
 						if app.config.ThinkCompressThreshold > 0 && thinkCharsPrinted > app.config.ThinkCompressThreshold {
