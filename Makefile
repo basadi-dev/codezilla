@@ -1,4 +1,4 @@
-.PHONY: build clean run run-debug test lint vet fmt help install check all tidy
+.PHONY: build clean run run-debug test lint vet fmt help install check all tidy db-generate db-migrate db-clean db-reset
 
 BINARY_NAME=codezilla
 BUILD_DIR=bin
@@ -82,3 +82,32 @@ check: tidy fmt vet
 run-minimal: build
 	@echo "Running with minimal UI..."
 	@./$(BUILD_DIR)/$(BINARY_NAME) -ui minimal
+
+# Database commands
+.PHONY: db-generate
+db-generate:
+	@echo "Generating SQL code with sqlc..."
+	@if command -v sqlc >/dev/null 2>&1; then \
+		sqlc generate; \
+	else \
+		echo "Warning: sqlc not found in PATH."; \
+		echo "To install it, run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest"; \
+		echo "Skipping code generation..."; \
+	fi
+
+.PHONY: db-migrate
+db-migrate:
+	@echo "Preparing database directory..."
+	@mkdir -p ~/.codezilla
+	@echo "Database directory ready: ~/.codezilla/codezilla.db (created on first run)"
+
+
+.PHONY: db-clean
+db-clean:
+	@echo "Cleaning database files..."
+	@rm -rf ~/.codezilla/codezilla.db*
+	@echo "Database files removed"
+
+.PHONY: db-reset
+db-reset: db-clean db-generate
+	@echo "Database reset complete"

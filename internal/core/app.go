@@ -21,6 +21,7 @@ import (
 	"codezilla/internal/agent"
 	"codezilla/internal/config"
 	"codezilla/internal/core/llm"
+	"codezilla/internal/db"
 	"codezilla/internal/session"
 	"codezilla/internal/skills"
 	"codezilla/internal/tools"
@@ -41,6 +42,7 @@ type App struct {
 	skillReg      *skills.Registry
 	cachedModels  []string // updated by /models, used for Tab completion
 	sessionRecord *session.Recorder
+	db            *db.DB // persistent SQLite store
 
 	// Token usage & logic tracking
 	lastTurnUsage agent.TokenUsage
@@ -93,6 +95,21 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	sessionRecord, err := session.NewRecorder(sessionPath, log)
 	if err != nil {
 		log.Warn("Failed to initialize session recorder", "error", err)
+	}
+
+	// Initialize SQLite database (non-fatal: DB failures must not block startup)
+	var database *db.DB
+	dbInstance, dbErr := db.New(nil) // nil uses DefaultConfig (~/.codezilla/codezilla.db)
+	if dbErr != nil {
+		log.Warn("Failed to open database", "error", dbErr)
+	} else {
+		if initErr := dbInstance.Initialize(context.Background()); initErr != nil {
+			log.Warn("Failed to initialize database schema", "error", initErr)
+			_ = dbInstance.Close()
+		} else {
+			database = dbInstance
+			log.Info("Database initialized", "path", db.DefaultConfig().Path)
+		}
 	}
 
 	// Initialize LLM factory
@@ -705,6 +722,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		skillReg:      skillRegistry,
 		cachedModels:  models,
 		sessionRecord: sessionRecord,
+		db:            database,
 	}
 
 	// Wire the OnLLMUsage callback to write to app struct fields via closure.
@@ -1047,6 +1065,9 @@ func (app *App) PrintSessionSummary() {
 func (app *App) Close() error {
 	if app.sessionRecord != nil {
 		_ = app.sessionRecord.Close()
+	}
+	if app.db != nil {
+		_ = app.db.Close()
 	}
 	if app.logger != nil {
 		return app.logger.Close()

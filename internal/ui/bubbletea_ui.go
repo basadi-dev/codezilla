@@ -439,7 +439,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.spinner.Tick)
 			}
 		}
-		
+
 	case appQuitMsg:
 		// App finished (or error) — quit the tea program
 		return m, tea.Quit
@@ -1312,10 +1312,10 @@ func (ui *BubbleTeaUI) ShowWelcomeWithModels(defaultModel, fastModel, heavyModel
 
 	ui.appendToViewport("  🧠 " + keyStyle.Render("Model:") + " " + ui.theme.StyleYellow.Render(defaultModel) + "\n")
 	if fastModel != "" {
-		ui.appendToViewport("  ⚡ " + keyStyle.Render("Fast:") + " " + ui.theme.StyleYellow.Render(fastModel) + "\n")
+		ui.appendToViewport("  ⚡️ " + keyStyle.Render("Fast:") + " " + ui.theme.StyleYellow.Render(fastModel) + "\n")
 	}
 	if heavyModel != "" {
-		ui.appendToViewport("  🏋️ " + keyStyle.Render("Heavy:") + " " + ui.theme.StyleYellow.Render(heavyModel) + "\n")
+		ui.appendToViewport("  🏋️  " + keyStyle.Render("Heavy:") + " " + ui.theme.StyleYellow.Render(heavyModel) + "\n")
 	}
 	ui.appendToViewport("  🔌 " + keyStyle.Render("Provider:") + " " + ui.theme.StyleDim.Render(ollamaURL) + "\n")
 
