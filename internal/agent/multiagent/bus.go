@@ -21,19 +21,26 @@ type Event struct {
 	Payload  map[string]interface{}
 }
 
+// subscriber wraps a channel with an ID for targeted unsubscription
+type subscriber struct {
+	id uint64
+	ch chan<- Event
+}
+
 // MemoryBus acts as the thread-safe communication layer between parallel agents.
 // It provides a shared Key-Value store and a pub/sub mechanism.
 type MemoryBus struct {
 	store sync.Map
 
 	subsMu sync.RWMutex
-	subs   map[EventType][]chan<- Event
+	subs   map[EventType][]subscriber
+	nextID uint64 // monotonic subscriber ID, protected by subsMu
 }
 
 // NewMemoryBus instantiates a new concurrency-safe communication bus
 func NewMemoryBus() *MemoryBus {
 	return &MemoryBus{
-		subs: make(map[EventType][]chan<- Event),
+		subs: make(map[EventType][]subscriber),
 	}
 }
 
@@ -52,11 +59,29 @@ func (b *MemoryBus) Delete(key string) {
 	b.store.Delete(key)
 }
 
-// Subscribe registers a channel to receive events of a specific type
-func (b *MemoryBus) Subscribe(eventType EventType, ch chan<- Event) {
+// Subscribe registers a channel to receive events of a specific type.
+// Returns a subscription ID that can be passed to Unsubscribe for cleanup.
+func (b *MemoryBus) Subscribe(eventType EventType, ch chan<- Event) uint64 {
 	b.subsMu.Lock()
 	defer b.subsMu.Unlock()
-	b.subs[eventType] = append(b.subs[eventType], ch)
+	b.nextID++
+	id := b.nextID
+	b.subs[eventType] = append(b.subs[eventType], subscriber{id: id, ch: ch})
+	return id
+}
+
+// Unsubscribe removes a subscriber by its ID. Safe to call multiple times.
+func (b *MemoryBus) Unsubscribe(eventType EventType, subID uint64) {
+	b.subsMu.Lock()
+	defer b.subsMu.Unlock()
+
+	listeners := b.subs[eventType]
+	for i, s := range listeners {
+		if s.id == subID {
+			b.subs[eventType] = append(listeners[:i], listeners[i+1:]...)
+			return
+		}
+	}
 }
 
 // Publish broadcasts an event to all subscribed listeners asynchronously
@@ -69,10 +94,10 @@ func (b *MemoryBus) Publish(event Event) {
 		return
 	}
 
-	for _, ch := range listeners {
+	for _, s := range listeners {
 		// Non-blocking send
 		select {
-		case ch <- event:
+		case s.ch <- event:
 		default:
 			// If channel is full, we drop the event to avoid blocking the bus
 		}

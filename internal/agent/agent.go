@@ -348,11 +348,24 @@ func (a *agent) Clone() Agent {
 	// Provide a copy of the config so agents don't mutate the global config
 	newConfig := *a.config
 
+	// Null out UI-bound callbacks. These are wired to the single-threaded TUI
+	// and will produce garbled output if multiple parallel agents fire them
+	// concurrently. The multi-agent orchestrator should provide its own
+	// callbacks if it needs to aggregate worker progress.
+	newConfig.OnToolExecution = nil
+	newConfig.OnToolPreparing = nil
+	newConfig.OnLLMCall = nil
+	newConfig.OnLLMStreamEnd = nil
+	newConfig.OnLLMUsage = nil
+	newConfig.OnModelRouted = nil
+	newConfig.OnContextSummarizing = nil
+	newConfig.SessionRecorder = nil
+
 	newAgent := &agent{
 		config:        &newConfig,
 		context:       a.context.Clone(),
-		llmClient:     a.llmClient, // Shared thread-safe client
-		toolRegistry:  a.toolRegistry, // Shared thread-safe registry
+		llmClient:     a.llmClient,     // Shared thread-safe client
+		toolRegistry:  a.toolRegistry,  // Shared thread-safe registry
 		logger:        a.logger,
 		permissionMgr: a.permissionMgr,
 	}

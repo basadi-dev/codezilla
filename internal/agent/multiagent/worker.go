@@ -13,12 +13,14 @@ type ConcreteWorker struct {
 	id    string
 	role  WorkerRole
 	inner agent.Agent
+	bus   *MemoryBus
 }
 
-// NewWorker initializes a new concurrent worker
-func NewWorker(id string, role WorkerRole, baseAgent agent.Agent) *ConcreteWorker {
+// NewWorker initializes a new concurrent worker.
+// The bus parameter provides access to cross-agent shared state and events.
+func NewWorker(id string, role WorkerRole, baseAgent agent.Agent, bus *MemoryBus) *ConcreteWorker {
 	clonedAgent := baseAgent.Clone()
-	
+
 	// Prepend specialized identity to the system prompt based on role
 	roleInstruction := map[WorkerRole]string{
 		RoleGeneric:    "You are a general-purpose assistant. Fulfill the user's request.",
@@ -26,7 +28,7 @@ func NewWorker(id string, role WorkerRole, baseAgent agent.Agent) *ConcreteWorke
 		RoleDeveloper:  "You are an expert developer. Your task is to modify code, write tests, and ensure structural integrity.",
 		RoleReviewer:   "You are an expert code reviewer. Analyze the code for logic errors, race conditions, edge cases, and style issues.",
 	}
-	
+
 	if instruction, ok := roleInstruction[role]; ok {
 		clonedAgent.AddSystemMessage(instruction)
 	}
@@ -35,6 +37,7 @@ func NewWorker(id string, role WorkerRole, baseAgent agent.Agent) *ConcreteWorke
 		id:    id,
 		role:  role,
 		inner: clonedAgent,
+		bus:   bus,
 	}
 }
 
@@ -46,6 +49,8 @@ func (w *ConcreteWorker) Role() WorkerRole {
 	return w.role
 }
 
+// Start executes a single task and writes its result. Each worker receives
+// exactly one task via its dedicated channel, eliminating task-stealing races.
 func (w *ConcreteWorker) Start(ctx context.Context, tasks <-chan Task, results chan<- Result) {
 	for {
 		select {
@@ -55,7 +60,7 @@ func (w *ConcreteWorker) Start(ctx context.Context, tasks <-chan Task, results c
 			if !ok {
 				return // channel closed
 			}
-			
+
 			w.executeTask(ctx, task, results)
 		}
 	}
@@ -63,7 +68,16 @@ func (w *ConcreteWorker) Start(ctx context.Context, tasks <-chan Task, results c
 
 func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, results chan<- Result) {
 	start := time.Now()
-	
+
+	// Broadcast that this task has started
+	if w.bus != nil {
+		w.bus.Publish(Event{
+			Type:     EventTaskStarted,
+			WorkerID: w.id,
+			Payload:  map[string]interface{}{"task_id": task.ID},
+		})
+	}
+
 	// Create task-specific context optionally bound by a deadline
 	ctx := parentCtx
 	var cancel context.CancelFunc
@@ -73,9 +87,9 @@ func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, resul
 	}
 
 	prompt := fmt.Sprintf("[Assigned Task: %s]\n\nTask Description:\n%s\n\nInputs:\n%v", task.ID, task.Description, task.Inputs)
-	
+
 	output, err := w.inner.ProcessMessage(ctx, prompt)
-	
+
 	result := Result{
 		TaskID:   task.ID,
 		WorkerID: w.id,
@@ -83,7 +97,20 @@ func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, resul
 		Error:    err,
 		Duration: time.Since(start),
 	}
-	
+
+	// Broadcast completion
+	if w.bus != nil {
+		w.bus.Publish(Event{
+			Type:     EventTaskCompleted,
+			WorkerID: w.id,
+			Payload: map[string]interface{}{
+				"task_id":  task.ID,
+				"duration": result.Duration.String(),
+				"has_error": err != nil,
+			},
+		})
+	}
+
 	// Send non-blocking or respect context cancellation
 	select {
 	case <-parentCtx.Done():

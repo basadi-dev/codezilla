@@ -19,11 +19,8 @@ func TestMemoryBus_PubSub(t *testing.T) {
 		WorkerID: "worker-1",
 	})
 
-	// Add slight delay in test to allow non-blocking sends to buffer
-	var e1, e2 Event
-
-	e1 = <-ch1
-	e2 = <-ch2
+	e1 := <-ch1
+	e2 := <-ch2
 
 	if e1.WorkerID != "worker-1" || e2.WorkerID != "worker-1" {
 		t.Errorf("Expected event broadcast to reach both channels")
@@ -33,9 +30,8 @@ func TestMemoryBus_PubSub(t *testing.T) {
 func TestMemoryBus_State(t *testing.T) {
 	bus := NewMemoryBus()
 
-	// Generic KV Test
 	bus.Set("key1", "value1")
-	
+
 	val, ok := bus.Get("key1")
 	if !ok || val != "value1" {
 		t.Errorf("Expected Get to return 'value1', got %v", val)
@@ -52,7 +48,6 @@ func TestMemoryBus_Concurrency(t *testing.T) {
 	bus := NewMemoryBus()
 
 	var wg sync.WaitGroup
-	// Spawn many goroutines reading and writing to ensure sync.Map works
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func(idx int) {
@@ -62,4 +57,39 @@ func TestMemoryBus_Concurrency(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestMemoryBus_Unsubscribe(t *testing.T) {
+	bus := NewMemoryBus()
+
+	ch := make(chan Event, 5)
+	subID := bus.Subscribe(EventFileModified, ch)
+
+	// Publish should reach subscriber
+	bus.Publish(Event{Type: EventFileModified, WorkerID: "w1"})
+	e := <-ch
+	if e.WorkerID != "w1" {
+		t.Errorf("Expected event from w1, got %s", e.WorkerID)
+	}
+
+	// After unsubscribe, channel should not receive events
+	bus.Unsubscribe(EventFileModified, subID)
+	bus.Publish(Event{Type: EventFileModified, WorkerID: "w2"})
+
+	select {
+	case evt := <-ch:
+		t.Errorf("Should not have received event after unsubscribe, got %+v", evt)
+	default:
+		// expected — nothing received
+	}
+}
+
+func TestMemoryBus_UnsubscribeIdempotent(t *testing.T) {
+	bus := NewMemoryBus()
+	ch := make(chan Event, 1)
+	subID := bus.Subscribe(EventTaskStarted, ch)
+
+	// Calling unsubscribe multiple times should not panic
+	bus.Unsubscribe(EventTaskStarted, subID)
+	bus.Unsubscribe(EventTaskStarted, subID)
 }
