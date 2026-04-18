@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -17,7 +16,7 @@ import (
 type FixedInput struct {
 	prompt         string
 	reader         *bufio.Reader
-	historyFile    string
+	provider       HistoryProvider
 	history        []string
 	historyIndex   int
 	mu             sync.Mutex
@@ -70,13 +69,13 @@ func (fi *FixedInput) promptDisplayWidth() int {
 }
 
 // NewFixedInput creates a new input reader with history support but no multi-line bugs
-func NewFixedInput(prompt string, historyFile string) (*FixedInput, error) {
+func NewFixedInput(prompt string, provider HistoryProvider) (*FixedInput, error) {
 	fd := int(os.Stdin.Fd())
 
 	input := &FixedInput{
 		prompt:       prompt,
 		reader:       bufio.NewReader(os.Stdin),
-		historyFile:  historyFile,
+		provider:     provider,
 		history:      make([]string, 0, 500),
 		historyIndex: -1,
 		fd:           fd,
@@ -84,9 +83,10 @@ func NewFixedInput(prompt string, historyFile string) (*FixedInput, error) {
 		currentLines: 1,
 	}
 
-	// Load history from file if it exists
-	if historyFile != "" {
-		input.loadHistory()
+	// Load history from provider if it exists
+	if provider != nil {
+		history := provider.GetHistory(-1)
+		input.history = append(input.history, history...)
 	}
 
 	return input, nil
@@ -713,63 +713,10 @@ func (fi *FixedInput) readSimple() (string, error) {
 
 // Close cleans up resources
 func (fi *FixedInput) Close() error {
-	if fi.historyFile != "" {
-		if err := fi.saveHistory(); err != nil {
-			return fmt.Errorf("failed to save history: %w", err)
-		}
-	}
 	return nil
 }
 
 // History management
-
-func (fi *FixedInput) loadHistory() {
-	fi.mu.Lock()
-	defer fi.mu.Unlock()
-
-	file, err := os.Open(fi.historyFile)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line != "" {
-			fi.history = append(fi.history, line)
-		}
-	}
-}
-
-func (fi *FixedInput) saveHistory() error {
-	fi.mu.Lock()
-	defer fi.mu.Unlock()
-
-	// Ensure directory exists
-	dir := filepath.Dir(fi.historyFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	file, err := os.Create(fi.historyFile)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	// Keep last 500 entries
-	start := 0
-	if len(fi.history) > 500 {
-		start = len(fi.history) - 500
-	}
-
-	for i := start; i < len(fi.history); i++ {
-		fmt.Fprintln(file, fi.history[i])
-	}
-
-	return nil
-}
 
 func (fi *FixedInput) addHistory(line string) {
 	fi.mu.Lock()
@@ -785,9 +732,10 @@ func (fi *FixedInput) addHistory(line string) {
 
 	// Save asynchronously
 	go func() {
-		if err := fi.saveHistory(); err != nil {
-			// Log error but don't block
-			fmt.Fprintf(os.Stderr, "Failed to save history: %v\n", err)
+		if fi.provider != nil {
+			if err := fi.provider.AddHistory(line); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to save history: %v\n", err)
+			}
 		}
 	}()
 }
@@ -825,7 +773,7 @@ func (fi *FixedInput) SearchHistory(query string) []string {
 	return results
 }
 
-// ClearHistory removes all history entries and deletes the history file.
+// ClearHistory removes all history entries
 func (fi *FixedInput) ClearHistory() error {
 	fi.mu.Lock()
 	defer fi.mu.Unlock()
@@ -833,20 +781,13 @@ func (fi *FixedInput) ClearHistory() error {
 	fi.history = fi.history[:0]
 	fi.historyIndex = 0
 
-	if fi.historyFile != "" {
-		if err := os.Remove(fi.historyFile); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	if fi.provider != nil {
+		return fi.provider.ClearHistory()
 	}
 	return nil
 }
 
-// GetDefaultHistoryFilePath returns the default path for the command history file
+// GetDefaultHistoryFilePath Returns an empty string as we use SQLite now. Kept for backwards compatibility
 func GetDefaultHistoryFilePath() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	configDir := filepath.Join(homeDir, ".config", "codezilla")
-	return filepath.Join(configDir, "history"), nil
+	return "", nil
 }

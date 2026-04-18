@@ -117,8 +117,10 @@ type HistoryProvider interface {
 	GetHistory(n int) []string
 	// SearchHistory returns history entries that contain the query substring.
 	SearchHistory(query string) []string
-	// ClearHistory removes all history entries and deletes the history file.
+	// ClearHistory removes all history entries.
 	ClearHistory() error
+	// AddHistory persists a new history entry.
+	AddHistory(prompt string) error
 }
 
 // LiveStatusStopper is an optional interface for UIs that display a persistent

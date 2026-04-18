@@ -56,7 +56,7 @@ type App struct {
 }
 
 // NewApp creates a new application instance
-func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
+func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 	// Initialize logger
 	logConfig := logger.Config{
 		LogFile:  cfg.LogFile,
@@ -95,21 +95,6 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 	sessionRecord, err := session.NewRecorder(sessionPath, log)
 	if err != nil {
 		log.Warn("Failed to initialize session recorder", "error", err)
-	}
-
-	// Initialize SQLite database (non-fatal: DB failures must not block startup)
-	var database *db.DB
-	dbInstance, dbErr := db.New(nil) // nil uses DefaultConfig (~/.codezilla/codezilla.db)
-	if dbErr != nil {
-		log.Warn("Failed to open database", "error", dbErr)
-	} else {
-		if initErr := dbInstance.Initialize(context.Background()); initErr != nil {
-			log.Warn("Failed to initialize database schema", "error", initErr)
-			_ = dbInstance.Close()
-		} else {
-			database = dbInstance
-			log.Info("Database initialized", "path", db.DefaultConfig().Path)
-		}
 	}
 
 	// Initialize LLM factory

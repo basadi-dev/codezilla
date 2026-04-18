@@ -11,6 +11,7 @@ import (
 
 	"codezilla/internal/config"
 	"codezilla/internal/core"
+	"codezilla/internal/db"
 	"codezilla/internal/ui"
 )
 
@@ -125,11 +126,24 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Get history file path
-	historyPath, _ := ui.GetDefaultHistoryFilePath()
+	// Initialize SQLite Database
+	dbConfig := db.DefaultConfig()
+	database, dbErr := db.New(dbConfig)
+	var historyProvider ui.HistoryProvider
+	if dbErr == nil {
+		if err := database.Initialize(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize database schema: %v\n", err)
+			_ = database.Close()
+			database = nil
+		} else {
+			historyProvider = db.NewSQLHistoryProvider(database)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: failed to open database: %v\n", dbErr)
+	}
 
 	// Create unified BubbleTea UI
-	appUI, err := ui.NewBubbleTeaUI(historyPath, *inline, cfg.DisableMouse)
+	appUI, err := ui.NewBubbleTeaUI(historyProvider, *inline, cfg.DisableMouse)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize UI: %v\n", err)
@@ -142,7 +156,7 @@ func main() {
 	}
 
 	// Create the core application
-	app, err := core.NewApp(cfg, appUI)
+	app, err := core.NewApp(cfg, appUI, database)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize application: %v\n", err)
 		os.Exit(1)

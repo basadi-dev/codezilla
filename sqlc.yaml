@@ -5,7 +5,7 @@ sql:
     schema: "internal/db/sql/schema.sql"
     gen:
       go:
-        package: "db"
+        package: "generated"
         out: "internal/db/generated"
         emit_json_tags: true
         emit_prepared_queries: false

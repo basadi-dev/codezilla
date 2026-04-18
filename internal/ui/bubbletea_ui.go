@@ -108,9 +108,11 @@ type appModel struct {
 
 	// Prompt string
 	prompt string
+
+	historyProvider HistoryProvider
 }
 
-func newAppModel(theme Theme, prompt string) appModel {
+func newAppModel(theme Theme, prompt string, provider HistoryProvider) appModel {
 	ti := textarea.New()
 	ti.Placeholder = prompt
 	// Textarea uses slightly different styling properties
@@ -146,10 +148,11 @@ func newAppModel(theme Theme, prompt string) appModel {
 		inputEnabled:  true,
 		mouseEnabled:  true,
 		cwd:           cwd,
-		history:       nil,
-		historyIndex:  0,
-		taskStart:     time.Now(),
-		stepStart:     time.Now(),
+		history:         nil,
+		historyIndex:    0,
+		taskStart:       time.Now(),
+		stepStart:       time.Now(),
+		historyProvider: provider,
 	}
 }
 
@@ -239,6 +242,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Add to history
 				if value != "" {
 					m.history = append(m.history, value)
+					if m.historyProvider != nil {
+						_ = m.historyProvider.AddHistory(value)
+					}
 				}
 				m.historyIndex = len(m.history)
 				m.savedInput = ""
@@ -1001,6 +1007,7 @@ type BubbleTeaUI struct {
 	theme        Theme
 	currentModel string
 	historyFile  string
+	provider     HistoryProvider
 
 	// inline, when true, runs on the main terminal buffer instead of the
 	// alt-screen. Trade-off: scrollback survives exit, but rendering can
@@ -1034,7 +1041,7 @@ type TUIRunner interface {
 //
 // CODEZILLA_INLINE=1 and CODEZILLA_NO_MOUSE=1 env vars are equivalent opt-ins
 // for scripts when the flags aren't set.
-func NewBubbleTeaUI(historyFile string, inline, disableMouse bool) (UI, error) {
+func NewBubbleTeaUI(provider HistoryProvider, inline, disableMouse bool) (UI, error) {
 	if !inline {
 		if v := strings.ToLower(strings.TrimSpace(os.Getenv("CODEZILLA_INLINE"))); v == "1" || v == "true" || v == "yes" {
 			inline = true
@@ -1055,20 +1062,19 @@ func NewBubbleTeaUI(historyFile string, inline, disableMouse bool) (UI, error) {
 
 	prompt := "codezilla " + theme.IconPrompt + " "
 
-	model := newAppModel(theme, prompt)
+	model := newAppModel(theme, prompt, provider)
 	model.mouseEnabled = !disableMouse
 
-	// Load history from file
-	if historyFile != "" {
-		if entries, err := loadHistoryFile(historyFile); err == nil {
-			model.history = entries
-			model.historyIndex = len(entries)
-		}
+	// Load history from provider
+	if provider != nil {
+		entries := provider.GetHistory(-1)
+		model.history = entries
+		model.historyIndex = len(entries)
 	}
 
 	ui := &BubbleTeaUI{
 		theme:         theme,
-		historyFile:   historyFile,
+		provider:      provider,
 		inline:        inline,
 		mouseEnabled:  !disableMouse,
 		inputChan:     model.inputChan,
@@ -1096,10 +1102,6 @@ func (ui *BubbleTeaUI) RunTUI(ctx context.Context, appFn func(context.Context) e
 	// When it finishes, send appQuitMsg to shut down the tea program.
 	go func() {
 		err := appFn(ctx)
-		// Save history before quitting
-		if ui.historyFile != "" && ui.model != nil {
-			_ = saveHistoryFile(ui.historyFile, ui.model.history)
-		}
 		if ui.program != nil {
 			ui.program.Send(appQuitMsg{err: err})
 		}
@@ -1544,8 +1546,8 @@ func (ui *BubbleTeaUI) ClearHistory() error {
 		ui.model.history = nil
 		ui.model.historyIndex = 0
 	}
-	if ui.historyFile != "" {
-		return os.Remove(ui.historyFile)
+	if ui.provider != nil {
+		return ui.provider.ClearHistory()
 	}
 	return nil
 }

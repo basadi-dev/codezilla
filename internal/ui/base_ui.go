@@ -27,7 +27,7 @@ type BaseUI struct {
 }
 
 // NewBaseUI creates a new base UI
-func NewBaseUI(historyFile string) (UI, error) {
+func NewBaseUI(provider HistoryProvider) (UI, error) {
 	// Get terminal width
 	width, _, _ := term.GetSize(int(os.Stdout.Fd()))
 	if width == 0 {
@@ -37,7 +37,7 @@ func NewBaseUI(historyFile string) (UI, error) {
 	// Create input reader
 	reader, err := NewFixedInput(
 		"", // Prompt will be set by theme
-		historyFile,
+		provider,
 	)
 	if err != nil {
 		return nil, err

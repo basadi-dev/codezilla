@@ -111,3 +111,13 @@ CREATE TABLE IF NOT EXISTS tool_usage (
 CREATE INDEX IF NOT EXISTS idx_tool_usage_session_id ON tool_usage(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_usage_tool_name ON tool_usage(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_usage_invoked_at ON tool_usage(invoked_at);
+
+-- Prompt history for CLI up/down arrows
+CREATE TABLE IF NOT EXISTS prompt_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt TEXT NOT NULL,
+    session_id TEXT, -- optional reference to the session
+    created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_history_created_at ON prompt_history(created_at);
