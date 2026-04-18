@@ -42,13 +42,14 @@ type appQuitMsg struct{ err error }
 // WorkerStatus represents the visible state of a single multi-agent worker
 type WorkerStatus struct {
 	WorkerID string
-	Number   int    // 1-indexed task number for display
+	Number   int           // 1-indexed task number for display
 	Role     string
-	Model    string // LLM model this worker uses
+	Model    string        // LLM model this worker uses
 	Label    string
 	Done     bool
 	HasError bool
 	Started  time.Time
+	Elapsed  time.Duration // frozen duration for completed tasks
 }
 
 type updateWorkerStatusMsg struct{ status WorkerStatus }
@@ -885,7 +886,9 @@ func (m appModel) renderWorkerStatusLine(ws WorkerStatus) string {
 	}
 
 	elapsed := ""
-	if !ws.Started.IsZero() {
+	if ws.Done && ws.Elapsed > 0 {
+		elapsed = dim.Render(fmt.Sprintf("(%s)", ws.Elapsed.Round(time.Second)))
+	} else if !ws.Started.IsZero() {
 		elapsed = dim.Render(fmt.Sprintf("(%s)", time.Since(ws.Started).Round(time.Second)))
 	}
 

@@ -1469,6 +1469,12 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 				taskID, _ := evt.Payload["task_id"].(string)
 				num := taskNumLookup[taskID]
 
+				var elapsedStr string
+				if durStr, ok := evt.Payload["duration"].(string); ok {
+					elapsedStr = durStr
+				}
+				elapsedDur, _ := time.ParseDuration(elapsedStr)
+
 				btUI.UpdateWorkerStatus(ui.WorkerStatus{
 					WorkerID: evt.WorkerID,
 					Number:   num,
@@ -1478,6 +1484,7 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 					Done:     evt.Type == multiagent.EventTaskCompleted,
 					HasError: hasError,
 					Started:  time.Now(),
+					Elapsed:  elapsedDur,
 				})
 			}
 		}()
