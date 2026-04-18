@@ -42,6 +42,7 @@ type appQuitMsg struct{ err error }
 // WorkerStatus represents the visible state of a single multi-agent worker
 type WorkerStatus struct {
 	WorkerID string
+	Number   int    // 1-indexed task number for display
 	Role     string
 	Label    string
 	Done     bool
@@ -887,7 +888,12 @@ func (m appModel) renderWorkerStatusLine(ws WorkerStatus) string {
 		elapsed = dim.Render(fmt.Sprintf("(%s)", time.Since(ws.Started).Round(time.Second)))
 	}
 
-	return "   " + icon + " " + role + "  " + labelStyle.Render(label) + "  " + elapsed
+	numStr := ""
+	if ws.Number > 0 {
+		numStr = dim.Render(fmt.Sprintf("%d.", ws.Number)) + " "
+	}
+
+	return "   " + icon + " " + numStr + role + "  " + labelStyle.Render(label) + "  " + elapsed
 }
 
 // renderViewportWithScrollbar composites the viewport output with a

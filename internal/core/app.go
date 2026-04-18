@@ -1334,18 +1334,27 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 	cleaned = strings.TrimSuffix(cleaned, "```")
 	cleaned = strings.TrimSpace(cleaned)
 
-	// 3. If still not valid JSON, find the first [...] bracket pair
+	// 3. Sanitize malformed JSON: models often put literal newlines inside
+	//    string values (multi-line bullet lists). Replace bare newlines that
+	//    appear inside JSON strings with escaped \\n.
+	cleaned = sanitizeJSONNewlines(cleaned)
+
+	// 4. Parse with flexible ID type (models return either string or number)
 	var taskDefs []struct {
-		ID          string `json:"id"`
-		Description string `json:"description"`
-		Role        string `json:"role"`
+		ID          json.RawMessage `json:"id"`
+		Description string          `json:"description"`
+		Role        string          `json:"role"`
 	}
-	if err := json.Unmarshal([]byte(cleaned), &taskDefs); err != nil {
+	parseJSON := func(data string) error {
+		return json.Unmarshal([]byte(data), &taskDefs)
+	}
+
+	if err := parseJSON(cleaned); err != nil {
 		// Fallback: extract first JSON array via bracket matching
 		if start := strings.Index(cleaned, "["); start != -1 {
 			if end := strings.LastIndex(cleaned, "]"); end > start {
 				extracted := cleaned[start : end+1]
-				if jsonErr := json.Unmarshal([]byte(extracted), &taskDefs); jsonErr != nil {
+				if jsonErr := parseJSON(extracted); jsonErr != nil {
 					app.ui.HideThinking()
 					app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
 					app.logger.Warn("Parallel decomposition JSON parse failed", "error", jsonErr, "raw", decomposeResult)
@@ -1374,8 +1383,9 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 	// ── Step 2: Build multiagent tasks ──
 	tasks := make([]multiagent.Task, len(taskDefs))
 	for i, td := range taskDefs {
-		id := td.ID
-		if id == "" {
+		// Coerce ID: model may return "task_1" (string) or 1 (number)
+		id := strings.Trim(strings.TrimSpace(string(td.ID)), `"`)
+		if id == "" || id == "null" {
 			id = fmt.Sprintf("task-%d", i+1)
 		}
 		tasks[i] = multiagent.Task{
@@ -1406,6 +1416,12 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 
 	// Wire bus events to the BubbleTea UI worker status lines
 	if btUI, ok := app.ui.(*ui.BubbleTeaUI); ok {
+		// Build taskID → 1-indexed number lookup
+		taskNumLookup := make(map[string]int, len(tasks))
+		for i, t := range tasks {
+			taskNumLookup[t.ID] = i + 1
+		}
+
 		eventCh := make(chan multiagent.Event, 50)
 		orch.Bus().Subscribe(multiagent.EventTaskStarted, eventCh)
 		orch.Bus().Subscribe(multiagent.EventTaskCompleted, eventCh)
@@ -1428,8 +1444,12 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 					hasError = he
 				}
 
+				taskID, _ := evt.Payload["task_id"].(string)
+				num := taskNumLookup[taskID]
+
 				btUI.UpdateWorkerStatus(ui.WorkerStatus{
 					WorkerID: evt.WorkerID,
+					Number:   num,
 					Role:     role,
 					Label:    label,
 					Done:     evt.Type == multiagent.EventTaskCompleted,
@@ -2560,4 +2580,41 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 	// Fetch URL – converts any webpage to clean markdown via Jina AI Reader (free, no key)
 	registry.RegisterTool(tools.NewFetchURLTool())
 	permissionMgr.SetDefaultPermissionLevel("fetchURL", tools.NeverAsk)
+}
+
+// sanitizeJSONNewlines replaces bare newlines inside JSON string values with
+// the escaped sequence \n. LLMs frequently produce multi-line descriptions
+// with literal linebreaks which are invalid JSON.
+func sanitizeJSONNewlines(s string) string {
+	var out strings.Builder
+	out.Grow(len(s))
+	inString := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			out.WriteByte(c)
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			out.WriteByte(c)
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			out.WriteByte(c)
+			continue
+		}
+		if c == '\n' && inString {
+			out.WriteString(`\n`)
+			continue
+		}
+		if c == '\r' && inString {
+			continue // drop carriage returns inside strings
+		}
+		out.WriteByte(c)
+	}
+	return out.String()
 }
