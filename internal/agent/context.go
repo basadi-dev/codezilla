@@ -138,6 +138,44 @@ func (c *Context) ClearContext() {
 	c.CurrentTokens = systemTokenCount
 }
 
+
+type messageGroup struct {
+	Messages []Message
+	Tokens   int
+	HasUser  bool
+}
+
+func groupMessages(msgs []Message) []messageGroup {
+	var groups []messageGroup
+	for _, msg := range msgs {
+		toks := estimateTokens(msg.Content)
+		if len(msg.ToolCalls) > 0 {
+			toks += estimateToolCallsTokens(msg.ToolCalls)
+		}
+		if msg.ToolResult != nil {
+			toks += estimateToolResultTokens(msg.ToolResult)
+		}
+
+		isToolResult := msg.Role == RoleTool
+		if isToolResult && len(groups) > 0 {
+			lastGroupIdx := len(groups) - 1
+			// Append to the last group if it starts with an Assistant message containing ToolCalls
+			if len(groups[lastGroupIdx].Messages) > 0 && groups[lastGroupIdx].Messages[0].Role == RoleAssistant && len(groups[lastGroupIdx].Messages[0].ToolCalls) > 0 {
+				groups[lastGroupIdx].Messages = append(groups[lastGroupIdx].Messages, msg)
+				groups[lastGroupIdx].Tokens += toks
+				continue
+			}
+		}
+
+		groups = append(groups, messageGroup{
+			Messages: []Message{msg},
+			Tokens:   toks,
+			HasUser:  msg.Role == RoleUser,
+		})
+	}
+	return groups
+}
+
 // AggressiveTrim drops the oldest ~50% of non-system messages. This is the
 // nuclear option used when the LLM rejects prompt due to context overflow.
 // Returns the number of messages removed and the evicted messages (for summarisation).
@@ -155,20 +193,29 @@ func (c *Context) AggressiveTrim() (int, []Message) {
 		}
 	}
 
-	if len(otherMsgs) <= 2 {
+	groups := groupMessages(otherMsgs)
+
+	if len(groups) <= 2 {
 		// Nothing meaningful to trim — keep at least the latest user+assistant pair
 		return 0, nil
 	}
 
 	// Keep the newest 50% (rounded up)
-	keepCount := (len(otherMsgs) + 1) / 2
-	removed := len(otherMsgs) - keepCount
-	evicted := make([]Message, removed)
-	copy(evicted, otherMsgs[:removed])
-	kept := otherMsgs[len(otherMsgs)-keepCount:]
+	keepCount := (len(groups) + 1) / 2
+	removedGroupsCount := len(groups) - keepCount
+	
+	var kept []Message
+	var evicted []Message
+	for i, g := range groups {
+		if i < removedGroupsCount {
+			evicted = append(evicted, g.Messages...)
+		} else {
+			kept = append(kept, g.Messages...)
+		}
+	}
 
 	// Rebuild messages and recount tokens
-	newMsgs := make([]Message, 0, len(systemMsgs)+keepCount)
+	newMsgs := make([]Message, 0, len(systemMsgs)+len(kept))
 	newMsgs = append(newMsgs, systemMsgs...)
 	newMsgs = append(newMsgs, kept...)
 
@@ -191,11 +238,11 @@ func (c *Context) AggressiveTrim() (int, []Message) {
 	c.Messages = newMsgs
 	c.CurrentTokens = newTokens
 	c.logger.Info("AggressiveTrim: dropped oldest messages",
-		"removed", removed,
+		"removed", len(evicted),
 		"remaining", len(newMsgs),
 		"~tokens", newTokens)
 
-	return removed, evicted
+	return len(evicted), evicted
 }
 
 // ContextStats returns the current message count and estimated token count.
@@ -426,7 +473,7 @@ func (c *Context) PreFlightTrim(budgetTokens int) (int, []Message) {
 	}
 
 	// Phase 2: Calculate how many tokens we need to evict to fit the budget.
-	// We drop the oldest non-system messages until we reach the budget, and
+	// We drop the oldest non-system groups until we reach the budget, and
 	// continue dropping until the new first message is a RoleUser, preserving
 	// strict alternation and tool-call/result pairs.
 	var nonSystemMsgs []Message
@@ -454,60 +501,51 @@ func (c *Context) PreFlightTrim(budgetTokens int) (int, []Message) {
 		totalTokens += estimateTokens(c.RollingSummary)
 	}
 
-	var keptNonSystem []Message
+	groups := groupMessages(nonSystemMsgs)
+	var keptGroups []messageGroup
 	var evicted []Message
 
-	// Find the index of the most recent user message so we can protect it.
-	// The model MUST always be able to see what the user most recently asked,
-	// even after aggressive eviction triggered by large tool results.
-	lastUserIdx := -1
-	for i, msg := range nonSystemMsgs {
-		if msg.Role == RoleUser {
-			lastUserIdx = i
+	// Find the last group that contains a RoleUser message to protect it.
+	lastUserGroupIdx := -1
+	for i, g := range groups {
+		if g.HasUser {
+			lastUserGroupIdx = i
 		}
 	}
 
 	if totalTokens <= budgetTokens {
-		// No eviction needed
-		keptNonSystem = nonSystemMsgs
+		keptGroups = groups
 	} else {
 		tokensToEvict := totalTokens - budgetTokens
 		evictedTokens := 0
 
-		for i, msg := range nonSystemMsgs {
-			msgToks := estimateTokens(msg.Content)
-			if len(msg.ToolCalls) > 0 {
-				msgToks += estimateToolCallsTokens(msg.ToolCalls)
-			}
-			if msg.ToolResult != nil {
-				msgToks += estimateToolResultTokens(msg.ToolResult)
-			}
-
-			// Always preserve the most recent user message: the model must know what
-			// was asked even after tool calls push context over budget.
-			if i == lastUserIdx {
-				keptNonSystem = append(keptNonSystem, msg)
+		for i, g := range groups {
+			if i == lastUserGroupIdx {
+				keptGroups = append(keptGroups, g)
 				continue
 			}
 
-			// We drop this message if we haven't met the eviction quota yet,
-			// or if we have met the quota but haven't found a User message
+			// We drop this group if we haven't met the eviction quota yet,
+			// or if we have met the quota but haven't found a User group
 			// to start the new sequence with.
-			if evictedTokens < tokensToEvict || (len(keptNonSystem) == 0 && msg.Role != RoleUser) {
-				evictedTokens += msgToks
-				evicted = append(evicted, msg)
-				removed++
+			if evictedTokens < tokensToEvict || (len(keptGroups) == 0 && !g.HasUser) {
+				evictedTokens += g.Tokens
+				evicted = append(evicted, g.Messages...)
+				removed += len(g.Messages)
 			} else {
-				keptNonSystem = append(keptNonSystem, msg)
+				keptGroups = append(keptGroups, g)
 			}
 		}
-		// If protecting the last user message caused it to appear out of order
-		// (i.e. it was inserted before messages that come after it in the original
-		// slice), sort keptNonSystem back into original chronological order.
-		sortMessages(keptNonSystem, nonSystemMsgs)
 	}
 
-	// Reassemble with system messages
+	var keptNonSystem []Message
+	for _, g := range keptGroups {
+		keptNonSystem = append(keptNonSystem, g.Messages...)
+	}
+
+	// If protecting the last user group caused it to appear out of order, sort intact messages.
+	sortMessages(keptNonSystem, nonSystemMsgs)
+
 	newMsgs := append(systemMsgs, keptNonSystem...)
 	c.Messages = newMsgs
 
@@ -547,56 +585,64 @@ func (c *Context) SlidingWindowEvict() []Message {
 		return nil // disabled
 	}
 
-	// Count non-system messages
-	var nonSystemCount int
+	var nonSystemMsgs []Message
+	var systemMsgs []Message
 	for _, msg := range c.Messages {
-		if msg.Role != RoleSystem {
-			nonSystemCount++
+		if msg.Role == RoleSystem {
+			systemMsgs = append(systemMsgs, msg)
+		} else {
+			nonSystemMsgs = append(nonSystemMsgs, msg)
 		}
 	}
 
-	if nonSystemCount <= c.SlidingWindowSize {
+	groups := groupMessages(nonSystemMsgs)
+
+	if len(groups) <= c.SlidingWindowSize {
 		return nil // everything fits in the window
 	}
 
-	toEvict := nonSystemCount - c.SlidingWindowSize
+	toEvict := len(groups) - c.SlidingWindowSize
 	var evicted []Message
-	var kept []Message
+	var keptGroups []messageGroup
 	evictedCount := 0
 	foundFirstUser := false
 
-	// Find the last user message index to protect it — the model must always
-	// be able to see the most recent user request.
-	lastUserMsgIdx := -1
-	for i, msg := range c.Messages {
-		if msg.Role == RoleUser {
-			lastUserMsgIdx = i
+	// Find the last user group index to protect it.
+	lastUserGroupIdx := -1
+	for i, g := range groups {
+		if g.HasUser {
+			lastUserGroupIdx = i
 		}
 	}
 
-	for i, msg := range c.Messages {
-		if msg.Role == RoleSystem {
-			kept = append(kept, msg)
-			continue
-		}
-		if evictedCount < toEvict && i != lastUserMsgIdx {
-			evicted = append(evicted, msg)
+	for i, g := range groups {
+		if evictedCount < toEvict && i != lastUserGroupIdx {
+			evicted = append(evicted, g.Messages...)
 			evictedCount++
 		} else if !foundFirstUser {
 			// Strict LLMs require alternating sequences starting with a user message.
-			if msg.Role != RoleUser && i != lastUserMsgIdx {
-				evicted = append(evicted, msg)
+			if !g.HasUser && i != lastUserGroupIdx {
+				evicted = append(evicted, g.Messages...)
 				evictedCount++
 			} else {
 				foundFirstUser = true
-				kept = append(kept, msg)
+				keptGroups = append(keptGroups, g)
 			}
 		} else {
-			kept = append(kept, msg)
+			keptGroups = append(keptGroups, g)
 		}
 	}
 
+	var keptNonSystem []Message
+	for _, g := range keptGroups {
+		keptNonSystem = append(keptNonSystem, g.Messages...)
+	}
+
 	// Recount tokens for kept messages
+	var kept []Message
+	kept = append(kept, systemMsgs...)
+	kept = append(kept, keptNonSystem...)
+	
 	newTokens := 0
 	for _, msg := range kept {
 		newTokens += estimateTokens(msg.Content)
@@ -686,61 +732,70 @@ func (c *Context) TruncateIfNeeded() {
 		totalTokens += toks
 	}
 
-	var keptNonSystem []Message
+	var keptGroups []messageGroup
+	groups := groupMessages(nonSystemMsgs)
 
-	// Forward traversal from oldest to newest
 	if totalTokens <= c.MaxTokens {
-		keptNonSystem = nonSystemMsgs
+		keptGroups = groups
 	} else {
 		tokensToEvict := totalTokens - c.MaxTokens
 		evictedTokens := 0
 
-		for _, msg := range nonSystemMsgs {
-			msgTokens := estimateTokens(msg.Content)
-			if len(msg.ToolCalls) > 0 {
-				msgTokens += estimateToolCallsTokens(msg.ToolCalls)
-			}
-			if msg.ToolResult != nil {
-				msgTokens += estimateToolResultTokens(msg.ToolResult)
-			}
-
-			if evictedTokens < tokensToEvict || (len(keptNonSystem) == 0 && msg.Role != RoleUser) {
-				// Try to compress large, old messages before giving up
+		for _, g := range groups {
+			if evictedTokens < tokensToEvict || (len(keptGroups) == 0 && !g.HasUser) {
+				// Try to compress large, old messages within the group before giving up
 				compressed := false
-				oldToks := msgTokens
-				if msg.Role == RoleTool && msg.ToolResult != nil && msgTokens > 200 {
-					oldContent := ""
-					if msg.ToolResult.Result != nil {
-						oldContent = fmt.Sprintf("%v", msg.ToolResult.Result)
+				for i := range g.Messages {
+					msg := &g.Messages[i]
+					msgToks := estimateTokens(msg.Content)
+					if len(msg.ToolCalls) > 0 {
+						msgToks += estimateToolCallsTokens(msg.ToolCalls)
 					}
-					if len(oldContent) > 200 {
-						msg.ToolResult.Result = fmt.Sprintf("[TRUNCATED context limit: Tool originally returned %d chars]", len(oldContent))
-						msgTokens = estimateToolResultTokens(msg.ToolResult)
+					if msg.ToolResult != nil {
+						msgToks += estimateToolResultTokens(msg.ToolResult)
+					}
+					
+					oldToks := msgToks
+					if msg.Role == RoleTool && msg.ToolResult != nil && msgToks > 200 {
+						oldContent := ""
+						if msg.ToolResult.Result != nil {
+							oldContent = fmt.Sprintf("%v", msg.ToolResult.Result)
+						}
+						if len(oldContent) > 200 {
+							msg.ToolResult.Result = fmt.Sprintf("[TRUNCATED context limit: Tool originally returned %d chars]", len(oldContent))
+							msgToks = estimateToolResultTokens(msg.ToolResult)
+							compressed = true
+						}
+					} else if msg.Role == RoleAssistant && len(msg.Content) > 400 {
+						msg.Content = fmt.Sprintf("[TRUNCATED context limit] %s...", msg.Content[:200])
+						msgToks = estimateTokens(msg.Content)
+						if len(msg.ToolCalls) > 0 {
+							msgToks += estimateToolCallsTokens(msg.ToolCalls)
+						}
 						compressed = true
 					}
-				} else if msg.Role == RoleAssistant && len(msg.Content) > 400 {
-					msg.Content = fmt.Sprintf("[TRUNCATED context limit] %s...", msg.Content[:200])
-					msgTokens = estimateTokens(msg.Content)
-					if len(msg.ToolCalls) > 0 {
-						msgTokens += estimateToolCallsTokens(msg.ToolCalls)
+
+					if compressed {
+						saved := oldToks - msgToks
+						tokensToEvict -= saved // we don't have to evict as much anymore
+						g.Tokens -= saved
 					}
-					compressed = true
 				}
 
-				if compressed {
-					saved := oldToks - msgTokens
-					tokensToEvict -= saved // we don't have to evict as much anymore
-				}
-
-				// Check again if we still MUST drop it to meet the quota
-				if evictedTokens < tokensToEvict || (len(keptNonSystem) == 0 && msg.Role != RoleUser) {
-					evictedTokens += msgTokens
-					continue // Dropped
+				// Check again if we still MUST drop the group to meet the quota
+				if evictedTokens < tokensToEvict || (len(keptGroups) == 0 && !g.HasUser) {
+					evictedTokens += g.Tokens
+					continue // Dropped the entire group
 				}
 			}
 
-			keptNonSystem = append(keptNonSystem, msg)
+			keptGroups = append(keptGroups, g)
 		}
+	}
+
+	var keptNonSystem []Message
+	for _, g := range keptGroups {
+		keptNonSystem = append(keptNonSystem, g.Messages...)
 	}
 
 	newMessages = append(systemMessages, keptNonSystem...)
