@@ -446,7 +446,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 		case "fetchURL":
 			displayName = "📥 Fetch URL"
 		case "grepSearch":
-			displayName = "🔎 Search Code"
+			displayName = "🔍 Search Code"
 		case "subAgent":
 			displayName = "🤖 Sub-Agent"
 		case "fileEdit":
@@ -461,7 +461,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			case "update":
 				displayName = "" // detail carries full info
 			case "list":
-				displayName = "📃 Tasks"
+				displayName = "📋 Tasks"
 			case "analyze":
 				displayName = "🧠 Analyze Tasks"
 			default:
@@ -618,7 +618,7 @@ func NewApp(cfg *config.Config, ui ui.UI) (*App, error) {
 			case "fetchURL":
 				display = "📥 Fetch URL"
 			case "grepSearch":
-				display = "🔎 Search Code"
+				display = "🔍 Search Code"
 			case "subAgent":
 				display = "🤖 Sub-Agent"
 			case "fileEdit":
@@ -1078,7 +1078,7 @@ func (app *App) Run(ctx context.Context, rootCancel context.CancelFunc) error {
 					if stopper, ok := app.ui.(ui.LiveStatusStopper); ok {
 						stopper.StopLiveStatus()
 					}
-					app.ui.Warning("\n⚠️  Task Cancelled via UI")
+					app.ui.Warning("\nTask Cancelled via UI")
 				} else {
 					app.cancelMu.Unlock()
 				}
@@ -1098,7 +1098,7 @@ func (app *App) Run(ctx context.Context, rootCancel context.CancelFunc) error {
 				if stopper, ok := app.ui.(ui.LiveStatusStopper); ok {
 					stopper.StopLiveStatus()
 				}
-				app.ui.Warning("\n⚠️  Task Cancelled")
+				app.ui.Warning("\nTask Cancelled")
 			} else {
 				// Idling -> Shutdown whole app
 				app.cancelMu.Unlock()

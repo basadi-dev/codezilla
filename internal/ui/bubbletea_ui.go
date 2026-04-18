@@ -1041,10 +1041,9 @@ func NewBubbleTeaUI(historyFile string, inline, disableMouse bool) (UI, error) {
 	}
 
 	theme := ThemeTokyoNight()
-	// Use fancy icons
-	theme.IconSuccess = "✨"
-	theme.IconError = "💥"
-	theme.IconWarning = "🔥"
+	theme.IconSuccess = "✅"
+	theme.IconError = "❌"
+	theme.IconWarning = "⚠️"
 	theme.IconInfo = "💡"
 	theme.IconPrompt = "🤖"
 
@@ -1311,7 +1310,7 @@ func (ui *BubbleTeaUI) ShowWelcomeWithModels(defaultModel, fastModel, heavyModel
 		ui.appendToViewport("  ⚡ " + keyStyle.Render("Fast:") + " " + ui.theme.StyleYellow.Render(fastModel) + "\n")
 	}
 	if heavyModel != "" {
-		ui.appendToViewport("  🏋️  " + keyStyle.Render("Heavy:") + " " + ui.theme.StyleYellow.Render(heavyModel) + "\n")
+		ui.appendToViewport("  🏋️ " + keyStyle.Render("Heavy:") + " " + ui.theme.StyleYellow.Render(heavyModel) + "\n")
 	}
 	ui.appendToViewport("  🔌 " + keyStyle.Render("Provider:") + " " + ui.theme.StyleDim.Render(ollamaURL) + "\n")
 
