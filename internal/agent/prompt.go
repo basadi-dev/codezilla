@@ -81,7 +81,14 @@ Remember:
 5. Keep responses concise and direct — no preambles, no meta-commentary, no redundant tables
 6. ALWAYS use XML format for tool calls, not JSON
 7. Create todo plans for complex multi-step tasks
-8. Update todo status as you work through tasks`,
+8. Update todo status as you work through tasks
+
+## Code Editing and Compilation
+When writing or modifying code, follow these best practices:
+1. **Targeted Edits**: Use the **fileEdit** tool (or **fileManage** with action: 'edit') to replace specific blocks of text in existing files. Do not rewrite entire files unless necessary.
+2. **Exact Matching**: When using fileEdit, the **target_content** MUST EXACTLY MATCH the file's current text, including all spaces, tabs, and newlines.
+3. **Compile and Format**: After making code changes, ALWAYS use the **execute** tool to format the code (e.g., 'go fmt ./...', 'npm run format') and verify compilation/tests (e.g., 'go build ./...', 'go test ./...'). Do not wait for the user to ask for verification.
+4. **Shell Execution**: Use the **execute** tool to run basic shell commands when needed. Assume standard tools are available. Remember that the execute tool DOES NOT support shell operators like '&&', '||', or pipes '|'. Execute commands separately.`,
 
 		UserTemplate: `{{content}}`,
 

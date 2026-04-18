@@ -165,7 +165,6 @@ func main() {
 		return
 	}
 
-
 }
 
 func getDefaultConfigPath() string {
