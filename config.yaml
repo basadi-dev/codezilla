@@ -10,7 +10,7 @@ llm:
   models:
     # Default model — your main workhorse for coding tasks, tool use, and general conversation.
     # Pick the most capable model you can afford. This handles everything the router doesn't fast-path.
-    default: "gpt-oss:120b"
+    default: "qwen3.5"
 
     # Fast model — a small, cheap model for trivial exchanges (greetings, "yes/no", "what is X?").
     # The auto-router sends simple inputs here to save tokens and latency.
@@ -19,7 +19,7 @@ llm:
 
     # Heavy model — the most powerful model for complex multi-step tasks (refactors, migrations, architecture).
     # The auto-router sends clearly complex inputs here. Falls back to default if unset.
-    heavy: "qwen3.5"
+    heavy: "glm-5.1"
 
   # Ollama-specific settings
   ollama:

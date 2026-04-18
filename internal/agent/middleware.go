@@ -393,6 +393,9 @@ func inferToolNameFromParams(params map[string]interface{}) string {
 	_, hasContent := params["content"]
 	_, hasDir := params["dir"]
 	_, hasDirectory := params["directory"]
+	_, hasTargetContent := params["target_content"]
+	_, hasReplacementContent := params["replacement_content"]
+	_, hasReplacements := params["replacements"]
 
 	// fileManage: has "action" + "path"
 	if action != "" && (hasPath || hasFilePath || hasDir || hasDirectory) {
@@ -422,7 +425,19 @@ func inferToolNameFromParams(params map[string]interface{}) string {
 		return "subAgent"
 	}
 
-	// fileWrite/fileRead: has "file_path" and "content"
+	// IMPORTANT: fileEdit/multiReplace must be checked BEFORE fileWrite.
+	// Both have file_path, but their distinguishing keys are target_content
+	// and replacement_content. Without this check, edit calls were previously
+	// silently routed to fileWrite, causing destructive full-file overwrites.
+	if hasFilePath && hasTargetContent && hasReplacementContent {
+		return "fileEdit"
+	}
+	// multiReplace: has "file_path" and "replacements" array
+	if hasFilePath && hasReplacements {
+		return "multiReplace"
+	}
+
+	// fileWrite: has "file_path" and "content" (full overwrite, intentional)
 	if hasFilePath && hasContent {
 		return "fileWrite"
 	}
@@ -433,6 +448,20 @@ func inferToolNameFromParams(params map[string]interface{}) string {
 	return ""
 }
 
+// extractXMLParams extracts tool parameters from the raw inner XML of a <params> block.
+//
+// Design note: We intentionally do NOT use encoding/xml.Decoder here. The standard
+// XML decoder requires well-formed XML, but code passed as parameter values often
+// contains unescaped angle brackets (Go generics, HTML templates, comparison operators).
+// A robust raw-string extraction strategy is used instead:
+//
+//  1. Discover top-level parameter tag names via regex (tag names only, not content).
+//  2. For each parameter, find the FIRST opening tag position and the LAST closing tag
+//     position. Using LastIndex for the close tag means content that contains
+//     a partial closing tag (e.g. a comment like "// </foo>") won't truncate the value.
+//  3. Extract the raw string between those positions and unescape XML entities.
+//
+// This correctly handles multi-line code blocks, Go generics, HTML inside code, etc.
 func extractXMLParams(paramsXML string, log *logger.Logger) (map[string]interface{}, error) {
 	params := make(map[string]interface{})
 	namePattern := regexp.MustCompile(`<([a-zA-Z0-9_-]+)[^>]*>`)
@@ -441,52 +470,77 @@ func extractXMLParams(paramsXML string, log *logger.Logger) (map[string]interfac
 		return params, nil
 	}
 
+	seen := make(map[string]bool)
 	for _, nameMatch := range potentialNames {
 		if len(nameMatch) < 2 {
 			continue
 		}
 		paramName := nameMatch[1]
-		if _, exists := params[paramName]; exists || paramName == "params" {
+		if seen[paramName] || paramName == "params" {
 			continue
 		}
-		openTag := regexp.MustCompile(fmt.Sprintf(`<%s[^>]*>`, regexp.QuoteMeta(paramName)))
-		closeTag := regexp.MustCompile(fmt.Sprintf(`</%s>`, regexp.QuoteMeta(paramName)))
+		seen[paramName] = true
 
-		openMatches := openTag.FindAllStringIndex(paramsXML, -1)
-		closeMatches := closeTag.FindAllStringIndex(paramsXML, -1)
+		// Find where the opening tag ends (content starts)
+		openTagPattern := regexp.MustCompile(fmt.Sprintf(`<%s[^>]*>`, regexp.QuoteMeta(paramName)))
+		openMatch := openTagPattern.FindStringIndex(paramsXML)
+		if openMatch == nil {
+			continue
+		}
+		contentStart := openMatch[1] // byte position after the '>' of the opening tag
 
-		if len(openMatches) == 0 || len(closeMatches) == 0 {
+		// Use LastIndex for the closing tag so that code containing a partial close
+		// tag (e.g. inside a comment) doesn't prematurely terminate extraction.
+		closeTag := "</" + paramName + ">"
+		remaining := paramsXML[contentStart:]
+		closeIdx := strings.LastIndex(remaining, closeTag)
+		if closeIdx == -1 {
 			continue
 		}
 
-		openPos := openMatches[0][1]
-		closePos := closeMatches[0][0]
+		paramValue := remaining[:closeIdx]
 
-		if openPos >= closePos || openPos >= len(paramsXML) || closePos > len(paramsXML) {
-			continue
-		}
+		// Unescape standard XML entities. Code content that contains literal angle
+		// brackets should have been entity-encoded by the model (e.g. &lt; for <).
+		paramValue = unescapeXMLEntities(paramValue)
 
-		paramValue := strings.TrimSpace(paramsXML[openPos:closePos])
+		// For non-code scalar values, also trim surrounding whitespace.
+		// We do NOT trim for long values (code blocks) to preserve indentation.
+		trimmed := strings.TrimSpace(paramValue)
+
 		switch {
-		case paramValue == "true" || paramValue == "false":
-			params[paramName] = paramValue == "true"
-		case regexp.MustCompile(`^-?\d+$`).MatchString(paramValue):
-			intVal, err := strconv.Atoi(paramValue)
+		case trimmed == "true" || trimmed == "false":
+			params[paramName] = trimmed == "true"
+		case regexp.MustCompile(`^-?\d+$`).MatchString(trimmed):
+			intVal, err := strconv.Atoi(trimmed)
 			if err == nil {
 				params[paramName] = intVal
 			} else {
 				params[paramName] = paramValue
 			}
-		case regexp.MustCompile(`^-?\d+\.\d+$`).MatchString(paramValue):
-			floatVal, err := strconv.ParseFloat(paramValue, 64)
+		case regexp.MustCompile(`^-?\d+\.\d+$`).MatchString(trimmed):
+			floatVal, err := strconv.ParseFloat(trimmed, 64)
 			if err == nil {
 				params[paramName] = floatVal
 			} else {
 				params[paramName] = paramValue
 			}
 		default:
-			params[paramName] = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(paramValue, "&amp;", "&"), "&lt;", "<"), "&gt;", ">"), "&quot;", "\""), "&apos;", "'")
+			// Preserve the raw (entity-unescaped) value. For code blocks this retains
+			// all original whitespace and indentation.
+			params[paramName] = paramValue
 		}
 	}
 	return params, nil
+}
+
+// unescapeXMLEntities replaces the five standard XML character entities with
+// their literal equivalents. Called after raw-string extraction from XML.
+func unescapeXMLEntities(s string) string {
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&quot;", "\"")
+	s = strings.ReplaceAll(s, "&apos;", "'")
+	return s
 }

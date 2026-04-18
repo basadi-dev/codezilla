@@ -85,10 +85,13 @@ Remember:
 
 ## Code Editing and Compilation
 When writing or modifying code, follow these best practices:
-1. **Targeted Edits**: Use the **fileEdit** tool (or **fileManage** with action: 'edit') to replace specific blocks of text in existing files. Do not rewrite entire files unless necessary.
-2. **Exact Matching**: When using fileEdit, the **target_content** MUST EXACTLY MATCH the file's current text, including all spaces, tabs, and newlines.
-3. **Compile and Format**: After making code changes, ALWAYS use the **execute** tool to format the code (e.g., 'go fmt ./...', 'npm run format') and verify compilation/tests (e.g., 'go build ./...', 'go test ./...'). Do not wait for the user to ask for verification.
-4. **Shell Execution**: Use the **execute** tool to run basic shell commands when needed. Assume standard tools are available. Remember that the execute tool DOES NOT support shell operators like '&&', '||', or pipes '|'. Execute commands separately.`,
+1. **Read Before Editing**: ALWAYS use **fileManage** (action: read) or **fileRead** to load the current file contents into context before calling fileEdit or multiReplace. Editing a file without reading it first is the most common source of "target_content not found" failures.
+2. **Exact Matching**: The **target_content** field MUST EXACTLY MATCH the file text, including all spaces, tabs, and newlines. Copy the block character-for-character from the file read result.
+3. **Single Edit → fileEdit**: Use **fileEdit** to replace one specific block of text in a file.
+4. **Multiple Edits → multiReplace**: Use **multiReplace** to replace multiple non-adjacent blocks in ONE tool call. Do not call fileEdit multiple times on the same file in the same turn — use multiReplace instead to avoid ordering issues.
+5. **XML Entity Encoding**: When using the XML tool call format, any code value that contains angle brackets (e.g. Go generics like [T any], HTML tags, or comparison operators < >) MUST be XML-entity-encoded: replace < with &lt; and > with &gt;. Failure to do so will corrupt the parameter value.
+6. **Compile and Format**: After making code changes, ALWAYS use the **execute** tool to format the code (e.g., 'go fmt ./...', 'npm run format') and verify compilation/tests (e.g., 'go build ./...', 'go test ./...'). Do not wait for the user to ask for verification.
+7. **Shell Execution**: Use the **execute** tool to run basic shell commands when needed. Assume standard tools are available. Remember that the execute tool DOES NOT support shell operators like '&&', '||', or pipes '|'. Execute commands separately.`,
 
 		UserTemplate: `{{content}}`,
 

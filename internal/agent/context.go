@@ -228,7 +228,12 @@ func (c *Context) AddToolCallsMessage(content string, calls []anyllm.ToolCall) {
 
 // maxToolResultChars caps individual tool results to prevent context explosion.
 // Tool results like `ls -R` or large file reads can produce enormous output.
-const maxToolResultChars = 8000
+//
+// 24 000 chars ≈ ~6 000 tokens, roughly 600 lines of Go/Python code.
+// This is large enough to hold a full medium-sized source file in context,
+// which is critical for the LLM to generate correct target_content for fileEdit.
+// File reads that exceed this limit display an actionable truncation hint.
+const maxToolResultChars = 24000
 
 func (c *Context) AddToolResultMessage(toolCallID string, result interface{}, err error) {
 	var errStr string
@@ -256,20 +261,31 @@ func capToolResult(result interface{}, maxChars int) interface{} {
 	switch v := result.(type) {
 	case string:
 		if len(v) > maxChars {
-			return v[:maxChars] + fmt.Sprintf("\n\n[TRUNCATED: output was %d chars, capped at %d to preserve context]", len(v), maxChars)
+			return v[:maxChars] + fmt.Sprintf(
+				"\n\n[TRUNCATED: output was %d chars, showing first %d. "+
+					"If this was a file read, use line_start/line_end parameters to read specific line ranges.]",
+				len(v), maxChars)
 		}
 		return v
 	case map[string]interface{}:
-		// Serialize to check total size
+		// Serialize to check total size. For structured results (file diffs, tool
+		// success maps) we prefer to keep them intact; only stringify-truncate
+		// when they blow past the cap.
 		data, err := json.Marshal(v)
 		if err == nil && len(data) > maxChars {
-			return string(data[:maxChars]) + fmt.Sprintf("\n\n[TRUNCATED: output was %d chars, capped at %d to preserve context]", len(data), maxChars)
+			return string(data[:maxChars]) + fmt.Sprintf(
+				"\n\n[TRUNCATED: output was %d chars, showing first %d. "+
+					"If this was a file read, use line_start/line_end parameters to read specific line ranges.]",
+				len(data), maxChars)
 		}
 		return v
 	default:
 		s := fmt.Sprintf("%v", result)
 		if len(s) > maxChars {
-			return s[:maxChars] + fmt.Sprintf("\n\n[TRUNCATED: output was %d chars, capped at %d to preserve context]", len(s), maxChars)
+			return s[:maxChars] + fmt.Sprintf(
+				"\n\n[TRUNCATED: output was %d chars, showing first %d. "+
+					"If this was a file read, use line_start/line_end parameters to read specific line ranges.]",
+				len(s), maxChars)
 		}
 		return result
 	}

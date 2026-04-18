@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/exp/slices"
 )
 
 // ExecuteTool allows executing shell commands
@@ -60,6 +62,10 @@ func (t *ExecuteTool) ParameterSchema() JSONSchema {
 				Minimum:     ptr(float64(100)),
 				Maximum:     ptr(float64(120000)), // 2 minutes max
 			},
+			"run_in_background": {
+				Type:        "boolean",
+				Description: "Set to true to run this command in the background. Use jobOutput to read the output later.",
+			},
 		},
 		Required: []string{"command"},
 	}
@@ -87,6 +93,28 @@ func (t *ExecuteTool) Execute(ctx context.Context, params map[string]interface{}
 			ToolName: t.Name(),
 			Message:  err.Error(),
 		}
+	}
+
+	// Handle background execution
+	if runInBg, ok := params["run_in_background"].(bool); ok && runInBg {
+		mgr := GetBackgroundJobManager()
+		var args []string
+		if t.DisableShell {
+			args = parseCommandArgs(cmdStr)
+		} else {
+			args = []string{"sh", "-c", cmdStr}
+		}
+
+		job, err := mgr.StartJob(cmdStr, args, t.WorkingDir, getCleanEnvironment())
+		if err != nil {
+			return nil, fmt.Errorf("failed to start background job: %w", err)
+		}
+
+		return map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("Started background job %s. Use jobOutput tool with job_id: '%s' to check status. Wait a few seconds before checking to allow output to accumulate.", job.ID, job.ID),
+			"job_id":  job.ID,
+		}, nil
 	}
 
 	// Extract timeout if provided
@@ -193,13 +221,17 @@ func (t *ExecuteTool) validateCommand(cmdStr string) error {
 		}
 	}
 
+	args := parseCommandArgs(cmdStr)
+	if len(args) == 0 {
+		return fmt.Errorf("empty command")
+	}
+
+	if err := validateArguments(args); err != nil {
+		return err
+	}
+
 	// If whitelist is configured, check against it
 	if len(t.AllowedCommands) > 0 {
-		args := parseCommandArgs(cmdStr)
-		if len(args) == 0 {
-			return fmt.Errorf("empty command")
-		}
-
 		cmdName := filepath.Base(args[0])
 		allowed := false
 		for _, allowedCmd := range t.AllowedCommands {
@@ -291,3 +323,87 @@ func getCleanEnvironment() []string {
 
 	return env
 }
+
+
+func validateArguments(parts []string) error {
+	cmd := parts[0]
+	
+	// Exact command blocks
+	bannedCommands := []string{
+		"alias", "aria2c", "curl", "wget", "scp", "ssh", // Network/download
+		"sudo", "su", "doas", // Privilege escalation
+		"apt", "apt-get", "apk", "dnf", "yum", "zypper", "pacman", // System package managers
+		"mount", "systemctl", "fdisk", "parted", "mkfs", "route", "iptables", // System modification
+	}
+	
+	for _, banned := range bannedCommands {
+		if cmd == banned {
+			return fmt.Errorf("command is not allowed for security reasons: %q", cmd)
+		}
+	}
+
+	// Subcommand exact matches (e.g. `go test -exec`, `npm install -g`)
+	argParts := []string{}
+	flagParts := []string{}
+	for _, part := range parts[1:] {
+		if strings.HasPrefix(part, "-") {
+			flag := part
+			if before, _, ok := strings.Cut(part, "="); ok {
+				flag = before
+			}
+			flagParts = append(flagParts, flag)
+		} else {
+			argParts = append(argParts, part)
+		}
+	}
+
+	blockArgs := func(blockedCmd string, badArgs []string, badFlags []string) error {
+		if cmd != blockedCmd {
+			return nil
+		}
+		argsMatch := true
+		if len(badArgs) > 0 {
+			if len(argParts) < len(badArgs) {
+				argsMatch = false
+			} else {
+				for i, arg := range badArgs {
+					if argParts[i] != arg {
+						argsMatch = false
+						break
+					}
+				}
+			}
+		}
+
+		flagsMatch := true
+		if len(badFlags) > 0 {
+			for _, flag := range badFlags {
+				if !slices.Contains(flagParts, flag) {
+					flagsMatch = false
+					break
+				}
+			}
+		} else {
+			flagsMatch = false // if badFlags is empty, it shouldn't trigger on flags
+			if len(badArgs) > 0 && argsMatch {
+				flagsMatch = true // pure argument match
+			}
+		}
+
+		if argsMatch && flagsMatch {
+			return fmt.Errorf("dangerous arguments not allowed for %q", cmd)
+		}
+		return nil
+	}
+
+	// Block global installs
+	if err := blockArgs("npm", []string{"install"}, []string{"-g"}); err != nil { return err }
+	if err := blockArgs("npm", []string{"install"}, []string{"--global"}); err != nil { return err }
+	if err := blockArgs("yarn", []string{"global", "add"}, nil); err != nil { return err }
+	
+	// Block arbitrary execution via go test
+	if err := blockArgs("go", []string{"test"}, []string{"-exec"}); err != nil { return err }
+
+	return nil
+}
+

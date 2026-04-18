@@ -2194,7 +2194,10 @@ func (app *App) handleSkillCommand(parts []string) {
 func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager, todoMgr *tools.TodoManager, appUI ui.UI) {
 	// Unified File operation tool
 	registry.RegisterTool(tools.NewFileManageTool())
+	registry.RegisterTool(tools.NewFileEditTool())
+	registry.RegisterTool(tools.NewFileUndoTool())
 	registry.RegisterTool(tools.NewGrepSearchTool())
+	registry.RegisterTool(tools.NewMultiReplaceTool())
 	registry.RegisterTool(tools.NewRepoMapGeneratorTool())
 
 	// Create analyzer factory and register analyzer tool
@@ -2221,12 +2224,19 @@ func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *conf
 
 	// All tools are auto-approved (NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("fileEdit", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("fileUndo", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("multiReplace", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("grepSearch", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("projectScanAnalyzer", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("repoMapGenerator", tools.NeverAsk)
 	permissionMgr.SetDefaultPermissionLevel("execute", tools.NeverAsk)
 
 	registry.RegisterTool(tools.NewExecuteTool(30))
+	registry.RegisterTool(tools.NewJobOutputTool())
+	registry.RegisterTool(tools.NewJobKillTool())
+	permissionMgr.SetDefaultPermissionLevel("jobOutput", tools.NeverAsk)
+	permissionMgr.SetDefaultPermissionLevel("jobKill", tools.NeverAsk)
 
 	// Todo management tools — manager is passed in from NewApp so the UI hook can access it
 	for _, tool := range tools.GetTodoTools(todoMgr) {
