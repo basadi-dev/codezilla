@@ -625,9 +625,13 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 						"The malformed text was: %q. Please retry using the proper tool format.",
 					finalResponse[:min(len(finalResponse), 200)],
 				)
-				o.agent.context.AddToolResultMessage("", map[string]interface{}{
-					"correction": correctionMsg,
-				}, nil)
+				// Stash the botched attempt
+				stored, think := extractAndStripThinkBlocks(finalResponse)
+				if stored != "" || think != "" {
+					o.agent.context.AddAssistantMessageWithThink(stored, think)
+				}
+				// Push as a User message to safely bounce back a warning to the LLM
+				o.agent.context.AddUserMessage(correctionMsg)
 				finalResponse = ""
 				state = StatePrompting
 			} else if strings.TrimSpace(strippedContent) == "" && toolFormatRetries < 2 {
@@ -641,10 +645,8 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				
 				correctionMsg := "[SYSTEM PROMPT] Your previous response consisted entirely of internal thoughts with no actual output or tool call. If you reached a decision, please execute your tool call now, or provide a text response."
 				
-				// Push as an un-id'd tool result error to trick the flow into bouncing back a warning
-				o.agent.context.AddToolResultMessage("", map[string]interface{}{
-					"correction": correctionMsg,
-				}, nil)
+				// Push as a User message to safely bounce back a warning to the LLM
+				o.agent.context.AddUserMessage(correctionMsg)
 				finalResponse = ""
 				state = StatePrompting
 			} else {
