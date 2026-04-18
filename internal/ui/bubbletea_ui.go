@@ -453,13 +453,20 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	}
 
-	// Delegate to sub-models
+	// Delegate to sub-models.
+	// IMPORTANT: Never forward tea.MouseMsg to the textarea — the textarea's
+	// own mouse handler can inject phantom characters or move the cursor when
+	// the user is simply scrolling the viewport. All mouse interaction is
+	// handled above (viewport scroll, drag-to-select) so the textarea should
+	// never see mouse events.
 	if m.inputEnabled {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		cmds = append(cmds, cmd)
-		// Resize dynamically if the user added/removed lines
-		m = m.resizeViews(false)
+		if _, isMouse := msg.(tea.MouseMsg); !isMouse {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			cmds = append(cmds, cmd)
+			// Resize dynamically if the user added/removed lines
+			m = m.resizeViews(false)
+		}
 	}
 
 	// Viewport always updates (scroll support)
