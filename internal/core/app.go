@@ -1397,20 +1397,42 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 		}
 	}
 
+	defaultModel := app.config.LLM.Models.Default
+	fastModel := app.config.LLM.Models.Fast
+	heavyModel := app.config.LLM.Models.Heavy
+	dimStyle := lipgloss.NewStyle().Faint(true)
+
+	// Build role → model mapping (mirrors worker.go logic)
+	roleModel := func(role string) string {
+		switch role {
+		case "Researcher":
+			if fastModel != "" {
+				return fastModel
+			}
+		case "Developer", "Reviewer":
+			if heavyModel != "" {
+				return heavyModel
+			}
+		}
+		return defaultModel
+	}
+
 	app.ui.HideThinking()
-	app.ui.Info("🔀 Dispatching %d parallel agents...\n", len(tasks))
+	app.ui.Info("🔀 Dispatching %d parallel agents...  %s", len(tasks), dimStyle.Render("· decomposed via: "+decomposerModel))
+	app.ui.Print("\n")
 	for i, t := range tasks {
 		role := "Generic"
 		if r, ok := t.Inputs["role_hint"].(string); ok && r != "" {
 			role = r
 		}
-		app.ui.Info("   %d. [%s] %s", i+1, role, t.Description)
+		model := roleModel(role)
+		app.ui.Info("   %d. [%s] %s  %s", i+1, role, t.Description, dimStyle.Render("("+model+")"))
 	}
 	app.ui.Print("\n")
 
 	// ── Step 3: Launch orchestrator with bus→UI bridge ──
-	app.ui.UpdateThinkingStatus(fmt.Sprintf("running %d agents in parallel", len(tasks)))
 	app.ui.ShowThinking()
+	app.ui.UpdateThinkingStatus(fmt.Sprintf("running %d agents in parallel", len(tasks)))
 
 	orch := multiagent.NewOrchestrator(app.agent, app.logger)
 
@@ -1451,6 +1473,7 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 					WorkerID: evt.WorkerID,
 					Number:   num,
 					Role:     role,
+					Model:    roleModel(role),
 					Label:    label,
 					Done:     evt.Type == multiagent.EventTaskCompleted,
 					HasError: hasError,
@@ -1512,7 +1535,17 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 		}
 	}
 
-	app.ui.Info("🔀 Parallel execution complete: %d/%d succeeded\n", successCount, len(results))
+	// Calculate total wall time from longest worker
+	var maxDuration time.Duration
+	for _, r := range results {
+		if r.Duration > maxDuration {
+			maxDuration = r.Duration
+		}
+	}
+
+	app.ui.Info("🔀 Parallel execution complete: %d/%d succeeded  %s",
+		successCount, len(results),
+		dimStyle.Render(fmt.Sprintf("· %s · model: %s", maxDuration.Round(time.Second), defaultModel)))
 	app.ui.ShowResponse(summary.String())
 
 	// Inject the aggregated results as an assistant message so the main agent

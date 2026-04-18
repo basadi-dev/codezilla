@@ -26,6 +26,23 @@ func NewWorker(id string, role WorkerRole, baseAgent agent.Agent, bus *MemoryBus
 	// (ui.Print, ui.HideThinking, etc.) which would cause garbled output.
 	clonedAgent.ClearTools()
 
+	// Route each role to the most appropriate model tier:
+	//   Researcher → fast model (quick lookups, scanning)
+	//   Developer  → heavy model (complex reasoning, code generation)
+	//   Reviewer   → heavy model (deep analysis)
+	//   Generic    → default model
+	// Falls back to default if the tier model isn't configured.
+	switch role {
+	case RoleResearcher:
+		if m := clonedAgent.GetModelForTier(agent.TierFast); m != "" {
+			clonedAgent.SetModel(m)
+		}
+	case RoleDeveloper, RoleReviewer:
+		if m := clonedAgent.GetModelForTier(agent.TierHeavy); m != "" {
+			clonedAgent.SetModel(m)
+		}
+	}
+
 	// Prepend specialized identity to the system prompt based on role
 	roleInstruction := map[WorkerRole]string{
 		RoleGeneric:    "You are a general-purpose assistant. Fulfill the user's request.",
@@ -115,6 +132,7 @@ func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, resul
 			Payload: map[string]interface{}{
 				"task_id":   task.ID,
 				"role":      string(w.role),
+				"label":     task.Description,
 				"duration":  result.Duration.String(),
 				"has_error": err != nil,
 			},

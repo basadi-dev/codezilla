@@ -44,6 +44,7 @@ type WorkerStatus struct {
 	WorkerID string
 	Number   int    // 1-indexed task number for display
 	Role     string
+	Model    string // LLM model this worker uses
 	Label    string
 	Done     bool
 	HasError bool
@@ -865,9 +866,9 @@ func (m appModel) renderWorkerStatusLine(ws WorkerStatus) string {
 	var icon string
 	switch {
 	case ws.Done && ws.HasError:
-		icon = redStyle.Render("✗")
+		icon = redStyle.Render("✗ ")
 	case ws.Done:
-		icon = greenStyle.Render("✓")
+		icon = greenStyle.Render("✓ ")
 	default:
 		icon = m.spinner.View()
 	}
@@ -893,7 +894,12 @@ func (m appModel) renderWorkerStatusLine(ws WorkerStatus) string {
 		numStr = dim.Render(fmt.Sprintf("%d.", ws.Number)) + " "
 	}
 
-	return "   " + icon + " " + numStr + role + "  " + labelStyle.Render(label) + "  " + elapsed
+	modelStr := ""
+	if ws.Model != "" {
+		modelStr = "  " + dim.Render("("+ws.Model+")")
+	}
+
+	return "   " + icon + " " + numStr + role + "  " + labelStyle.Render(label) + "  " + elapsed + modelStr
 }
 
 // renderViewportWithScrollbar composites the viewport output with a
