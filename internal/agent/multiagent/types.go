@@ -21,6 +21,7 @@ type Task struct {
 	Description string                 // What needs to be done
 	Inputs      map[string]interface{} // Any initial context or variables
 	Deadline    time.Time              // Optional deadline for context cancellation
+	DependsOn   []string               // List of Task IDs that must complete before this task
 }
 
 // Result represents the outcome of a worker's task execution

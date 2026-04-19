@@ -425,7 +425,7 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 		showDesc := true
 		switch toolName {
 		case "todoCreate", "todoManage",
-			"fileRead", "fileWrite", "fileEdit", "fileManage", "listFiles":
+			"fileRead", "fileWrite", "fileManage", "listFiles":
 			showDesc = false
 		}
 		var desc string
@@ -453,7 +453,7 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 			displayName = "🔍 Search Code"
 		case "subAgent":
 			displayName = "🤖 Sub-Agent"
-		case "fileEdit":
+		case "multiReplace":
 			displayName = "✏️ Edit File"
 		case "fileManage":
 			displayName = "🏗️  Manage Files"
@@ -585,7 +585,7 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 		PermissionMgr:          permissionMgr,
 		AutoPlan:               cfg.AutoPlan,
 		AutoVerify:             cfg.AutoVerify,
-		VerifyCommands:         cfg.VerifyCommands,
+		VerifyProfiles:         cfg.VerifyProfiles,
 		WorkingDirectory:       cfg.WorkingDirectory,
 		OnToolExecution:        onToolExec,
 		LoopDetectWindow:       cfg.LoopDetectWindow,
@@ -640,7 +640,7 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 				display = "🔍 Search Code"
 			case "subAgent":
 				display = "🤖 Sub-Agent"
-			case "fileEdit":
+			case "multiReplace":
 				display = "✏️ Edit File"
 			case "fileManage":
 				display = "🏗️  Manage Files"
@@ -1301,44 +1301,120 @@ func (app *App) processParallelInput(ctx context.Context, prompt string) error {
 		cancelTask()
 	}()
 
-	app.ui.UpdateThinkingStatus("decomposing tasks for parallel execution")
+	app.ui.UpdateThinkingStatus("planning parallel execution graph...")
 	app.ui.ShowThinking()
 
-	// ── Step 1: Use a direct LLM call (no tools) to decompose the prompt ──
-	// We bypass app.agent.ProcessMessage() because that has full tool access,
-	// and models will use tools (Repo Map, etc.) instead of returning JSON.
-	decomposerModel := app.config.LLM.Models.Fast
+	// ── Step 1: Stream the decomposer LLM call ──────────────────────────────
+	// Using Stream (not Complete) so we can print live token progress on a
+	// dedicated erasable line above the spinner, giving clear visible feedback
+	// during what can be a multi-second think on a heavy model.
+	//
+	// The Heavy model is used because getting the DAG right is the most
+	// critical planning step. Falls back through Default → Fast.
+	decomposerModel := app.config.LLM.Models.Heavy
 	if decomposerModel == "" {
 		decomposerModel = app.config.LLM.Models.Default
 	}
+	if decomposerModel == "" {
+		decomposerModel = app.config.LLM.Models.Fast
+	}
 
 	decomposePrompt := fmt.Sprintf(
-		`You are a task decomposer. Break the following user request into independent, parallelizable sub-tasks.
-Return ONLY a JSON array of objects with "id", "description", and "role" fields.
-Valid roles: "Researcher", "Developer", "Reviewer", "Generic".
+		`You are a task decomposer. Your ONLY job is to output a JSON array — do NOT call any tools, do NOT use tool_calls format.
 
-IMPORTANT: Each task must be fully independent — no task should depend on the output of another.
-If the request cannot be parallelized, return a single-element array.
+Break the following user request into independent or sequential sub-tasks.
+Return ONLY a raw JSON array of objects. Each object must have these exact fields:
+  "id"         - unique short string (e.g. "task-1")
+  "description" - what this task does
+  "role"        - one of: "Researcher", "Developer", "Reviewer", "Generic"
+  "depends_on" - array of task IDs this task depends on (empty array [] if none)
+
+Execution graph rules:
+- Tasks with no dependencies run in parallel.
+- If task B needs task A's output, set "depends_on": ["A"] on task B.
 
 User request: %s
 
-Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
+Output format: start with [ and end with ]. No markdown. No explanation. No tool calls. Raw JSON only.`, prompt)
 
 	decomposeMessages := []anyllm.Message{
 		{Role: "user", Content: decomposePrompt},
 	}
 	temperature := 0.1 // low temperature for deterministic JSON output
-	completion, err := app.llmClient.Complete(ctx, app.config.LLM.Provider, decomposerModel, decomposeMessages, temperature, "", nil)
+
+	chunkCh, errCh, err := app.llmClient.Stream(ctx, app.config.LLM.Provider, decomposerModel, decomposeMessages, temperature, "", nil)
 	if err != nil {
 		app.ui.HideThinking()
 		return fmt.Errorf("task decomposition failed: %w", err)
 	}
-	decomposeResult := ""
-	if len(completion.Choices) > 0 {
-		if s, ok := completion.Choices[0].Message.Content.(string); ok {
-			decomposeResult = s
+
+	// Accumulate the full response while feeding a live tail into the spinner
+	// status label via UpdateThinkingStatus. The spinner goroutine owns all
+	// cursor movement — we must NOT emit any raw ANSI ourselves while it runs.
+	// UpdateThinkingStatus is mutex-protected and safe to call from any goroutine.
+	var decomposeResultBuilder strings.Builder
+	var visibleBuf strings.Builder // non-think tokens only, for the status label
+	insideThink := false
+
+	for chunk := range chunkCh {
+		token := ""
+		if len(chunk.Choices) > 0 {
+			delta := chunk.Choices[0].Delta
+			token = delta.Content
+			// Some reasoning models emit content in Reasoning.Content
+			if token == "" && delta.Reasoning != nil {
+				token = delta.Reasoning.Content
+			}
+		}
+		if token == "" {
+			continue
+		}
+		decomposeResultBuilder.WriteString(token)
+
+		// Suppress <think>…</think> from the visible label while keeping the
+		// full text in the accumulator (needed later for JSON extraction).
+		combined := visibleBuf.String() + token
+		if !insideThink {
+			if idx := strings.Index(combined, "<think>"); idx != -1 {
+				insideThink = true
+				visibleBuf.Reset()
+				visibleBuf.WriteString(combined[:idx])
+			} else {
+				visibleBuf.Reset()
+				visibleBuf.WriteString(combined)
+			}
+		} else {
+			if idx := strings.Index(combined, "</think>"); idx != -1 {
+				insideThink = false
+				visibleBuf.Reset()
+				visibleBuf.WriteString(combined[idx+len("</think>"):])
+			}
+			// While inside think, don't update visibleBuf
+		}
+
+		// Show the last 70 visible chars in the spinner label.
+		// Strip newlines so it stays on one line.
+		tail := strings.ReplaceAll(strings.TrimSpace(visibleBuf.String()), "\n", " ")
+		const labelMax = 70
+		if len(tail) > labelMax {
+			tail = "…" + tail[len(tail)-labelMax+1:]
+		}
+		if tail != "" {
+			app.ui.UpdateThinkingStatus("planning — " + tail)
 		}
 	}
+
+	// Check streaming error
+	if streamErr := <-errCh; streamErr != nil {
+		app.ui.HideThinking()
+		return fmt.Errorf("task decomposition stream failed: %w", streamErr)
+	}
+
+	// Collapse spinner; print a clean one-liner before the dispatch list.
+	app.ui.HideThinking()
+	app.ui.Info("✦ Decomposition complete via %s — building task graph...", decomposerModel)
+
+	decomposeResult := decomposeResultBuilder.String()
 
 
 	// Parse the JSON array of tasks from the LLM response.
@@ -1374,39 +1450,45 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 		ID          json.RawMessage `json:"id"`
 		Description string          `json:"description"`
 		Role        string          `json:"role"`
+		DependsOn   []string        `json:"depends_on"`
 	}
 	parseJSON := func(data string) error {
 		return json.Unmarshal([]byte(data), &taskDefs)
 	}
 
 	if err := parseJSON(cleaned); err != nil {
-		// Fallback: extract first JSON array via bracket matching
-		if start := strings.Index(cleaned, "["); start != -1 {
-			if end := strings.LastIndex(cleaned, "]"); end > start {
-				extracted := cleaned[start : end+1]
-				if jsonErr := parseJSON(extracted); jsonErr != nil {
-					app.ui.HideThinking()
-					app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
-					app.logger.Warn("Parallel decomposition JSON parse failed", "error", jsonErr, "raw", decomposeResult)
-					return app.processInput(ctx, prompt)
+		// Bracket-match extraction: try three sources in order of reliability:
+		// 1. cleaned  — post-stripping (handles prose-wrapped JSON)
+		// 2. decomposeResult — raw output before stripping (handles models that
+		//    emit JSON *inside* <think> blocks, e.g. GLM / Qwen reasoning mode)
+		sources := []string{cleaned, decomposeResult}
+		extractJSON := func(s string) string {
+			if start := strings.Index(s, "["); start != -1 {
+				if end := strings.LastIndex(s, "]"); end > start {
+					return s[start : end+1]
 				}
-			} else {
-				app.ui.HideThinking()
-				app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
-				app.logger.Warn("Parallel decomposition: no JSON array found", "raw", decomposeResult)
-				return app.processInput(ctx, prompt)
 			}
-		} else {
-			app.ui.HideThinking()
-			app.ui.Warning("Could not decompose into parallel tasks — falling back to single agent")
+			return ""
+		}
+		parsed := false
+		for _, src := range sources {
+			if extracted := extractJSON(sanitizeJSONNewlines(src)); extracted != "" {
+				if parseJSON(extracted) == nil {
+					parsed = true
+					break
+				}
+			}
+		}
+		if !parsed {
+			app.ui.Warning("⚠ Model returned non-JSON output for task decomposition — running as single agent.\n  Tip: if this happens often, try a stronger model for the Heavy tier.")
 			app.logger.Warn("Parallel decomposition JSON parse failed", "error", err, "raw", decomposeResult)
 			return app.processInput(ctx, prompt)
 		}
 	}
 
 	if len(taskDefs) == 0 {
-		app.ui.HideThinking()
-		app.ui.Warning("No sub-tasks identified — falling back to single agent")
+		app.ui.Warning("⚠ Decomposition returned an empty task list — running as single agent")
+		app.logger.Warn("Parallel decomposition: empty task list", "raw", decomposeResult)
 		return app.processInput(ctx, prompt)
 	}
 
@@ -1421,6 +1503,7 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 		tasks[i] = multiagent.Task{
 			ID:          id,
 			Description: td.Description,
+			DependsOn:   td.DependsOn,
 			Inputs: map[string]interface{}{
 				"role_hint": td.Role,
 			},
@@ -1465,6 +1548,9 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 	app.ui.UpdateThinkingStatus(fmt.Sprintf("running %d agents in parallel", len(tasks)))
 
 	orch := multiagent.NewOrchestrator(app.agent, app.logger)
+	if app.config.MaxParallelAgents > 0 {
+		orch.SetMaxConcurrency(app.config.MaxParallelAgents)
+	}
 
 	// Wire bus events to the BubbleTea UI worker status lines
 	if btUI, ok := app.ui.(*ui.BubbleTeaUI); ok {
@@ -2607,7 +2693,6 @@ func (app *App) handleSkillCommand(parts []string) {
 func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager, todoMgr *tools.TodoManager, appUI ui.UI) {
 	// Unified File operation tool
 	registry.RegisterTool(tools.NewFileManageTool())
-	registry.RegisterTool(tools.NewFileEditTool())
 	registry.RegisterTool(tools.NewFileUndoTool())
 	registry.RegisterTool(tools.NewGrepSearchTool())
 	registry.RegisterTool(tools.NewMultiReplaceTool())

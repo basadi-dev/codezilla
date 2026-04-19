@@ -99,14 +99,33 @@ func TestIsFileModifyingTool(t *testing.T) {
 		params map[string]interface{}
 		want   bool
 	}{
-		{"fileEdit always modifies", "fileEdit", nil, true},
-		{"multiReplace always modifies", "multiReplace", nil, true},
-		{"fileManage with write", "fileManage", map[string]interface{}{"action": "write"}, true},
-		{"fileManage with edit", "fileManage", map[string]interface{}{"action": "edit"}, true},
-		{"fileManage with read", "fileManage", map[string]interface{}{"action": "read"}, false},
-		{"fileManage with list", "fileManage", map[string]interface{}{"action": "list"}, false},
-		{"grepSearch is read-only", "grepSearch", nil, false},
-		{"execute is not tracked", "execute", nil, false},
+		{
+			// fileEdit is removed — multiReplace is the sole surgical edit tool now.
+			name: "multiReplace always modifies", tool: "multiReplace", params: nil, want: true,
+		},
+		{
+			name: "fileManage with write", tool: "fileManage",
+			params: map[string]interface{}{"action": "write"}, want: true,
+		},
+		{
+			// action:edit removed from fileManage — use multiReplace instead.
+			name: "fileManage with edit (removed action)", tool: "fileManage",
+			params: map[string]interface{}{"action": "edit"}, want: false,
+		},
+		{
+			name: "fileManage with delete", tool: "fileManage",
+			params: map[string]interface{}{"action": "delete"}, want: true,
+		},
+		{
+			name: "fileManage with read", tool: "fileManage",
+			params: map[string]interface{}{"action": "read"}, want: false,
+		},
+		{
+			name: "fileManage with list", tool: "fileManage",
+			params: map[string]interface{}{"action": "list"}, want: false,
+		},
+		{name: "grepSearch is read-only", tool: "grepSearch", params: nil, want: false},
+		{name: "execute is not tracked", tool: "execute", params: nil, want: false},
 	}
 
 	for _, tt := range tests {

@@ -42,6 +42,7 @@ type Agent interface {
 	ContextStats() (msgCount int, currentTokens int, maxTokens int)
 	Clone() Agent
 	ClearTools() // strips all tools from this agent so it does plain LLM completions
+	FilterTools(predicate func(string) bool)
 }
 
 type Config struct {
@@ -92,8 +93,8 @@ type Config struct {
 	OnModelRouted func(model, reason string)
 
 	// Auto-verification: run build/lint after file-modifying tool calls.
-	AutoVerify       bool     // enable post-edit verification
-	VerifyCommands   []string // custom verify commands (empty = auto-detect from project type)
+	AutoVerify       bool               // enable post-edit verification
+	VerifyProfiles   map[string][]string // marker→commands profiles (empty = use built-ins)
 	WorkingDirectory string   // project root for running verify commands
 	MaxVerifyRetries int      // max retries on verification failure (0 = use default of 2)
 	// OnVerifyFailed is called when post-edit verification fails.
@@ -399,4 +400,8 @@ func (a *agent) Clone() Agent {
 
 func (a *agent) ClearTools() {
 	a.toolRegistry = tools.NewToolRegistry()
+}
+
+func (a *agent) FilterTools(predicate func(string) bool) {
+	a.toolRegistry.FilterTools(predicate)
 }

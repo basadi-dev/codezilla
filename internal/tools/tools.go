@@ -81,6 +81,9 @@ type ToolRegistry interface {
 
 	// GetToolSpecs returns specifications for all registered tools
 	GetToolSpecs() []ToolSpec
+
+	// FilterTools removes any tool whose name causes the predicate to return false
+	FilterTools(predicate func(string) bool)
 }
 
 // toolRegistry is the default implementation of ToolRegistry
@@ -137,6 +140,18 @@ func (r *toolRegistry) GetToolSpecs() []ToolSpec {
 		})
 	}
 	return specs
+}
+
+// FilterTools removes any tool whose name causes the predicate to return false
+func (r *toolRegistry) FilterTools(predicate func(string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for name := range r.tools {
+		if !predicate(name) {
+			delete(r.tools, name)
+		}
+	}
 }
 
 // ValidateToolParams validates the parameters against the schema

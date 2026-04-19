@@ -44,10 +44,16 @@ type Config struct {
 	ResumeSessionID   string `json:"resume_session_id" yaml:"resume_session_id"`
 
 	// Agent behavior
-	AutoPlan       bool     `json:"auto_plan" yaml:"auto_plan"`
-	AutoRoute      bool     `json:"auto_route" yaml:"auto_route"`
-	AutoVerify     bool     `json:"auto_verify" yaml:"auto_verify"`             // run build/lint after file edits
-	VerifyCommands []string `json:"verify_commands,omitempty" yaml:"verify_commands,omitempty"` // custom verify commands (empty = auto-detect)
+	AutoPlan       bool   `json:"auto_plan" yaml:"auto_plan"`
+	AutoRoute      bool   `json:"auto_route" yaml:"auto_route"`
+	AutoVerify     bool   `json:"auto_verify" yaml:"auto_verify"` // run build/lint after file edits
+	MaxParallelAgents int `json:"max_parallel_agents" yaml:"max_parallel_agents"` // limit parallel worker execution
+
+	// VerifyProfiles maps a marker filename (e.g. "go.mod", "Cargo.toml") to a list
+	// of shell commands to run after the agent edits files. The first matching marker
+	// found in the working directory wins. Built-in defaults are used if no profile
+	// matches. An empty commands list disables verification for that marker.
+	VerifyProfiles map[string][]string `json:"verify_profiles,omitempty" yaml:"verify_profiles,omitempty"`
 
 	// Embedded metasearch settings (no API keys required)
 	Metasearch MetasearchSettings `json:"metasearch" yaml:"metasearch"`
@@ -188,6 +194,7 @@ func DefaultConfig() *Config {
 		AutoPlan:               false,
 		AutoRoute:              true,
 		AutoVerify:             true,
+		MaxParallelAgents:      3,
 		ThinkCompressThreshold: 2000,
 		DangerousToolsWarn:     true,
 		AlwaysAskPermission:    false,

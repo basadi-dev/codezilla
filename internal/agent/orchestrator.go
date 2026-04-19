@@ -112,6 +112,11 @@ type AgentOrchestrator struct {
 	verifyRetries        int    // tracks retries for post-edit verification failures
 	routedModel          string // per-Run model override set by the router (empty = use config.Model)
 	prevToolCount        int    // tool count from previous Run (used by router)
+	// toolsDisabled is set to true after a 400 "function calls and responses" error.
+	// Some cloud-proxied models (e.g. ministral via Ollama cloud gateway) reject
+	// requests that include tool schemas. Retrying without tools lets them
+	// function as plain text agents.
+	toolsDisabled bool
 }
 
 const (
@@ -374,7 +379,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			iter++
 			// blocking complete
 			llmTools := o.agent.buildLLMTools()
-
+			if o.toolsDisabled {
+				llmTools = nil
+			}
 			// Proactively trim context before sending to LLM
 			o.preFlightContextTrim(ctx, len(llmTools))
 
@@ -481,6 +488,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 		case StateStreaming:
 			iter++
 			llmTools := o.agent.buildLLMTools()
+			if o.toolsDisabled {
+				llmTools = nil
+			}
 
 			// Proactively trim context before sending to LLM
 			o.preFlightContextTrim(ctx, len(llmTools))
@@ -773,11 +783,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 						workDir = "."
 					}
 
-					cmds := o.agent.config.VerifyCommands
-					if len(cmds) == 0 {
-						pt := DetectProjectType(workDir)
-						cmds = DefaultVerifyCommands(pt)
-					}
+					cmds := ResolveVerifyCommands(workDir, o.agent.config.VerifyProfiles)
 
 					if len(cmds) > 0 {
 						vr := RunVerification(ctx, workDir, cmds)
@@ -849,6 +855,24 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 				// Reset error and retry
 				currentLLMError = nil
 				state = StatePrompting
+				continue
+			}
+
+			// Detect "function calls and responses" mismatch from strict providers
+			// (e.g. Mistral cloud via Ollama). This happens when the provider
+			// rejects tool schemas on a model that doesn't support tool use,
+			// OR when the session state got out of sync. Retry without tools.
+			errStr := currentLLMError.Error()
+			if !o.toolsDisabled && strings.Contains(errStr, "function calls and responses") {
+				o.toolsDisabled = true
+				currentLLMError = nil
+				o.logger.Warn("Tool-call mismatch 400 error — disabling tools and retrying as plain-text agent",
+					"model", o.effectiveModel())
+				if stream {
+					state = StateStreaming
+				} else {
+					state = StatePrompting
+				}
 				continue
 			}
 

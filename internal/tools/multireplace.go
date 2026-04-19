@@ -8,180 +8,179 @@ import (
 	"strings"
 )
 
-// MultiReplaceTool allows multiple targeted replacements of text within a file
+// MultiReplaceTool makes one or many targeted text replacements in a file.
 type MultiReplaceTool struct{}
 
-// NewMultiReplaceTool creates a new multi-replace tool
-func NewMultiReplaceTool() *MultiReplaceTool {
-	return &MultiReplaceTool{}
+// firstLine returns the first non-empty line of s, truncated to 80 chars.
+// Used to provide diagnostic hints in error messages.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			if len(line) > 80 {
+				return line[:80] + "…"
+			}
+			return line
+		}
+	}
+	return "(empty)"
 }
 
-// Name returns the tool name
-func (t *MultiReplaceTool) Name() string {
-	return "multiReplace"
-}
+func NewMultiReplaceTool() *MultiReplaceTool { return &MultiReplaceTool{} }
 
-// Description returns the tool description
+func (t *MultiReplaceTool) Name() string { return "multiReplace" }
+
 func (t *MultiReplaceTool) Description() string {
-	return "Replaces multiple specific targeted blocks of text within an existing file sequentially. Use this to modify multiple disconnected areas of a large file."
+	return "Surgically replaces one or more distinct text blocks inside an existing file. " +
+		"Each replacement is identified by its exact literal `target_content` string (must be unique in the file). " +
+		"IMPORTANT: Always read the file with fileManage (action:read) BEFORE calling this so that target_content matches the current file content exactly. " +
+		"Use `allow_multiple: true` on a chunk to replace all occurrences of that pattern. " +
+		"All replacements are applied atomically — one file write, one undo entry."
 }
 
-// ParameterSchema returns the JSON schema for this tool's parameters
 func (t *MultiReplaceTool) ParameterSchema() JSONSchema {
+	chunkSchema := JSONSchema{
+		Type: "object",
+		Properties: map[string]JSONSchema{
+			"target_content": {
+				Type:        "string",
+				Description: "The exact literal block to find and replace. Must match file content including whitespace/indentation.",
+			},
+			"replacement_content": {
+				Type:        "string",
+				Description: "The new content that replaces target_content.",
+			},
+			"allow_multiple": {
+				Type:        "boolean",
+				Description: "If true, replace all occurrences of target_content. Default false (errors if not unique).",
+			},
+		},
+		Required: []string{"target_content", "replacement_content"},
+	}
+
 	return JSONSchema{
 		Type: "object",
 		Properties: map[string]JSONSchema{
 			"file_path": {
 				Type:        "string",
-				Description: "The path to the file to edit",
+				Description: "Path to the file to edit.",
 			},
 			"replacements": {
-				Type: "array",
-				Items: &JSONSchema{
-					Type: "object",
-					Properties: map[string]JSONSchema{
-						"target_content": {
-							Type:        "string",
-							Description: "The exact literal string block to search for and replace. Must match exactly.",
-						},
-						"replacement_content": {
-							Type:        "string",
-							Description: "The new content to drop in place of the target_content.",
-						},
-					},
-					Required: []string{"target_content", "replacement_content"},
-				},
-				Description: "List of replacements to apply to the file one by one",
+				Type:        "array",
+				Items:       &chunkSchema,
+				Description: "One or more replacement operations to apply in order.",
 			},
 		},
 		Required: []string{"file_path", "replacements"},
 	}
 }
 
-// Execute performs the targeted replacements sequentially
 func (t *MultiReplaceTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
 	if err := ValidateToolParams(t, params); err != nil {
 		return nil, err
 	}
 
 	filePath, _ := params["file_path"].(string)
+	if filePath == "" {
+		return nil, &ErrInvalidToolParams{ToolName: t.Name(), Message: "file_path is required"}
+	}
 
-	// Expand ~ to home directory
+	// Expand ~
 	if len(filePath) > 0 && filePath[0] == '~' {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			return nil, &ErrToolExecution{
-				ToolName: t.Name(),
-				Message:  "failed to expand home directory",
-				Err:      err,
-			}
+			return nil, &ErrToolExecution{ToolName: t.Name(), Message: "failed to expand ~", Err: err}
 		}
 		filePath = filepath.Join(homeDir, filePath[1:])
 	}
+	filePath = filepath.Clean(filePath)
+	if !filepath.IsAbs(filePath) {
+		cwd, _ := os.Getwd()
+		filePath = filepath.Join(cwd, filePath)
+	}
 
-	// Acquire per-file lock before the read-modify-write sequence.
-	// See filelock.go for rationale.
+	// Acquire per-file lock — ensures atomicity when the orchestrator runs
+	// multiple tool calls concurrently and two end up targeting the same file.
 	unlock := acquireFileLock(filePath)
 	defer unlock()
 
-	// Enforce read-before-write (same policy as fileEdit).
+	// Enforce read-before-write: the LLM must have read the file in this session
+	// so that target_content strings are guaranteed to match the live content.
 	if err := EnforceReadBeforeWrite(filePath, t.Name()); err != nil {
 		return nil, &ErrToolExecution{ToolName: t.Name(), Message: err.Error()}
 	}
 
-	// Read existing content
 	existingBytes, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, &ErrToolExecution{
-			ToolName: t.Name(),
-			Message:  fmt.Sprintf("failed to read file: %s", filePath),
-			Err:      err,
-		}
+		return nil, &ErrToolExecution{ToolName: t.Name(), Message: fmt.Sprintf("failed to read %s", filePath), Err: err}
 	}
-	content := string(existingBytes)
+	original := string(existingBytes)
 
-	// Push a single backup of the original content. One undo entry per
-	// multiReplace call, regardless of how many chunks it contains.
-	PushBackup(filePath, content)
+	// One backup per call regardless of chunk count, so /undo is one step.
+	PushBackup(filePath, original)
 
 	replacementsRaw, ok := params["replacements"].([]interface{})
 	if !ok {
-		return nil, &ErrInvalidToolParams{
-			ToolName: t.Name(),
-			Message:  "replacements must be an array of objects",
-		}
+		return nil, &ErrInvalidToolParams{ToolName: t.Name(), Message: "replacements must be an array"}
 	}
 
-	originalContent := content
-	appliedCount := 0
-
-	for i, repRaw := range replacementsRaw {
-		rep, ok := repRaw.(map[string]interface{})
+	content := original
+	for i, raw := range replacementsRaw {
+		chunk, ok := raw.(map[string]interface{})
 		if !ok {
-			return nil, &ErrInvalidToolParams{
-				ToolName: t.Name(),
-				Message:  fmt.Sprintf("replacement at index %d is not an object", i),
-			}
+			return nil, &ErrInvalidToolParams{ToolName: t.Name(), Message: fmt.Sprintf("replacement[%d] is not an object", i)}
 		}
 
-		targetContent, _ := rep["target_content"].(string)
-		replacementContent, _ := rep["replacement_content"].(string)
+		target, _ := chunk["target_content"].(string)
+		replacement, _ := chunk["replacement_content"].(string)
+		allowMultiple, _ := chunk["allow_multiple"].(bool)
 
-		if targetContent == "" {
-			return nil, &ErrInvalidToolParams{
-				ToolName: t.Name(),
-				Message:  fmt.Sprintf("target_content at index %d cannot be empty", i),
-			}
+		if target == "" {
+			return nil, &ErrInvalidToolParams{ToolName: t.Name(), Message: fmt.Sprintf("replacement[%d].target_content is empty", i)}
 		}
 
-		occurrences := strings.Count(content, targetContent)
-		if occurrences == 0 {
+		occurrences := strings.Count(content, target)
+		switch {
+		case occurrences == 0:
 			return nil, &ErrToolExecution{
 				ToolName: t.Name(),
-				Message:  fmt.Sprintf("target_content at index %d not found in the file.", i),
+				Message: fmt.Sprintf(
+					"replacement[%d]: target_content not found in file. "+
+						"First line searched: %q. First line of file: %q. "+
+						"Re-read the file first to ensure exact whitespace match.",
+					i, firstLine(target), firstLine(content)),
 			}
-		} else if occurrences > 1 {
+		case occurrences > 1 && !allowMultiple:
 			return nil, &ErrToolExecution{
 				ToolName: t.Name(),
-				Message:  fmt.Sprintf("target_content at index %d found %d times in the file. Must be unique.", i, occurrences),
+				Message: fmt.Sprintf(
+					"replacement[%d]: target_content appears %d times — make the match more specific or set allow_multiple:true to replace all occurrences",
+					i, occurrences),
 			}
+		case allowMultiple:
+			content = strings.ReplaceAll(content, target, replacement)
+		default:
+			content = strings.Replace(content, target, replacement, 1)
 		}
-
-		content = strings.Replace(content, targetContent, replacementContent, 1)
-		appliedCount++
 	}
 
-	// Generate diff directly
-	diffOutput := GenerateDiff(originalContent, content, 3)
+	diffOutput := GenerateDiff(original, content, 3)
 
-	// Print the diff directly to stderr for immediate visibility
-	fmt.Fprintf(os.Stderr, "\nMULTI REPLACE DIFF\n")
-	fmt.Fprintf(os.Stderr, "File: %s\n", filePath)
-	fmt.Fprintf(os.Stderr, "Applied %d replacements\n", appliedCount)
-	fmt.Fprintf(os.Stderr, "%s\n", diffOutput)
-	fmt.Fprintf(os.Stderr, "\n")
+	fmt.Fprintf(os.Stderr, "\nMULTI REPLACE DIFF\nFile: %s\nApplied %d replacement(s)\n%s\n\n",
+		filePath, len(replacementsRaw), diffOutput)
 
-	// Get original file permissions
 	var fileMode os.FileMode = 0644
 	if info, err := os.Stat(filePath); err == nil {
 		fileMode = info.Mode()
 	}
-
-	// Write content
 	if err := os.WriteFile(filePath, []byte(content), fileMode); err != nil {
-		return nil, &ErrToolExecution{
-			ToolName: t.Name(),
-			Message:  fmt.Sprintf("failed to save file: %s", filePath),
-			Err:      err,
-		}
+		return nil, &ErrToolExecution{ToolName: t.Name(), Message: fmt.Sprintf("failed to write %s", filePath), Err: err}
 	}
 
-	result := map[string]interface{}{
+	return map[string]interface{}{
 		"success":      true,
 		"file_path":    filePath,
-		"replacements": appliedCount,
+		"replacements": len(replacementsRaw),
 		"diff":         diffOutput,
-	}
-
-	return result, nil
+	}, nil
 }

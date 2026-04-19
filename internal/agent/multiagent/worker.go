@@ -3,6 +3,7 @@ package multiagent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"codezilla/internal/agent"
@@ -21,10 +22,27 @@ type ConcreteWorker struct {
 func NewWorker(id string, role WorkerRole, baseAgent agent.Agent, bus *MemoryBus) *ConcreteWorker {
 	clonedAgent := baseAgent.Clone()
 
-	// Strip tools — parallel workers do pure LLM completions.
-	// The shared tool registry contains closures over the single-threaded TUI
-	// (ui.Print, ui.HideThinking, etc.) which would cause garbled output.
-	clonedAgent.ClearTools()
+	// Clear the parent's conversation history from the cloned agent.
+	// Parallel workers are independent — they start fresh with only the
+	// system prompt. Keeping the parent's tool call / tool result history
+	// causes strict providers (Mistral, ministral, etc.) to reject the
+	// request with: "Not the same number of function calls and responses".
+	clonedAgent.ClearContext()
+
+	// Only retain tools that are strictly read-only and thread-safe.
+	// This prevents concurrent file writes and garbled UI spinner outputs from
+	// side-effecting tools like multiReplace, runCommand, etc.
+	safeTools := map[string]bool{
+		"viewFile":         true,
+		"listFiles":        true,
+		"grepSearch":       true,
+		"readURL":          true,
+		"webSearch":        true,
+		"repoMapGenerator": true,
+	}
+	clonedAgent.FilterTools(func(toolName string) bool {
+		return safeTools[toolName]
+	})
 
 	// Route each role to the most appropriate model tier:
 	//   Researcher → fast model (quick lookups, scanning)
@@ -43,12 +61,14 @@ func NewWorker(id string, role WorkerRole, baseAgent agent.Agent, bus *MemoryBus
 		}
 	}
 
-	// Prepend specialized identity to the system prompt based on role
+	// Prepend specialized identity to the system prompt based on role.
+	// NOTE: All parallel workers are read-only (no file-write tools), so
+	// instructions must reflect that constraint regardless of role.
 	roleInstruction := map[WorkerRole]string{
 		RoleGeneric:    "You are a general-purpose assistant. Fulfill the user's request.",
-		RoleResearcher: "You are an expert repository researcher. Avoid modifying files. Focus on reading, searching, and understanding context. Share your findings concisely.",
-		RoleDeveloper:  "You are an expert developer. Your task is to modify code, write tests, and ensure structural integrity.",
-		RoleReviewer:   "You are an expert code reviewer. Analyze the code for logic errors, race conditions, edge cases, and style issues.",
+		RoleResearcher: "You are an expert repository researcher. You have read-only access to the filesystem. Focus on reading, searching, and understanding context. Share your findings concisely.",
+		RoleDeveloper:  "You are an expert developer performing analysis. You have read-only access to the filesystem — do NOT attempt to write or edit files. Analyze the code, reason about changes needed, and produce a detailed written plan or code diff that a downstream agent can apply.",
+		RoleReviewer:   "You are an expert code reviewer with read-only access to the filesystem. Analyze the code for logic errors, race conditions, edge cases, and style issues.",
 	}
 
 	if instruction, ok := roleInstruction[role]; ok {
@@ -112,7 +132,7 @@ func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, resul
 		defer cancel()
 	}
 
-	prompt := fmt.Sprintf("[Assigned Task: %s]\n\nTask Description:\n%s\n\nInputs:\n%v", task.ID, task.Description, task.Inputs)
+	prompt := buildTaskPrompt(task)
 
 	output, err := w.inner.ProcessMessage(ctx, prompt)
 
@@ -145,4 +165,28 @@ func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, resul
 		return
 	case results <- result:
 	}
+}
+
+// buildTaskPrompt constructs a clean, LLM-readable prompt for a worker task.
+// Dependency outputs from prerequisite tasks are formatted as clearly labeled
+// sections rather than dumped as raw Go map output.
+func buildTaskPrompt(task Task) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("## Assigned Task: %s\n\n", task.ID))
+	sb.WriteString(fmt.Sprintf("**Description:** %s\n", task.Description))
+
+	// Inject dependency outputs as clearly labeled sections
+	if deps, ok := task.Inputs["dependency_outputs"].(map[string]string); ok && len(deps) > 0 {
+		sb.WriteString("\n---\n## Context from prerequisite tasks:\n")
+		for depID, output := range deps {
+			sb.WriteString(fmt.Sprintf("\n### Output from Task `%s`:\n", depID))
+			sb.WriteString(output)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("---\n")
+	}
+
+	sb.WriteString("\nComplete the task described above.")
+	return sb.String()
 }

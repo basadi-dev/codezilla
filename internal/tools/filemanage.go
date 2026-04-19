@@ -12,7 +12,8 @@ import (
 // maxFullReadLines is the max lines before auto-truncating a read.
 const maxFullReadLines = 500
 
-// FileManageTool handles all standard filesystem actions (read, write, edit, list, mkdir, move, delete)
+// FileManageTool handles filesystem operations: read, write (new files or guarded overwrite),
+// list, mkdir, move, and delete. For targeted text edits to existing files use multiReplace.
 type FileManageTool struct{}
 
 func NewFileManageTool() *FileManageTool {
@@ -22,9 +23,8 @@ func NewFileManageTool() *FileManageTool {
 func (t *FileManageTool) Name() string { return "fileManage" }
 
 func (t *FileManageTool) Description() string {
-	return "Unified file system operations: read, write, list, mkdir, move, delete. " +
-		"For modifying existing code files use fileEdit (single replacement) or multiReplace " +
-		"(multiple replacements in one call) — not the write action, which overwrites the whole file."
+	return "Filesystem operations: read, write, list, mkdir, move, delete. " +
+		"Use 'write' only to create new files — for targeted edits to existing code files use multiReplace instead."
 }
 
 func (t *FileManageTool) ParameterSchema() JSONSchema {
@@ -51,21 +51,6 @@ func (t *FileManageTool) ParameterSchema() JSONSchema {
 			"line_end": {
 				Type:        "integer",
 				Description: "(read) Last line to read (inclusive)",
-			},
-			"replacement_chunks": {
-				Type:        "array",
-				Description: "(edit) Array of replacements",
-				Items: &JSONSchema{
-					Type: "object",
-					Properties: map[string]JSONSchema{
-						"start_line":          {Type: "integer"},
-						"end_line":            {Type: "integer"},
-						"target_content":      {Type: "string"},
-						"replacement_content": {Type: "string"},
-						"allow_multiple":      {Type: "boolean"},
-					},
-					Required: []string{"start_line", "end_line", "target_content", "replacement_content"},
-				},
 			},
 			"pattern": {
 				Type:        "string",
@@ -120,8 +105,6 @@ func (t *FileManageTool) Execute(ctx context.Context, params map[string]interfac
 		return t.execRead(targetPath, params)
 	case "write":
 		return t.execWrite(targetPath, params)
-	case "edit":
-		return t.execEdit(targetPath, params)
 	case "list":
 		return t.execList(targetPath, params)
 	case "mkdir":
@@ -191,8 +174,22 @@ func (t *FileManageTool) execRead(filePath string, params map[string]interface{}
 }
 
 
+// execWrite writes content to a file. If the file already exists, it enforces
+// read-before-write and saves a backup so the operation can be undone.
 func (t *FileManageTool) execWrite(filePath string, params map[string]interface{}) (interface{}, error) {
 	content, _ := params["content"].(string)
+
+	// If the file exists, guard against blind overwrites.
+	if _, err := os.Stat(filePath); err == nil {
+		if err := EnforceReadBeforeWrite(filePath, "fileManage/write"); err != nil {
+			return nil, &ErrToolExecution{ToolName: t.Name(), Message: err.Error()}
+		}
+		// Backup existing content so /undo can restore it.
+		if existing, err := os.ReadFile(filePath); err == nil {
+			PushBackup(filePath, string(existing))
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return nil, err
 	}
@@ -200,93 +197,6 @@ func (t *FileManageTool) execWrite(filePath string, params map[string]interface{
 		return nil, err
 	}
 	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), filePath), nil
-}
-
-func (t *FileManageTool) execEdit(filePath string, params map[string]interface{}) (interface{}, error) {
-	chunks, ok := params["replacement_chunks"].([]interface{})
-	if !ok || len(chunks) == 0 {
-		return nil, fmt.Errorf("replacement_chunks must be a non-empty array")
-	}
-
-	// Hold the per-file lock for the entire batch so that the multi-chunk edit is
-	// atomic. Previously each chunk acquired/released independently, which left
-	// windows where concurrent goroutines could race between chunks.
-	unlock := acquireFileLock(filePath)
-	defer unlock()
-
-	// Enforce read-before-write (same policy as fileEdit/multiReplace).
-	if err := EnforceReadBeforeWrite(filePath, "fileManage/edit"); err != nil {
-		return nil, err
-	}
-	var results []interface{}
-
-	// Push one backup entry covering the state before ANY chunk is applied.
-	// This means /undo restores the file to its pre-batch state in one step.
-	if initialBytes, err := os.ReadFile(filePath); err == nil {
-		PushBackup(filePath, string(initialBytes))
-	}
-
-	for _, rawChunk := range chunks {
-		chunk, ok := rawChunk.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("invalid chunk format in replacement_chunks")
-		}
-
-		// Re-read inside the loop so each chunk sees the result of the previous one.
-		// The lock ensures no external write races between iterations.
-		existingBytes, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read file before chunk edit: %w", err)
-		}
-		content := string(existingBytes)
-
-		targetContent, _ := chunk["target_content"].(string)
-		replacementContent, _ := chunk["replacement_content"].(string)
-
-		if targetContent == "" {
-			return nil, fmt.Errorf("target_content is required in each replacement chunk")
-		}
-
-		occurrences := strings.Count(content, targetContent)
-		if occurrences == 0 {
-			wantedFirst := firstLine(targetContent)
-			fileFirst := firstLine(content)
-			return nil, fmt.Errorf(
-				"target_content not found in file. "+
-					"First line searched: %q. First line of file: %q. "+
-					"Read the file first to ensure exact whitespace match.",
-				wantedFirst, fileFirst)
-		}
-		if occurrences > 1 {
-			allowMultiple, _ := chunk["allow_multiple"].(bool)
-			if !allowMultiple {
-				return nil, fmt.Errorf(
-					"target_content found %d times in file — provide allow_multiple:true to replace all, "+
-						"or add more surrounding context to make the match unique",
-					occurrences)
-			}
-			// replace all occurrences when explicitly allowed
-			content = strings.ReplaceAll(content, targetContent, replacementContent)
-		} else {
-			content = strings.Replace(content, targetContent, replacementContent, 1)
-		}
-
-		var fileMode os.FileMode = 0644
-		if info, err := os.Stat(filePath); err == nil {
-			fileMode = info.Mode()
-		}
-		if err := os.WriteFile(filePath, []byte(content), fileMode); err != nil {
-			return nil, fmt.Errorf("failed to write file after chunk edit: %w", err)
-		}
-
-		results = append(results, map[string]interface{}{"applied": true})
-	}
-
-	return map[string]interface{}{
-		"success": true,
-		"message": fmt.Sprintf("Successfully applied %d edits to %s", len(chunks), filePath),
-		"results": results,
-	}, nil
 }
 
 func (t *FileManageTool) execList(dir string, params map[string]interface{}) (interface{}, error) {
