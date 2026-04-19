@@ -282,7 +282,7 @@ IMPORTANT: You MUST end your summary with a single line starting with "Current g
 		o.agent.config.OnContextSummarizing()
 	}
 
-	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.2, nil)
+	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.2, "", nil)
 	if err != nil {
 		o.logger.Warn("Eviction summary failed, keeping existing summary", "error", err)
 		return existingSummary
@@ -530,7 +530,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			})
 
 			llmStart := time.Now()
-			streamCh, errCh, err := o.agent.llmClient.Stream(ctx, o.agent.config.Provider, o.effectiveModel(), msgs, o.agent.config.Temperature, llmTools)
+			streamCh, errCh, err := o.agent.llmClient.Stream(ctx, o.agent.config.Provider, o.effectiveModel(), msgs, o.agent.config.Temperature, o.agent.config.ReasoningEffort, llmTools)
 
 			if err != nil {
 				o.logger.Error("Stream init failed",
@@ -842,7 +842,7 @@ func (o *AgentOrchestrator) summarizeThink(ctx context.Context, thinkText string
 	o.logger.Debug("Summarizing deep thought", "model", summariserModel, "chars", len(thinkText))
 
 	// Create a fast, no-tool completion call. Low temperature for factuality.
-	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.3, nil)
+	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.3, "", nil)
 	if err != nil {
 		o.logger.Warn("Think summarize failed", "error", err)
 		return ""

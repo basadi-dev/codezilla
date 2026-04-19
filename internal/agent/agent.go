@@ -35,6 +35,7 @@ type Agent interface {
 	SetHeavyModel(model string)
 	GetModelForTier(tier RequestTier) string
 	SetTemperature(temperature float64)
+	SetReasoningEffort(effort string)
 	SetMaxTokens(maxTokens int)
 	SetSessionRecorder(recorder *session.Recorder)
 	SetAutoRoute(enabled bool)
@@ -49,6 +50,7 @@ type Config struct {
 	MaxTokens       int
 	MaxIterations   int
 	Temperature     float64
+	ReasoningEffort string
 	SystemPrompt    string
 	LLMClient       *llm.Client
 	ToolRegistry    tools.ToolRegistry
@@ -332,6 +334,11 @@ func (a *agent) SetAutoRoute(enabled bool) {
 func (a *agent) SetTemperature(temperature float64) {
 	a.logger.Info("Changing temperature", "from", a.config.Temperature, "to", temperature)
 	a.config.Temperature = temperature
+}
+
+func (a *agent) SetReasoningEffort(effort string) {
+	a.logger.Info("Changing reasoning effort", "from", a.config.ReasoningEffort, "to", effort)
+	a.config.ReasoningEffort = effort
 }
 
 func (a *agent) SetMaxTokens(maxTokens int) {

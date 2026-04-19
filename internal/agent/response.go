@@ -79,7 +79,7 @@ func (a *agent) generateCompletion(ctx context.Context, modelOverride string, ll
 		"temperature", a.config.Temperature)
 
 	startTime := time.Now()
-	response, err := a.llmClient.Complete(ctx, a.config.Provider, targetModel, chatMessages, a.config.Temperature, llmTools)
+	response, err := a.llmClient.Complete(ctx, a.config.Provider, targetModel, chatMessages, a.config.Temperature, a.config.ReasoningEffort, llmTools)
 	duration := time.Since(startTime)
 
 	if err != nil {

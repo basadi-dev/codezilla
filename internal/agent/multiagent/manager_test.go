@@ -45,6 +45,7 @@ func (m *MockAgent) SetFastModel(model string)              {}
 func (m *MockAgent) SetHeavyModel(model string)             {}
 func (m *MockAgent) GetModelForTier(tier agent.RequestTier) string { return "" }
 func (m *MockAgent) SetTemperature(temperature float64)     {}
+func (m *MockAgent) SetReasoningEffort(effort string)        {}
 func (m *MockAgent) SetMaxTokens(maxTokens int)             {}
 func (m *MockAgent) SetSessionRecorder(recorder *session.Recorder) {}
 func (m *MockAgent) SetAutoRoute(enabled bool)              {}

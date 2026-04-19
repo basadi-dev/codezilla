@@ -16,10 +16,11 @@ type Config struct {
 	LLM LLMConfig `json:"llm" yaml:"llm"`
 
 	// Generation parameters (common to all providers)
-	Temperature   float32 `json:"temperature" yaml:"temperature"`
-	MaxTokens     int     `json:"max_tokens" yaml:"max_tokens"`
-	MaxIterations int     `json:"max_iterations" yaml:"max_iterations"`
-	SystemPrompt  string  `json:"system_prompt" yaml:"system_prompt"`
+	Temperature     float32 `json:"temperature" yaml:"temperature"`
+	ReasoningEffort string  `json:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty"` // low | medium | high | auto | none (empty = provider default)
+	MaxTokens       int     `json:"max_tokens" yaml:"max_tokens"`
+	MaxIterations   int     `json:"max_iterations" yaml:"max_iterations"`
+	SystemPrompt    string  `json:"system_prompt" yaml:"system_prompt"`
 
 	// Loop detection: kill agent if same tool+args repeated consecutively.
 	// 0 = use defaults (window=10, max_repeat=3).

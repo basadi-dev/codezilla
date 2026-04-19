@@ -576,6 +576,7 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 		Provider:               cfg.LLM.Provider,
 		SystemPrompt:           cfg.SystemPrompt,
 		Temperature:            float64(cfg.Temperature),
+		ReasoningEffort:        cfg.ReasoningEffort,
 		MaxTokens:              cfg.MaxTokens,
 		MaxIterations:          cfg.MaxIterations,
 		Logger:                 log,
@@ -820,6 +821,7 @@ func (app *App) wireCompleter() {
 		{Primary: "/replay ", Desc: "Replay last user message from a loaded JSON file"},
 		{Primary: "/tokens", Desc: "Show session token usage"},
 		{Primary: "/router ", Desc: "Model routing [on|off|status]"},
+		{Primary: "/thinking ", Desc: "Set reasoning effort [low|medium|high|auto|none|off]"},
 	}
 
 	c.SetCompleter(func(line string) []ui.Completion {
@@ -848,6 +850,20 @@ func (app *App) wireCompleter() {
 				{Text: "status", Description: "Show current routing config"},
 			}
 			return filterPrefix("/router ", opts, sub)
+		}
+
+		// /thinking <sub>
+		if strings.HasPrefix(line, "/thinking ") {
+			sub := line[len("/thinking "):]
+			opts := []ui.Completion{
+				{Text: "low", Description: "Minimal reasoning (fastest)"},
+				{Text: "medium", Description: "Balanced reasoning"},
+				{Text: "high", Description: "Deep reasoning (slowest)"},
+				{Text: "auto", Description: "Let the model decide"},
+				{Text: "none", Description: "Disable extended thinking"},
+				{Text: "off", Description: "Clear (use provider default)"},
+			}
+			return filterPrefix("/thinking ", opts, sub)
 		}
 
 		// /model arg
@@ -1298,7 +1314,7 @@ Respond with ONLY the JSON array, no markdown fences, no explanation.`, prompt)
 		{Role: "user", Content: decomposePrompt},
 	}
 	temperature := 0.1 // low temperature for deterministic JSON output
-	completion, err := app.llmClient.Complete(ctx, app.config.LLM.Provider, decomposerModel, decomposeMessages, temperature, nil)
+	completion, err := app.llmClient.Complete(ctx, app.config.LLM.Provider, decomposerModel, decomposeMessages, temperature, "", nil)
 	if err != nil {
 		app.ui.HideThinking()
 		return fmt.Errorf("task decomposition failed: %w", err)
@@ -2161,6 +2177,30 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 			}
 		} else {
 			app.showRouterStatus()
+		}
+
+	case "/thinking":
+		if len(parts) > 1 {
+			effort := strings.ToLower(parts[1])
+			switch effort {
+			case "low", "medium", "high", "auto", "none":
+				app.agent.SetReasoningEffort(effort)
+				app.config.ReasoningEffort = effort
+				app.ui.Success("Reasoning effort set to: %s", effort)
+			case "off", "clear", "reset":
+				app.agent.SetReasoningEffort("")
+				app.config.ReasoningEffort = ""
+				app.ui.Success("Reasoning effort cleared (using provider default)")
+			default:
+				app.ui.Warning("Unknown effort level '%s'. Valid: low, medium, high, auto, none, off", effort)
+			}
+		} else {
+			current := app.config.ReasoningEffort
+			if current == "" {
+				current = "(not set — provider default)"
+			}
+			app.ui.Info("Current reasoning effort: %s", current)
+			app.ui.Info("Usage: /thinking [low|medium|high|auto|none|off]")
 		}
 
 	case "/parallel":

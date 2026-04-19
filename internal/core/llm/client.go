@@ -227,7 +227,7 @@ func (c *Client) buildOllamaProvider() (anyllm.Provider, error) {
 
 // Complete executes a non-streaming text completion.
 // Pass a non-empty tools slice to enable native function calling.
-func (c *Client) Complete(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64, tools []anyllm.Tool) (*anyllm.ChatCompletion, error) {
+func (c *Client) Complete(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64, reasoningEffort string, tools []anyllm.Tool) (*anyllm.ChatCompletion, error) {
 	p, err := c.GetProvider(providerName)
 	if err != nil {
 		return nil, err
@@ -237,6 +237,9 @@ func (c *Client) Complete(ctx context.Context, providerName, model string, messa
 		Model:       model,
 		Messages:    messages,
 		Temperature: &temperature,
+	}
+	if reasoningEffort != "" {
+		params.ReasoningEffort = anyllm.ReasoningEffort(reasoningEffort)
 	}
 	if len(tools) > 0 {
 		params.Tools = tools
@@ -251,7 +254,7 @@ func (c *Client) Complete(ctx context.Context, providerName, model string, messa
 
 // Stream executes a streaming text completion.
 // Pass a non-empty tools slice to enable native function calling in the stream.
-func (c *Client) Stream(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64, tools []anyllm.Tool) (<-chan anyllm.ChatCompletionChunk, <-chan error, error) {
+func (c *Client) Stream(ctx context.Context, providerName, model string, messages []anyllm.Message, temperature float64, reasoningEffort string, tools []anyllm.Tool) (<-chan anyllm.ChatCompletionChunk, <-chan error, error) {
 	p, err := c.GetProvider(providerName)
 	if err != nil {
 		return nil, nil, wrapContextLengthError(err)
@@ -261,6 +264,9 @@ func (c *Client) Stream(ctx context.Context, providerName, model string, message
 		Model:       model,
 		Messages:    messages,
 		Temperature: &temperature,
+	}
+	if reasoningEffort != "" {
+		params.ReasoningEffort = anyllm.ReasoningEffort(reasoningEffort)
 	}
 	if len(tools) > 0 {
 		params.Tools = tools

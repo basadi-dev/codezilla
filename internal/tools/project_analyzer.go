@@ -169,7 +169,7 @@ Format your response as JSON with these fields:
 		},
 	}
 
-	response, err := a.llmClient.Complete(ctx, a.provider, a.model, messages, 0.2, nil)
+	response, err := a.llmClient.Complete(ctx, a.provider, a.model, messages, 0.2, "", nil)
 	if err != nil {
 		a.logger.Error("LLM analysis failed for %s: %v", filePath, err)
 		// Fall back to basic analysis
