@@ -584,11 +584,25 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 		ToolRegistry:           toolRegistry,
 		PermissionMgr:          permissionMgr,
 		AutoPlan:               cfg.AutoPlan,
+		AutoVerify:             cfg.AutoVerify,
+		VerifyCommands:         cfg.VerifyCommands,
+		WorkingDirectory:       cfg.WorkingDirectory,
 		OnToolExecution:        onToolExec,
 		LoopDetectWindow:       cfg.LoopDetectWindow,
 		LoopDetectMaxRepeat:    cfg.LoopDetectMaxRepeat,
 		ThinkCompressThreshold: cfg.ThinkCompressThreshold,
 		SlidingWindowSize:      cfg.SlidingWindowSize,
+		OnVerifyFailed: func(errors []string, retryNum int) {
+			ui.Warning("Verification failed (attempt %d). Agent will self-correct.", retryNum)
+			for _, err := range errors {
+				ui.Print("  %s\n", err)
+			}
+			ui.ShowThinking()
+			ui.UpdateThinkingStatus("analyzing verification errors...")
+		},
+		OnVerifyPassed: func() {
+			ui.Success("System verification passed ✅")
+		},
 		OnLLMCall: func(callNum, msgCount, approxToks int) {
 			// Format token count: "21K" or "800"
 			tokLabel := fmt.Sprintf("%d", approxToks)
@@ -2215,6 +2229,7 @@ func (app *App) handleCommand(ctx context.Context, cmd string) bool {
 				}
 			}
 		}
+
 
 	default:
 		app.ui.Warning("Unknown command: %s", parts[0])

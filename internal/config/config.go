@@ -44,8 +44,10 @@ type Config struct {
 	ResumeSessionID   string `json:"resume_session_id" yaml:"resume_session_id"`
 
 	// Agent behavior
-	AutoPlan  bool `json:"auto_plan" yaml:"auto_plan"`
-	AutoRoute bool `json:"auto_route" yaml:"auto_route"`
+	AutoPlan       bool     `json:"auto_plan" yaml:"auto_plan"`
+	AutoRoute      bool     `json:"auto_route" yaml:"auto_route"`
+	AutoVerify     bool     `json:"auto_verify" yaml:"auto_verify"`             // run build/lint after file edits
+	VerifyCommands []string `json:"verify_commands,omitempty" yaml:"verify_commands,omitempty"` // custom verify commands (empty = auto-detect)
 
 	// Embedded metasearch settings (no API keys required)
 	Metasearch MetasearchSettings `json:"metasearch" yaml:"metasearch"`
@@ -185,6 +187,7 @@ func DefaultConfig() *Config {
 		SessionEventsDir:       filepath.Join(getConfigDir(), "sessions"),
 		AutoPlan:               false,
 		AutoRoute:              true,
+		AutoVerify:             true,
 		ThinkCompressThreshold: 2000,
 		DangerousToolsWarn:     true,
 		AlwaysAskPermission:    false,

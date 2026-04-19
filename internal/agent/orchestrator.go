@@ -109,6 +109,7 @@ type AgentOrchestrator struct {
 	tokens               *TokenTracker
 	contextLengthRetries int    // tracks retries for context-length errors within a single Run()
 	transientRetries     int    // tracks retries for model provider transient errors
+	verifyRetries        int    // tracks retries for post-edit verification failures
 	routedModel          string // per-Run model override set by the router (empty = use config.Model)
 	prevToolCount        int    // tool count from previous Run (used by router)
 }
@@ -727,6 +728,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			wg.Wait()
 
 			// Synchronous recording to maintain context order
+			didModifyFiles := false
 			for _, r := range results {
 				if o.agent.config.SessionRecorder != nil {
 					errStr := ""
@@ -743,6 +745,70 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					o.agent.context.AddToolResultMessage(r.ID, nil, r.Err)
 				} else {
 					o.agent.context.AddToolResultMessage(r.ID, r.Result, nil)
+				}
+				
+				// Re-parse params to check if this was a file modification
+				var params map[string]interface{}
+				for _, tc := range toolsToExecute {
+					if tc.ID == r.ID {
+						_ = json.Unmarshal([]byte(tc.Function.Arguments), &params)
+						break
+					}
+				}
+				if isFileModifyingTool(r.Name, params) && r.Err == nil {
+					didModifyFiles = true
+				}
+			}
+
+			// Run post-edit verification if enabled
+			if o.agent.config.AutoVerify && didModifyFiles {
+				maxRetries := o.agent.config.MaxVerifyRetries
+				if maxRetries <= 0 {
+					maxRetries = maxVerifyRetries
+				}
+
+				if o.verifyRetries < maxRetries {
+					workDir := o.agent.config.WorkingDirectory
+					if workDir == "" {
+						workDir = "."
+					}
+
+					cmds := o.agent.config.VerifyCommands
+					if len(cmds) == 0 {
+						pt := DetectProjectType(workDir)
+						cmds = DefaultVerifyCommands(pt)
+					}
+
+					if len(cmds) > 0 {
+						vr := RunVerification(ctx, workDir, cmds)
+						if !vr.Passed {
+							o.verifyRetries++
+							if o.agent.config.OnVerifyFailed != nil {
+								o.agent.config.OnVerifyFailed(vr.Errors, o.verifyRetries)
+							}
+
+							// Inject error feedback to force self-correction
+							errMsg := fmt.Sprintf("System Verification failed after your edits:\n\n%s\n\nPlease fix the errors above.", strings.Join(vr.Errors, "\n\n"))
+							o.agent.context.AddSystemMessage(errMsg)
+							
+							// Escalate reasoning effort for the retry
+							newEffort := reasoningEffortForRetry(o.agent.config.ReasoningEffort, o.verifyRetries)
+							if newEffort != o.agent.config.ReasoningEffort {
+								o.agent.SetReasoningEffort(newEffort)
+								o.logger.Info("Escalating reasoning effort for verify retry", "new_effort", newEffort)
+							}
+							
+						} else {
+							// Verification passed, reset counter
+							o.verifyRetries = 0
+							if o.agent.config.OnVerifyPassed != nil {
+								o.agent.config.OnVerifyPassed()
+							}
+						}
+					}
+				} else {
+					o.logger.Warn("Max verify retries reached, proceeding with errors")
+					o.verifyRetries = 0 // reset for the next turn
 				}
 			}
 

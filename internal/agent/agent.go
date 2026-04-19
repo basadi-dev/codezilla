@@ -90,6 +90,17 @@ type Config struct {
 	// OnModelRouted is called when the router selects a model for the current request.
 	// model is the selected model name, reason is a short human-readable explanation.
 	OnModelRouted func(model, reason string)
+
+	// Auto-verification: run build/lint after file-modifying tool calls.
+	AutoVerify       bool     // enable post-edit verification
+	VerifyCommands   []string // custom verify commands (empty = auto-detect from project type)
+	WorkingDirectory string   // project root for running verify commands
+	MaxVerifyRetries int      // max retries on verification failure (0 = use default of 2)
+	// OnVerifyFailed is called when post-edit verification fails.
+	// errors is the list of verification error messages, retryNum is the current retry (0 = first failure).
+	OnVerifyFailed func(errors []string, retryNum int)
+	// OnVerifyPassed is called when post-edit verification succeeds.
+	OnVerifyPassed func()
 }
 
 func DefaultConfig() *Config {
