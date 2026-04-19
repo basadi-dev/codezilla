@@ -18,7 +18,6 @@ import (
 	anyllm "github.com/mozilla-ai/any-llm-go"
 	"github.com/mozilla-ai/any-llm-go/providers/anthropic"
 	"github.com/mozilla-ai/any-llm-go/providers/gemini"
-	"github.com/mozilla-ai/any-llm-go/providers/ollama"
 	"github.com/mozilla-ai/any-llm-go/providers/openai"
 )
 
@@ -151,9 +150,22 @@ func (c *Client) GetProvider(providerName string) (anyllm.Provider, error) {
 // http.Client with a RoundTripper that adds the appropriate auth headers.
 func (c *Client) buildOllamaProvider() (anyllm.Provider, error) {
 	opts := []anyllm.Option{}
-	if c.cfg.LLM.Ollama.BaseURL != "" {
-		opts = append(opts, anyllm.WithBaseURL(c.cfg.LLM.Ollama.BaseURL))
+	baseURL := c.cfg.LLM.Ollama.BaseURL
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
 	}
+
+	// Any-llm-go's native Ollama abstraction forcefully corrupts RoleTool to RoleUser.
+	// This irreparably breaks Mistral-based model parallel execution. However, Ollama
+	// natively supports the fully spec-compliant OpenAI wrapper under /v1. We redirect
+	// internally to this endpoint using the OpenAI interface layer to guarantee correct
+	// tool result assignment formatting.
+	if !strings.HasSuffix(baseURL, "/v1") {
+		baseURL = strings.TrimRight(baseURL, "/") + "/v1"
+	}
+
+	opts = append(opts, anyllm.WithBaseURL(baseURL))
+	opts = append(opts, anyllm.WithAPIKey("ollama-compat"))
 
 	// ALWAYS build a custom HTTP client and robust transport to ensure
 	// fast connection drop detection (e.g., hanging connections to cloud providers).
@@ -222,7 +234,7 @@ func (c *Client) buildOllamaProvider() (anyllm.Provider, error) {
 	}
 	opts = append(opts, anyllm.WithHTTPClient(httpClient))
 
-	return ollama.New(opts...)
+	return openai.New(opts...)
 }
 
 // Complete executes a non-streaming text completion.

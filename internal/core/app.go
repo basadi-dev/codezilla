@@ -1392,12 +1392,17 @@ Output format: start with [ and end with ]. No markdown. No explanation. No tool
 			// While inside think, don't update visibleBuf
 		}
 
-		// Show the last 70 visible chars in the spinner label.
+		// Show the last N visible chars in the spinner label.
 		// Strip newlines so it stays on one line.
 		tail := strings.ReplaceAll(strings.TrimSpace(visibleBuf.String()), "\n", " ")
-		const labelMax = 70
-		if len(tail) > labelMax {
-			tail = "…" + tail[len(tail)-labelMax+1:]
+		tail = strings.ReplaceAll(tail, "\r", "")
+		
+		// Constrain length to prevent terminal wrapping (which breaks the spinner).
+		// Use runes so multi-byte characters aren't corrupted by byte-slicing.
+		const labelMax = 40
+		runes := []rune(tail)
+		if len(runes) > labelMax {
+			tail = "…" + string(runes[len(runes)-labelMax+1:])
 		}
 		if tail != "" {
 			app.ui.UpdateThinkingStatus("planning — " + tail)

@@ -55,15 +55,23 @@ func toolJSONSchemaToMap(schema tools.JSONSchema) map[string]any {
 
 func (a *agent) generateCompletion(ctx context.Context, modelOverride string, llmTools []anyllm.Tool) (*anyllm.ChatCompletion, error) {
 	systemPrompt := a.buildSystemPrompt()
-	chatMessages := a.buildChatMessages()
+	rawMessages := a.buildChatMessages()
 
-	if len(chatMessages) > 0 && chatMessages[0].Role != "system" {
-		chatMessages = append([]anyllm.Message{{Role: "system", Content: systemPrompt}}, chatMessages...)
-	} else if len(chatMessages) == 0 {
-		chatMessages = []anyllm.Message{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: "Hello"},
+	var chatMessages []anyllm.Message
+	if systemPrompt != "" {
+		chatMessages = append(chatMessages, anyllm.Message{Role: "system", Content: systemPrompt})
+	}
+
+	for _, msg := range rawMessages {
+		if msg.Role != "system" {
+			chatMessages = append(chatMessages, msg)
 		}
+	}
+
+	if len(chatMessages) == 0 || (len(chatMessages) == 1 && chatMessages[0].Role == "system") {
+		chatMessages = append(chatMessages, anyllm.Message{
+			Role: "user", Content: "Hello",
+		})
 	}
 
 	targetModel := a.config.Model

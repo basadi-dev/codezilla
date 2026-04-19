@@ -34,6 +34,7 @@ type Message struct {
 
 type ToolResult struct {
 	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Name       string      `json:"name,omitempty"`
 	Result     interface{} `json:"result"`
 	Error      string      `json:"error,omitempty"`
 }
@@ -357,7 +358,7 @@ func (c *Context) AddToolCallsMessageWithThink(content, thinkContent string, cal
 // File reads that exceed this limit display an actionable truncation hint.
 const maxToolResultChars = 24000
 
-func (c *Context) AddToolResultMessage(toolCallID string, result interface{}, err error) {
+func (c *Context) AddToolResultMessage(toolCallID, name string, result interface{}, err error) {
 	var errStr string
 	if err != nil {
 		errStr = err.Error()
@@ -371,6 +372,7 @@ func (c *Context) AddToolResultMessage(toolCallID string, result interface{}, er
 		Content: "Tool execution result",
 		ToolResult: &ToolResult{
 			ToolCallID: toolCallID,
+			Name:       name,
 			Result:     result,
 			Error:      errStr,
 		},
@@ -857,6 +859,7 @@ func (c *Context) GetFormattedMessages() []anyllm.Message {
 		} else if msg.ToolResult != nil {
 			if msg.ToolResult.ToolCallID != "" {
 				formattedMsg.ToolCallID = msg.ToolResult.ToolCallID
+				formattedMsg.Name = msg.ToolResult.Name
 				if msg.ToolResult.Error != "" {
 					formattedMsg.Content = fmt.Sprintf("Error: %s", msg.ToolResult.Error)
 				} else {

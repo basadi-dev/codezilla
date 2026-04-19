@@ -683,9 +683,6 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			// Extract and strip <think> blocks — keep content for logging,
 			// but never include it in what's sent to the LLM.
 			msgContent, thinkContent := extractAndStripThinkBlocks(finalResponse)
-			if msgContent == "" {
-				msgContent = fmt.Sprintf("I am calling %d tools natively...", len(toolsToExecute))
-			}
 			o.agent.context.AddToolCallsMessageWithThink(msgContent, thinkContent, toolsToExecute)
 
 			type ToolResult struct {
@@ -752,9 +749,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 					})
 				}
 				if r.Err != nil {
-					o.agent.context.AddToolResultMessage(r.ID, nil, r.Err)
+					o.agent.context.AddToolResultMessage(r.ID, r.Name, nil, r.Err)
 				} else {
-					o.agent.context.AddToolResultMessage(r.ID, r.Result, nil)
+					o.agent.context.AddToolResultMessage(r.ID, r.Name, r.Result, nil)
 				}
 				
 				// Re-parse params to check if this was a file modification
