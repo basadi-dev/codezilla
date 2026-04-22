@@ -39,7 +39,7 @@ type clearViewportMsg struct{}
 type clearCopyNoticeMsg struct{}
 type appQuitMsg struct{ err error }
 
-// WorkerStatus represents the visible state of a single multi-agent worker
+// WorkerStatus represents the visible state of a single multi-agent worker.
 type WorkerStatus struct {
 	WorkerID string
 	Number   int           // 1-indexed task number for display
@@ -52,8 +52,42 @@ type WorkerStatus struct {
 	Elapsed  time.Duration // frozen duration for completed tasks
 }
 
+// WorkerBlockInit carries the data needed to create a live block
+// in the viewport for a parallel worker.
+type WorkerBlockInit struct {
+	WorkerID string
+	Number   int
+	Role     string
+	Model    string
+	Label    string
+}
+
+// BubbleTea message types for thread-safe worker block updates.
 type updateWorkerStatusMsg struct{ status WorkerStatus }
+type createWorkerBlockMsg struct{ init WorkerBlockInit }
+type updateWorkerBlockMsg struct {
+	workerID string
+	token    string
+}
+type updateWorkerToolMsg struct {
+	workerID string
+	toolName string
+}
+type updateWorkerSnippetMsg struct {
+	workerID string
+	snippet  string
+}
+type collapseWorkerBlockMsg struct{ status WorkerStatus }
 type clearWorkerStatusesMsg struct{}
+
+// createPlannerBlockMsg creates a live progress block for the planner phase
+// (the /parallel decomposition step). Uses a fixed workerID "__planner__".
+type createPlannerBlockMsg struct {
+	model string
+	label string
+}
+type updatePlannerBlockMsg struct{ token string }
+type collapsePlannerBlockMsg struct{}
 
 // selPoint is a position inside the wrapped content grid — independent of
 // viewport scroll offset. line indexes into appModel.wrappedLines; col is a
@@ -86,6 +120,14 @@ type appModel struct {
 	// on exactly what the user sees.
 	wrappedLines []string
 
+	// Viewport refresh optimisation — instead of calling the expensive
+	// join→wrap→split pipeline on every mutation, callers set viewportDirty
+	// and the single doRefreshViewport() runs once at the end of Update().
+	viewportDirty    bool // set by mutation handlers; consumed in Update() epilogue
+	fullRewrapNeeded bool // forces full re-wrap (resize, collapse, in-place edit)
+	wrappedUpTo      int  // number of outputLines already wrapped (for incremental path)
+	contentWrapWidth int  // cached wrap width so both paths use the same value
+
 	// Selection state (drag-to-select + copy). Coordinates are in wrappedLines
 	// space so scrolling doesn't invalidate them.
 	selStart     selPoint
@@ -104,6 +146,12 @@ type appModel struct {
 
 	// Multi-agent parallel worker statuses (stacked status lines)
 	workerStatuses []WorkerStatus
+
+	// Live thinking blocks in the viewport (workerID → block)
+	liveBlocks map[string]*liveBlock
+
+	// Planner progress block (uses same liveBlock, keyed by "__planner__")
+	plannerBlock *liveBlock
 
 	// Input state
 	inputEnabled  bool
@@ -485,6 +533,21 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Refresh live block headers on each tick so elapsed timers
+		// update smoothly (~100ms) even when no tokens are arriving.
+		if len(m.liveBlocks) > 0 || m.plannerBlock != nil {
+			if m.plannerBlock != nil && m.plannerBlock.headerIdx < len(m.outputLines) {
+				m.outputLines[m.plannerBlock.headerIdx] = renderBlockHeader(m.plannerBlock, false, false, 0)
+			}
+			for _, blk := range m.liveBlocks {
+				if blk.headerIdx < len(m.outputLines) {
+					m.outputLines[blk.headerIdx] = renderBlockHeader(blk, false, false, 0)
+				}
+			}
+			m.fullRewrapNeeded = true
+			m.viewportDirty = true
+		}
+
 	case updateWorkerStatusMsg:
 		found := false
 		for i, ws := range m.workerStatuses {
@@ -499,8 +562,187 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case createWorkerBlockMsg:
+		blk := &liveBlock{
+			workerID:    msg.init.WorkerID,
+			number:      msg.init.Number,
+			role:        msg.init.Role,
+			model:       msg.init.Model,
+			label:       msg.init.Label,
+			headerIdx:   len(m.outputLines),
+			activityIdx: len(m.outputLines) + 1,
+			started:     time.Now(),
+		}
+		if m.liveBlocks == nil {
+			m.liveBlocks = make(map[string]*liveBlock)
+		}
+		m.liveBlocks[msg.init.WorkerID] = blk
+
+		// Insert header + activity lines + blank separator
+		lineWidth := m.width - 10
+		lines := newBlockLines(blk, lineWidth)
+		m.outputLines = append(m.outputLines, lines...)
+		m.viewportDirty = true
+		return m, nil
+
+	case updateWorkerBlockMsg:
+		blk, ok := m.liveBlocks[msg.workerID]
+		if !ok {
+			return m, nil
+		}
+		appendStreamToken(blk, msg.token)
+		m.patchBlockLinesInPlace(blk)
+		m.fullRewrapNeeded = true
+		m.viewportDirty = true
+		return m, nil
+
+	case updateWorkerToolMsg:
+		blk, ok := m.liveBlocks[msg.workerID]
+		if !ok {
+			return m, nil
+		}
+		// Push "called: <tool>" as a discrete log line in the rolling mini-viewport.
+		appendActivityLine(blk, "called: "+msg.toolName)
+		m.patchBlockLinesInPlace(blk)
+		m.fullRewrapNeeded = true
+		m.viewportDirty = true
+		return m, nil
+
+	case updateWorkerSnippetMsg:
+		// No-op: the unified displayBuf in liveBlock handles all activity
+		// (tool calls + stream) so there is no separate snippet field.
+		return m, nil
+
+	case collapseWorkerBlockMsg:
+		blk, ok := m.liveBlocks[msg.status.WorkerID]
+		if !ok {
+			return m, nil
+		}
+
+		// Replace header with completed status
+		if blk.headerIdx < len(m.outputLines) {
+			m.outputLines[blk.headerIdx] = renderBlockHeader(blk, true, msg.status.HasError, msg.status.Elapsed)
+		}
+
+		// Remove the blockActivityLines activity rows + blank separator.
+		removeStart := blk.activityIdx
+		removeEnd := blk.activityIdx + blockActivityLines + 1 // +1 for blank sep
+		if removeEnd > len(m.outputLines) {
+			removeEnd = len(m.outputLines)
+		}
+		removeCount := removeEnd - removeStart
+		if removeCount > 0 {
+			m.outputLines = append(m.outputLines[:removeStart], m.outputLines[removeEnd:]...)
+			// Shift indices of all subsequent live blocks
+			for _, other := range m.liveBlocks {
+				if other.workerID == blk.workerID {
+					continue
+				}
+				if other.headerIdx > blk.headerIdx {
+					other.headerIdx -= removeCount
+					other.activityIdx -= removeCount
+				}
+			}
+			// Shift plannerBlock indices too
+			if m.plannerBlock != nil && m.plannerBlock.headerIdx > blk.headerIdx {
+				m.plannerBlock.headerIdx -= removeCount
+				m.plannerBlock.activityIdx -= removeCount
+			}
+		}
+
+		// Collapse invalidates line indices — clear any in-progress selection
+		// rather than attempting complex coordinate adjustment.
+		if m.hasSelection {
+			m.clearSelection()
+		}
+		m.fullRewrapNeeded = true
+		m.viewportDirty = true
+		return m, nil
+
 	case clearWorkerStatusesMsg:
 		m.workerStatuses = nil
+		m.liveBlocks = nil
+		// Also clear planner block if present
+		if m.plannerBlock != nil {
+			removeStart := m.plannerBlock.activityIdx
+			removeEnd := m.plannerBlock.activityIdx + blockActivityLines + 1
+			if removeEnd > len(m.outputLines) {
+				removeEnd = len(m.outputLines)
+			}
+			if removeEnd > removeStart {
+				m.outputLines = append(m.outputLines[:removeStart], m.outputLines[removeEnd:]...)
+			}
+			if m.plannerBlock.headerIdx < len(m.outputLines) {
+				m.outputLines = append(m.outputLines[:m.plannerBlock.headerIdx], m.outputLines[m.plannerBlock.headerIdx+1:]...)
+			}
+			m.plannerBlock = nil
+			if m.hasSelection {
+				m.clearSelection()
+			}
+			m.fullRewrapNeeded = true
+			m.viewportDirty = true
+		}
+		return m, nil
+
+	case createPlannerBlockMsg:
+		blk := &liveBlock{
+			workerID:    "__planner__",
+			number:      0,
+			role:        "Planner",
+			model:       msg.model,
+			label:       msg.label,
+			headerIdx:   len(m.outputLines),
+			activityIdx: len(m.outputLines) + 1,
+			started:     time.Now(),
+		}
+		m.plannerBlock = blk
+		lineWidth := m.width - 10
+		lines := newBlockLines(blk, lineWidth)
+		m.outputLines = append(m.outputLines, lines...)
+		m.viewportDirty = true
+		return m, nil
+
+	case updatePlannerBlockMsg:
+		// No-op: the planner streams raw decomposition text/JSON which is noisy
+		// and not meaningful as a live display. The header's spinner + elapsed
+		// timer (updated on every tick) gives sufficient progress feedback.
+		return m, nil
+
+	case collapsePlannerBlockMsg:
+		if m.plannerBlock == nil {
+			return m, nil
+		}
+		blk := m.plannerBlock
+
+		// Replace header with completed status
+		if blk.headerIdx < len(m.outputLines) {
+			m.outputLines[blk.headerIdx] = renderBlockHeader(blk, true, false, time.Since(blk.started))
+		}
+
+		// Remove activity rows + blank separator
+		removeStart := blk.activityIdx
+		removeEnd := blk.activityIdx + blockActivityLines + 1
+		if removeEnd > len(m.outputLines) {
+			removeEnd = len(m.outputLines)
+		}
+		removeCount := removeEnd - removeStart
+		if removeCount > 0 {
+			// Shift worker block indices that come after the planner
+			for _, other := range m.liveBlocks {
+				if other.headerIdx > blk.headerIdx {
+					other.headerIdx -= removeCount
+					other.activityIdx -= removeCount
+				}
+			}
+			m.outputLines = append(m.outputLines[:removeStart], m.outputLines[removeEnd:]...)
+		}
+		m.plannerBlock = nil
+
+		if m.hasSelection {
+			m.clearSelection()
+		}
+		m.fullRewrapNeeded = true
+		m.viewportDirty = true
 		return m, nil
 
 	case appQuitMsg:
@@ -532,6 +774,15 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
+	// ── Dirty-flag epilogue ─────────────────────────────────────────────────
+	// Consume the viewport dirty flag once, at the very end of Update(),
+	// so multiple handlers that ran in a single cycle only produce one
+	// re-wrap instead of N.
+	if m.viewportDirty {
+		m.viewportDirty = false
+		m.doRefreshViewport()
+	}
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -554,20 +805,97 @@ func (m *appModel) appendOutput(text string) {
 	}
 
 	if m.ready {
-		// Wrap text to viewport content width to prevent truncation.
-		// vpWidth = m.width - 2 (scrollbar + margin), wrapWidth = vpWidth - 1 (text padding)
-		width := m.width - 3
-		if width < 1 {
-			width = 1
-		}
+		m.viewportDirty = true
+	}
+}
 
+// doRefreshViewport re-renders the viewport from outputLines.
+// When possible, only newly appended lines are wrapped (incremental path).
+// In-place mutations (block updates, collapses, resizes) set
+// fullRewrapNeeded to force the full join→wrap→split pipeline.
+func (m *appModel) doRefreshViewport() {
+	if !m.ready {
+		return
+	}
+
+	// Compute the canonical wrap width once.
+	w := m.contentWrapWidth
+	if w < 1 {
+		w = m.width - 3
+		if w < 1 {
+			w = 1
+		}
+	}
+
+	// ── Incremental path: only wrap newly appended lines ────────────────
+	canIncremental := !m.fullRewrapNeeded &&
+		m.wrappedUpTo > 0 &&
+		m.wrappedUpTo <= len(m.outputLines) &&
+		len(m.outputLines) > m.wrappedUpTo
+
+	if canIncremental {
+		// Wrap only the new tail, append to existing wrappedLines.
+		newLines := m.outputLines[m.wrappedUpTo:]
+		newContent := strings.Join(newLines, "\n")
+		newWrapped := lipgloss.NewStyle().Width(w).Render(newContent)
+		m.wrappedLines = append(m.wrappedLines, strings.Split(newWrapped, "\n")...)
+		m.wrappedUpTo = len(m.outputLines)
+		// SetContent must receive the full document so the viewport's internal
+		// line count and scroll range are correct.  Re-join wrappedLines (which
+		// are already display-width-wrapped) as the canonical full content.
+		// This keeps wrappedLines and viewport content in sync for selection.
+		m.viewport.SetContent(strings.Join(m.wrappedLines, "\n"))
+	} else {
+		// ── Full re-wrap (resize, block collapse, in-place edit) ────────
 		content := strings.Join(m.outputLines, "\n")
-		// Fast ANSI-aware wrap
-		wrapped := lipgloss.NewStyle().Width(width).Render(content)
+		wrapped := lipgloss.NewStyle().Width(w).Render(content)
 		m.wrappedLines = strings.Split(wrapped, "\n")
+		m.wrappedUpTo = len(m.outputLines)
+		m.fullRewrapNeeded = false
 		m.viewport.SetContent(wrapped)
+	}
+
+	// Selection-aware auto-scroll: don't yank the viewport to the bottom
+	// while the user is dragging or has an active selection, or has
+	// manually scrolled up to read earlier output.
+	if !m.hasSelection && !m.selecting && m.isAtBottom() {
 		m.viewport.GotoBottom()
 	}
+}
+
+// isAtBottom returns true if the viewport is within 2 lines of the bottom,
+// meaning the user has not deliberately scrolled up.
+func (m appModel) isAtBottom() bool {
+	maxOffset := m.viewport.TotalLineCount() - m.viewport.Height
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	return m.viewport.YOffset >= maxOffset-2
+}
+
+// patchBlockLinesInPlace updates the header and activity rows of a
+// live block directly in outputLines without triggering a full re-wrap.
+// The caller must still set viewportDirty = true.
+func (m *appModel) patchBlockLinesInPlace(blk *liveBlock) {
+	lineWidth := m.width - 10
+	// Header
+	if blk.headerIdx < len(m.outputLines) {
+		m.outputLines[blk.headerIdx] = renderBlockHeader(blk, false, false, 0)
+	}
+	// Activity rows
+	activity := renderActivityLines(blk, lineWidth)
+	for i, line := range activity {
+		idx := blk.activityIdx + i
+		if idx < len(m.outputLines) {
+			m.outputLines[idx] = line
+		}
+	}
+}
+
+// renderLiveBlockHeader is kept for any callers that haven't been migrated yet.
+// Delegates to the package-level renderBlockHeader in agent_block.go.
+func (m appModel) renderLiveBlockHeader(blk *liveBlock, done bool, hasError bool, elapsed time.Duration) string {
+	return renderBlockHeader(blk, done, hasError, elapsed)
 }
 
 // selectionRange returns the normalized [start, end] endpoints such that
@@ -669,7 +997,11 @@ func (m appModel) renderSelectedViewport() string {
 		before := ansi.Cut(l, 0, startCol)
 		sel := ansi.Cut(l, startCol, endCol)
 		after := ansi.Cut(l, endCol, farRight)
-		lines[i] = before + highlight.Render(sel) + after
+		// Strip existing ANSI styling from the selected portion so the
+		// highlight foreground actually takes effect. Without this, lines
+		// with heavy styling (block headers, glamour output) keep their
+		// original foreground colors, which clash with the selection bg.
+		lines[i] = before + highlight.Render(ansi.Strip(sel)) + after
 	}
 	return strings.Join(lines, "\n")
 }
@@ -851,11 +1183,12 @@ func (m appModel) renderThinkingLine() string {
 	return mainLine
 }
 
-// renderWorkerStatusLine produces a single colored line for a parallel worker.
+// renderWorkerStatusLine produces a single colored line for a parallel worker
+// status shown in the thinking bar beneath the input.
 //
-//	⠋ [Researcher]  Scanning internal/tools/...       (12s)
-//	✓ [Developer]   Completed                          (8s)
-//	✗ [Reviewer]    Error: context deadline exceeded    (3s)
+//	[-] [Researcher]  Scanning internal/tools/...       (12s)
+//	[+] [Developer]   Completed                          (8s)
+//	[!] [Reviewer]    Error: context deadline exceeded   (3s)
 func (m appModel) renderWorkerStatusLine(ws WorkerStatus) string {
 	dim := lipgloss.NewStyle().Foreground(colMuted)
 	roleStyle := lipgloss.NewStyle().Foreground(colPurple).Bold(true)
@@ -867,11 +1200,11 @@ func (m appModel) renderWorkerStatusLine(ws WorkerStatus) string {
 	var icon string
 	switch {
 	case ws.Done && ws.HasError:
-		icon = redStyle.Render("✗ ")
+		icon = redStyle.Render("[!]")
 	case ws.Done:
-		icon = greenStyle.Render("✓ ")
+		icon = greenStyle.Render("[+]")
 	default:
-		icon = m.spinner.View()
+		icon = lipgloss.NewStyle().Foreground(colCyan).Render("[" + m.spinner.View() + "]")
 	}
 
 	role := roleStyle.Render("[" + ws.Role + "]")
@@ -902,7 +1235,7 @@ func (m appModel) renderWorkerStatusLine(ws WorkerStatus) string {
 		modelStr = "  " + dim.Render("("+ws.Model+")")
 	}
 
-	return "   " + icon + " " + numStr + role + "  " + labelStyle.Render(label) + "  " + elapsed + modelStr
+	return "  " + icon + " " + numStr + role + "  " + labelStyle.Render(label) + "  " + elapsed + modelStr
 }
 
 // renderViewportWithScrollbar composites the viewport output with a
@@ -1025,27 +1358,33 @@ func (m appModel) resizeViews(forceReflow bool) appModel {
 		vpWidth = 1
 	}
 
-	// Wrap text with one cell of right padding inside the viewport.
+	// Compute the canonical wrap width once — used by doRefreshViewport too.
 	wrapWidth := vpWidth - 1
 	if wrapWidth < 1 {
 		wrapWidth = 1
 	}
-	wrapped := lipgloss.NewStyle().Width(wrapWidth).Render(strings.Join(m.outputLines, "\n"))
-	m.wrappedLines = strings.Split(wrapped, "\n")
+	oldWrapWidth := m.contentWrapWidth
+	m.contentWrapWidth = wrapWidth
 
 	if !m.ready {
+		// First-time init: do the full wrap inline since doRefreshViewport
+		// checks m.ready and we need content before setting ready = true.
+		wrapped := lipgloss.NewStyle().Width(wrapWidth).Render(strings.Join(m.outputLines, "\n"))
+		m.wrappedLines = strings.Split(wrapped, "\n")
+		m.wrappedUpTo = len(m.outputLines)
 		m.viewport = viewport.New(vpWidth, vpHeight)
 		m.viewport.SetContent(wrapped)
 		m.viewport.GotoBottom()
 		m.ready = true
 	} else {
-		oldHeight := m.viewport.Height
 		m.viewport.Width = vpWidth
 		m.viewport.Height = vpHeight
-		if forceReflow {
-			m.viewport.SetContent(wrapped)
-		} else if oldHeight != vpHeight {
-			m.viewport.GotoBottom()
+
+		// If the wrap width changed (terminal resize) or a reflow is forced,
+		// schedule a full re-wrap via the dirty flag.
+		if forceReflow || oldWrapWidth != wrapWidth {
+			m.fullRewrapNeeded = true
+			m.viewportDirty = true
 		}
 	}
 	return m
@@ -1348,6 +1687,72 @@ func (ui *BubbleTeaUI) UpdateWorkerStatus(status WorkerStatus) {
 func (ui *BubbleTeaUI) ClearWorkerStatuses() {
 	if ui.program != nil {
 		ui.program.Send(clearWorkerStatusesMsg{})
+	}
+}
+
+// CreateWorkerBlock inserts a live thinking block into the viewport for a
+// parallel worker. The block includes a header line and placeholder thinking
+// lines that will be updated in-place as tokens stream in.
+func (ui *BubbleTeaUI) CreateWorkerBlock(init WorkerBlockInit) {
+	if ui.program != nil {
+		ui.program.Send(createWorkerBlockMsg{init: init})
+	}
+}
+
+// UpdateWorkerBlock appends a thinking/output token to a specific worker's
+// live block in the viewport, updating the visible thinking lines in-place.
+func (ui *BubbleTeaUI) UpdateWorkerBlock(workerID, token string) {
+	if ui.program != nil {
+		ui.program.Send(updateWorkerBlockMsg{workerID: workerID, token: token})
+	}
+}
+
+// CollapseWorkerBlock replaces a worker's expanded activity block with a
+// single completed/failed summary line, removing the activity sub-lines.
+func (ui *BubbleTeaUI) CollapseWorkerBlock(status WorkerStatus) {
+	if ui.program != nil {
+		ui.program.Send(collapseWorkerBlockMsg{status: status})
+	}
+}
+
+// UpdateWorkerBlockTool updates the tool-use activity row for a running worker block.
+// Implements AgentBlockDisplayer.
+func (ui *BubbleTeaUI) UpdateWorkerBlockTool(workerID, toolName string) {
+	if ui.program != nil {
+		ui.program.Send(updateWorkerToolMsg{workerID: workerID, toolName: toolName})
+	}
+}
+
+// UpdateWorkerBlockSnippet updates the result-snippet activity row for a running worker block.
+// Implements AgentBlockDisplayer.
+func (ui *BubbleTeaUI) UpdateWorkerBlockSnippet(workerID, snippet string) {
+	if ui.program != nil {
+		ui.program.Send(updateWorkerSnippetMsg{workerID: workerID, snippet: snippet})
+	}
+}
+
+// ── Planner progress block ──────────────────────────────────────────────────
+
+// CreatePlannerBlock inserts a live 3-line progress block in the viewport
+// for the /parallel planning/decomposition phase.
+func (ui *BubbleTeaUI) CreatePlannerBlock(model, label string) {
+	if ui.program != nil {
+		ui.program.Send(createPlannerBlockMsg{model: model, label: label})
+	}
+}
+
+// UpdatePlannerBlock streams a token into the planner's progress block.
+func (ui *BubbleTeaUI) UpdatePlannerBlock(token string) {
+	if ui.program != nil {
+		ui.program.Send(updatePlannerBlockMsg{token: token})
+	}
+}
+
+// CollapsePlannerBlock collapses the planner's progress block into a
+// single completed header line.
+func (ui *BubbleTeaUI) CollapsePlannerBlock() {
+	if ui.program != nil {
+		ui.program.Send(collapsePlannerBlockMsg{})
 	}
 }
 

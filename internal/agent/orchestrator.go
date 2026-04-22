@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -107,11 +106,12 @@ type AgentOrchestrator struct {
 	tracker              *StreamProcessor
 	loops                *loopDetector
 	tokens               *TokenTracker
-	contextLengthRetries int    // tracks retries for context-length errors within a single Run()
-	transientRetries     int    // tracks retries for model provider transient errors
-	verifyRetries        int    // tracks retries for post-edit verification failures
-	routedModel          string // per-Run model override set by the router (empty = use config.Model)
-	prevToolCount        int    // tool count from previous Run (used by router)
+	contextLengthRetries int         // tracks retries for context-length errors within a single Run()
+	transientRetries     int         // tracks retries for model provider transient errors
+	verifyRetries        int         // tracks retries for post-edit verification failures
+	routedModel          string      // per-Run model override set by the router (empty = use config.Model)
+	routedTier           RequestTier // per-Run tier set by the router (default = TierDefault)
+	prevToolCount        int         // tool count from previous Run (used by router)
 	// toolsDisabled is set to true after a 400 "function calls and responses" error.
 	// Some cloud-proxied models (e.g. ministral via Ollama cloud gateway) reject
 	// requests that include tool schemas. Retrying without tools lets them
@@ -144,165 +144,39 @@ func (o *AgentOrchestrator) effectiveModel() string {
 	return o.agent.config.Model
 }
 
-// preFlightContextTrim proactively trims context before an LLM call.
-// It queries the model's actual context window from the provider (Ollama /api/show)
-// and accounts for tool schema overhead. Falls back to MaxTokens if unknown.
-// Also runs sliding window eviction and summarisation.
-func (o *AgentOrchestrator) preFlightContextTrim(ctx context.Context, toolCount int) {
-	// Step 1: Sliding window eviction (proactive, before budget check)
-	if evicted := o.agent.context.SlidingWindowEvict(); len(evicted) > 0 {
-		o.summarizeAndStore(ctx, evicted)
+// toolsForTier returns the appropriate tool set for the current model tier.
+//   - Fast tier: no tools (pure text completion for simple Q&A)
+//   - Default tier: core tools only (file ops, grep, execute, repo map)
+//   - Heavy tier: all tools (full capability)
+//
+// This dramatically reduces token overhead for lightweight models that choke
+// on large tool schemas.
+func (o *AgentOrchestrator) toolsForTier(allTools []anyllm.Tool) []anyllm.Tool {
+	if o.toolsDisabled {
+		return nil
 	}
 
-	budget := o.agent.config.MaxTokens
-	if budget <= 0 {
-		return // no budget configured; skip
-	}
-
-	// Try to discover the real model context window
-	if o.agent.llmClient != nil {
-		queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		realCtx := o.agent.llmClient.GetModelContextLength(queryCtx, o.agent.config.Provider, o.effectiveModel())
-		cancel()
-
-		if realCtx > 0 {
-			o.logger.Debug("Discovered model context window",
-				"model", o.effectiveModel(),
-				"context_window", realCtx,
-				"config_max_tokens", budget)
-			// Use the smaller of config budget and real context window
-			if realCtx < budget {
-				budget = realCtx
-			}
-		}
-	}
-
-	// Update the Agent's context limit to dynamically scale UI feedback
-	o.agent.context.SetMaxTokens(budget)
-
-	// Reserve space for tool schemas + response
-	schemaOverhead := EstimateToolSchemaTokens(toolCount)
-	responseReserve := 1024 // leave room for the LLM to generate a response
-	effectiveBudget := budget - schemaOverhead - responseReserve
-
-	if effectiveBudget <= 0 {
-		o.logger.Warn("PreFlight: tool schema overhead exceeds budget",
-			"budget", budget,
-			"schema_overhead", schemaOverhead)
-		return
-	}
-
-	_, currentTokens := o.agent.context.ContextStats()
-	if currentTokens > effectiveBudget {
-		o.logger.Info("PreFlight: context exceeds budget, trimming proactively",
-			"current_tokens", currentTokens,
-			"effective_budget", effectiveBudget,
-			"schema_overhead", schemaOverhead)
-		_, evicted := o.agent.context.PreFlightTrim(effectiveBudget)
-		if len(evicted) > 0 {
-			o.summarizeAndStore(ctx, evicted)
-		}
+	switch o.routedTier {
+	case TierFast:
+		return nil // no tools needed for greetings/simple Q&A
+	case TierDefault:
+		return filterCoreTools(allTools)
+	default:
+		return allTools
 	}
 }
 
-// summarizeAndStore summarises evicted messages and stores the rolling summary.
-// Falls back to keeping the existing summary if summarisation fails.
-func (o *AgentOrchestrator) summarizeAndStore(ctx context.Context, evicted []Message) {
-	if len(evicted) == 0 {
-		return
-	}
-
-	existingSummary := o.agent.context.RollingSummary
-	newSummary := o.summarizeEvictedMessages(ctx, existingSummary, evicted)
-	if newSummary != "" {
-		o.agent.context.SetRollingSummary(newSummary)
-	}
-	// If summarisation failed, existing summary is preserved (no-op)
-}
-
-// summarizeEvictedMessages uses the SummariserModel to incrementally update
-// the rolling conversation summary with newly evicted messages.
-func (o *AgentOrchestrator) summarizeEvictedMessages(ctx context.Context, existingSummary string, evicted []Message) string {
-	summariserModel := o.agent.GetModelForTier(TierFast)
-	if summariserModel == "" {
-		o.logger.Debug("No fast model configured, skipping eviction summary")
-		return "" // no summariser = fall back to hard-drop
-	}
-
-	// Format evicted messages for the summariser
-	var evictedText strings.Builder
-	for _, msg := range evicted {
-		evictedText.WriteString(fmt.Sprintf("[%s]: ", msg.Role))
-		if msg.Content != "" {
-			// Cap content to avoid sending huge messages to summariser
-			content := msg.Content
-			if len(content) > 500 {
-				content = content[:500] + "..."
-			}
-			evictedText.WriteString(content)
+// filterCoreTools returns only the essential tools for standard coding tasks.
+// Everything else (web search, project analyzer, sub-agent, todo) is reserved
+// for heavy-tier requests where the model is powerful enough to benefit.
+func filterCoreTools(tools []anyllm.Tool) []anyllm.Tool {
+	var core []anyllm.Tool
+	for _, t := range tools {
+		if CoreToolNames[t.Function.Name] {
+			core = append(core, t)
 		}
-		if msg.ToolResult != nil {
-			result := fmt.Sprintf("%v", msg.ToolResult.Result)
-			if len(result) > 200 {
-				result = result[:200] + "..."
-			}
-			evictedText.WriteString(fmt.Sprintf(" [tool_result: %s]", result))
-		}
-		if len(msg.ToolCalls) > 0 {
-			var toolNames []string
-			for _, tc := range msg.ToolCalls {
-				toolNames = append(toolNames, tc.Function.Name)
-			}
-			evictedText.WriteString(fmt.Sprintf(" [called: %s]", strings.Join(toolNames, ", ")))
-		}
-		evictedText.WriteString("\n")
 	}
-
-	var userContent string
-	if existingSummary != "" {
-		userContent = fmt.Sprintf("EXISTING SUMMARY:\n%s\n\nNEWLY EVICTED MESSAGES:\n%s", existingSummary, evictedText.String())
-	} else {
-		userContent = fmt.Sprintf("EVICTED MESSAGES:\n%s", evictedText.String())
-	}
-
-	msgs := []anyllm.Message{
-		{Role: "system", Content: `You are an internal context compactor. Given evicted conversation messages (and optionally an existing summary), produce an updated summary that captures:
-- Key decisions made
-- Files read or modified (with paths)
-- Important findings, conclusions, and error resolutions
-- User preferences expressed
-- Current task state and progress
-- Tool results that matter for future turns
-
-Be extremely concise (max 300 tokens). Use bullet points. Never include raw file contents or full tool outputs. 
-IMPORTANT: You MUST end your summary with a single line starting with "Current goal: " that explicitly states what the user originally asked for and what the agent is currently trying to accomplish.`},
-		{Role: "user", Content: userContent},
-	}
-
-	o.logger.Debug("Summarising evicted messages",
-		"model", summariserModel,
-		"evicted_count", len(evicted),
-		"existing_summary_len", len(existingSummary))
-
-	if o.agent.config.OnContextSummarizing != nil {
-		o.agent.config.OnContextSummarizing()
-	}
-
-	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.2, "", nil)
-	if err != nil {
-		o.logger.Warn("Eviction summary failed, keeping existing summary", "error", err)
-		return existingSummary
-	}
-
-	if len(comp.Choices) > 0 {
-		result := strings.TrimSpace(comp.Choices[0].Message.ContentString())
-		o.logger.Info("Eviction summary complete",
-			"new_summary_len", len(result),
-			"evicted_messages", len(evicted))
-		return result
-	}
-
-	return existingSummary
+	return core
 }
 
 // Run executes the core processing loop via state machine transitions
@@ -318,6 +192,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 	// ---- Model routing: classify the request and pick the best model tier ----
 	if o.agent.router != nil && o.agent.router.Enabled {
 		tier, reason := o.agent.router.Classify(initialMessage, o.prevToolCount)
+		o.routedTier = tier
 		routedModel := o.agent.router.ModelForTier(tier)
 		if routedModel != o.agent.config.Model {
 			o.routedModel = routedModel
@@ -378,10 +253,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			}
 			iter++
 			// blocking complete
-			llmTools := o.agent.buildLLMTools()
-			if o.toolsDisabled {
-				llmTools = nil
-			}
+			llmTools := o.toolsForTier(o.agent.buildLLMTools())
 			// Proactively trim context before sending to LLM
 			o.preFlightContextTrim(ctx, len(llmTools))
 
@@ -424,7 +296,7 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			})
 
 			llmStart := time.Now()
-			completion, err := o.agent.generateCompletion(ctx, "", llmTools)
+			completion, err := o.agent.generateCompletion(ctx, "", llmTools, o.routedTier)
 			llmDur := time.Since(llmStart)
 
 			if err != nil {
@@ -487,16 +359,13 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 
 		case StateStreaming:
 			iter++
-			llmTools := o.agent.buildLLMTools()
-			if o.toolsDisabled {
-				llmTools = nil
-			}
+			llmTools := o.toolsForTier(o.agent.buildLLMTools())
 
 			// Proactively trim context before sending to LLM
 			o.preFlightContextTrim(ctx, len(llmTools))
 
 			msgs := o.agent.buildChatMessages()
-			sysPrompt := o.agent.buildSystemPrompt()
+			sysPrompt := o.agent.buildSystemPromptForTier(o.routedTier)
 			if len(msgs) > 0 && msgs[0].Role != "system" {
 				msgs = append([]anyllm.Message{{Role: "system", Content: sysPrompt}}, msgs...)
 			}
@@ -820,85 +689,15 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 			state = StatePrompting
 
 		case StateErrorRecovery:
-			// Check if this is a context-length error that we can auto-recover from
-			if errors.Is(currentLLMError, llm.ErrContextLengthExceeded) && o.contextLengthRetries < maxContextLengthRetries {
-				o.contextLengthRetries++
-				msgsBefore, toksBefore := o.agent.context.ContextStats()
-				removed, evicted := o.agent.context.AggressiveTrim()
-				msgsAfter, toksAfter := o.agent.context.ContextStats()
-
-				// Summarise evicted messages before retrying
-				if len(evicted) > 0 {
-					o.summarizeAndStore(ctx, evicted)
-				}
-
-				o.logger.Warn("Context length exceeded — auto-trimming and retrying",
-					"retry", o.contextLengthRetries,
-					"max_retries", maxContextLengthRetries,
-					"msgs_before", msgsBefore,
-					"msgs_after", msgsAfter,
-					"~toks_before", toksBefore,
-					"~toks_after", toksAfter,
-					"removed", removed)
-
-				if removed == 0 {
-					// Nothing left to trim — give up
-					o.logger.Error("Cannot trim further, context is minimal")
-					finalResponse = "I'm sorry, the prompt is too long for this model's context window and I cannot trim further. Try using a model with a larger context window, or start a new conversation."
-					state = StateComplete
-					continue
-				}
-
-				// Reset error and retry
-				currentLLMError = nil
-				state = StatePrompting
-				continue
+			result := o.handleErrorRecovery(ctx, currentLLMError, stream)
+			if result.FatalError != nil {
+				return "", result.FatalError
 			}
-
-			// Detect "function calls and responses" mismatch from strict providers
-			// (e.g. Mistral cloud via Ollama). This happens when the provider
-			// rejects tool schemas on a model that doesn't support tool use,
-			// OR when the session state got out of sync. Retry without tools.
-			errStr := currentLLMError.Error()
-			if !o.toolsDisabled && strings.Contains(errStr, "function calls and responses") {
-				o.toolsDisabled = true
-				currentLLMError = nil
-				o.logger.Warn("Tool-call mismatch 400 error — disabling tools and retrying as plain-text agent",
-					"model", o.effectiveModel())
-				if stream {
-					state = StateStreaming
-				} else {
-					state = StatePrompting
-				}
-				continue
+			if result.FinalResponse != "" {
+				finalResponse = result.FinalResponse
 			}
-
-			// Check if this is a transient provider error
-			if llm.IsTransientError(currentLLMError) && o.transientRetries < maxTransientRetries {
-				o.transientRetries++
-				delay := time.Duration(1<<o.transientRetries) * time.Second
-
-				o.logger.Warn(fmt.Sprintf("Provider error detected: %v. Retrying in %v (Attempt %d/%d)...", currentLLMError, delay, o.transientRetries, maxTransientRetries))
-
-				time.Sleep(delay)
-
-				currentLLMError = nil
-				if stream {
-					state = StateStreaming
-				} else {
-					state = StatePrompting
-				}
-				continue
-			}
-
-			o.logger.Error("LLM Error Recovery",
-				"iter", iter,
-				"error", currentLLMError)
-
-			if errors.Is(currentLLMError, llm.ErrContextLengthExceeded) {
-				return "", fmt.Errorf("the prompt is too long for this model's context window. Try `/clear` to reset the conversation, or switch to a model with a larger context window: %w", currentLLMError)
-			}
-			return "", currentLLMError
+			currentLLMError = nil
+			state = result.NextState
 
 		case StateComplete:
 			if finalResponse != "" {
@@ -913,56 +712,9 @@ func (o *AgentOrchestrator) Run(ctx context.Context, initialMessage string, onTo
 		}
 	}
 }
-
-// summarizeThink creates a condensed version of a large <think> block using the Summariser model.
-func (o *AgentOrchestrator) summarizeThink(ctx context.Context, thinkText string) string {
-	summariserModel := o.agent.GetModelForTier(TierFast)
-	if summariserModel == "" {
-		summariserModel = o.agent.GetModelForTier(TierDefault) // fallback
-	}
-
-	msgs := []anyllm.Message{
-		{Role: "system", Content: "You are an internal summariser. You receive the raw internal thinking of an AI agent. Your job is to concisely summarize the core logical steps and decisions it made. Be extremely brief (2-4 sentences max), focusing on the reasoning that matters for the next steps."},
-		{Role: "user", Content: thinkText},
-	}
-
-	o.logger.Debug("Summarizing deep thought", "model", summariserModel, "chars", len(thinkText))
-
-	// Create a fast, no-tool completion call. Low temperature for factuality.
-	comp, err := o.agent.llmClient.Complete(ctx, o.agent.config.Provider, summariserModel, msgs, 0.3, "", nil)
-	if err != nil {
-		o.logger.Warn("Think summarize failed", "error", err)
-		return ""
-	}
-
-	if len(comp.Choices) > 0 {
-		return strings.TrimSpace(comp.Choices[0].Message.ContentString())
-	}
-	return ""
-}
-
-// stripThinkBlocks removes all <think>...</think> blocks from a response.
-// Think blocks are internal reasoning meant for display only — they should
-// not be stored in conversation context where they confuse subsequent turns.
-func stripThinkBlocks(s string) string {
-	stripped, _ := extractAndStripThinkBlocks(s)
-	return stripped
-}
-
-// extractAndStripThinkBlocks extracts the content of all <think>...</think> blocks
-// and returns the stripped response alongside the joined think content.
-// The think content is suitable for storing on a Message for logging and future
-// analysis; the stripped response is what gets sent to the LLM.
-func extractAndStripThinkBlocks(s string) (stripped, thinkContent string) {
-	var thinks []string
-	for {
-		start := strings.Index(s, "<think>")
-		end := strings.Index(s, "</think>")
-		if start == -1 || end == -1 || end <= start {
-			break
-		}
-		thinks = append(thinks, strings.TrimSpace(s[start+7:end]))
-		s = s[:start] + s[end+len("</think>"):]
-	}
-	return strings.TrimSpace(s), strings.Join(thinks, "\n---\n")
-}
+// Context management methods (preFlightContextTrim, summarizeAndStore,
+// summarizeEvictedMessages, summarizeThink, stripThinkBlocks,
+// extractAndStripThinkBlocks) are defined in orchestrator_context.go.
+//
+// Error recovery (handleErrorRecovery, promptingState) is defined
+// in orchestrator_errors.go.

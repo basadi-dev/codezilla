@@ -134,7 +134,40 @@ func (w *ConcreteWorker) executeTask(parentCtx context.Context, task Task, resul
 
 	prompt := buildTaskPrompt(task)
 
-	output, err := w.inner.ProcessMessage(ctx, prompt)
+	// Wire OnToolPreparing so the UI can show which tool this worker is calling.
+	// Clone() clears all callbacks, so we re-register after cloning.
+	if w.bus != nil {
+		busRef := w.bus
+		workerIDRef := w.id
+		taskIDRef := task.ID
+		w.inner.SetOnToolPreparing(func(toolName string) {
+			busRef.Publish(Event{
+				Type:     EventWorkerToolCall,
+				WorkerID: workerIDRef,
+				Payload: map[string]interface{}{
+					"task_id":   taskIDRef,
+					"tool_name": toolName,
+				},
+			})
+		})
+	}
+
+	// Stream tokens through the bus so the UI can show a live thinking tail
+	// for this worker. Each chunk is published as EventWorkerThinking.
+	onToken := func(token string) {
+		if w.bus != nil && token != "" {
+			w.bus.Publish(Event{
+				Type:     EventWorkerThinking,
+				WorkerID: w.id,
+				Payload: map[string]interface{}{
+					"task_id": task.ID,
+					"token":   token,
+				},
+			})
+		}
+	}
+
+	output, err := w.inner.ProcessMessageStream(ctx, prompt, onToken, nil)
 
 	result := Result{
 		TaskID:   task.ID,

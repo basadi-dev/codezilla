@@ -10,6 +10,10 @@ type EventType string
 const (
 	EventTaskStarted    EventType = "task_started"
 	EventTaskCompleted  EventType = "task_completed"
+	EventWorkerThinking EventType = "worker_thinking"
+	// EventWorkerToolCall is published when a worker is about to call a tool.
+	// Payload: "tool_name" (string), "task_id" (string)
+	EventWorkerToolCall EventType = "worker_tool_call"
 	EventFileDiscovered EventType = "file_discovered"
 	EventFileModified   EventType = "file_modified"
 )

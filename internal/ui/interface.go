@@ -130,5 +130,26 @@ type LiveStatusStopper interface {
 	StopLiveStatus()
 }
 
+// PlannerBlockDisplayer is an optional interface for UIs that can show a live
+// 3-line progress block during the /parallel planning/decomposition phase.
+type PlannerBlockDisplayer interface {
+	CreatePlannerBlock(model, label string)
+	UpdatePlannerBlock(token string)
+	CollapsePlannerBlock()
+}
+
+// AgentBlockDisplayer is an optional interface for UIs that can render a live
+// per-agent progress block (header + tool row + stream row + snippet row) while
+// parallel agents are running. BubbleTeaUI implements this; BaseUI does not.
+//
+// Callers should type-assert to AgentBlockDisplayer before calling these methods
+// so that non-TUI environments degrade gracefully.
+type AgentBlockDisplayer interface {
+	// UpdateWorkerBlockTool updates the "tool" activity row for a running worker block.
+	UpdateWorkerBlockTool(workerID, toolName string)
+	// UpdateWorkerBlockSnippet updates the "snippet" activity row for a running worker block.
+	UpdateWorkerBlockSnippet(workerID, snippet string)
+}
+
 // Factory function type for creating UI instances
 type Factory func(historyFile string) (UI, error)

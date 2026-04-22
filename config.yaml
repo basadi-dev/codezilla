@@ -15,11 +15,11 @@ llm:
     # Fast model — a small, cheap model for trivial exchanges (greetings, "yes/no", "what is X?").
     # The auto-router sends simple inputs here to save tokens and latency.
     # Pick a lightweight model with good instruction-following. Leave blank to disable fast-routing.
-    fast: "ministral-3:14b-cloud"
+    fast: "ministral-3:8b-cloud"
 
     # Heavy model — the most powerful model for complex multi-step tasks (refactors, migrations, architecture).
     # The auto-router sends clearly complex inputs here. Falls back to default if unset.
-    heavy: "glm-5.1"
+    heavy: "kimi-k2.6:cloud"
 
   # Ollama-specific settings
   ollama:
@@ -129,6 +129,7 @@ tool_permissions: {}
 # Appearance
 force_color: false
 no_color: false
+disable_mouse: false
 
 analyzer_settings:
     use_llm: true

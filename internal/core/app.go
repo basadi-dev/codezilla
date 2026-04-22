@@ -603,6 +603,16 @@ func NewApp(cfg *config.Config, ui ui.UI, database *db.DB) (*App, error) {
 		OnVerifyPassed: func() {
 			ui.Success("System verification passed ✅")
 		},
+		OnLLMError: func(model string, err error, willRetry bool) {
+			ui.HideThinking()
+			if willRetry {
+				ui.Warning("⚠️  [%s] %v — retrying...", model, err)
+				ui.ShowThinking()
+				ui.UpdateThinkingStatus("retrying after error...")
+			} else {
+				ui.Error("❌ [%s] %v", model, err)
+			}
+		},
 		OnLLMCall: func(callNum, msgCount, approxToks int) {
 			// Format token count: "21K" or "800"
 			tokLabel := fmt.Sprintf("%d", approxToks)
@@ -1348,6 +1358,11 @@ Output format: start with [ and end with ]. No markdown. No explanation. No tool
 		return fmt.Errorf("task decomposition failed: %w", err)
 	}
 
+	// Create a live 3-line progress block in the viewport for the planner phase
+	if plannerUI, ok := app.ui.(ui.PlannerBlockDisplayer); ok {
+		plannerUI.CreatePlannerBlock(decomposerModel, "Decomposing tasks...")
+	}
+
 	// Accumulate the full response while feeding a live tail into the spinner
 	// status label via UpdateThinkingStatus. The spinner goroutine owns all
 	// cursor movement — we must NOT emit any raw ANSI ourselves while it runs.
@@ -1370,6 +1385,11 @@ Output format: start with [ and end with ]. No markdown. No explanation. No tool
 			continue
 		}
 		decomposeResultBuilder.WriteString(token)
+
+		// Stream tokens to the planner progress block
+		if plannerUI, ok := app.ui.(ui.PlannerBlockDisplayer); ok {
+			plannerUI.UpdatePlannerBlock(token)
+		}
 
 		// Suppress <think>…</think> from the visible label while keeping the
 		// full text in the accumulator (needed later for JSON extraction).
@@ -1412,12 +1432,18 @@ Output format: start with [ and end with ]. No markdown. No explanation. No tool
 	// Check streaming error
 	if streamErr := <-errCh; streamErr != nil {
 		app.ui.HideThinking()
+		if plannerUI, ok := app.ui.(ui.PlannerBlockDisplayer); ok {
+			plannerUI.CollapsePlannerBlock()
+		}
 		return fmt.Errorf("task decomposition stream failed: %w", streamErr)
 	}
 
-	// Collapse spinner; print a clean one-liner before the dispatch list.
+	// Collapse the planner progress block and spinner
+	if plannerUI, ok := app.ui.(ui.PlannerBlockDisplayer); ok {
+		plannerUI.CollapsePlannerBlock()
+	}
 	app.ui.HideThinking()
-	app.ui.Info("✦ Decomposition complete via %s — building task graph...", decomposerModel)
+	app.ui.Info("[*] Decomposition complete via %s — building task graph...", decomposerModel)
 
 	decomposeResult := decomposeResultBuilder.String()
 
@@ -1536,15 +1562,42 @@ Output format: start with [ and end with ]. No markdown. No explanation. No tool
 	}
 
 	app.ui.HideThinking()
-	app.ui.Info("🔀 Dispatching %d parallel agents...  %s", len(tasks), dimStyle.Render("· decomposed via: "+decomposerModel))
+	app.ui.Info("[>>] Dispatching %d parallel agents...  %s", len(tasks), dimStyle.Render("· decomposed via: "+decomposerModel))
 	app.ui.Print("\n")
+
+	// Build taskID → 1-based index for dep references in the display
+	taskNumByID := make(map[string]int, len(tasks))
+	for i, t := range tasks {
+		taskNumByID[t.ID] = i + 1
+	}
+
+	indentStyle := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#6c7086"))
+	depStyle    := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#fab387")) // soft orange for dep refs
+
 	for i, t := range tasks {
 		role := "Generic"
 		if r, ok := t.Inputs["role_hint"].(string); ok && r != "" {
 			role = r
 		}
 		model := roleModel(role)
-		app.ui.Info("   %d. [%s] %s  %s", i+1, role, t.Description, dimStyle.Render("("+model+")"))
+
+		if len(t.DependsOn) == 0 {
+			// Independent — can run in parallel with other no-dep tasks
+			app.ui.Info("   %d. [+] [%s] %s  %s", i+1, role, t.Description, dimStyle.Render("("+model+")"))
+		} else {
+			// Build human-readable dep list: "#2, #3"
+			depParts := make([]string, 0, len(t.DependsOn))
+			for _, depID := range t.DependsOn {
+				if n, ok := taskNumByID[depID]; ok {
+					depParts = append(depParts, fmt.Sprintf("#%d", n))
+				} else {
+					depParts = append(depParts, depID)
+				}
+			}
+			depLabel := depStyle.Render("needs " + strings.Join(depParts, ", "))
+			prefix   := indentStyle.Render("   ~>")
+			app.ui.Info("%s %d. [%s] %s  %s  %s", prefix, i+1, role, t.Description, dimStyle.Render("("+model+")"), depLabel)
+		}
 	}
 	app.ui.Print("\n")
 
@@ -1566,8 +1619,30 @@ Output format: start with [ and end with ]. No markdown. No explanation. No tool
 		}
 
 		eventCh := make(chan multiagent.Event, 50)
+		thinkCh := make(chan multiagent.Event, 200) // higher cap — tokens arrive fast
+		toolCh := make(chan multiagent.Event, 100)  // tool-call events
 		orch.Bus().Subscribe(multiagent.EventTaskStarted, eventCh)
 		orch.Bus().Subscribe(multiagent.EventTaskCompleted, eventCh)
+		orch.Bus().Subscribe(multiagent.EventWorkerThinking, thinkCh)
+		orch.Bus().Subscribe(multiagent.EventWorkerToolCall, toolCh)
+
+		// Forward thinking tokens to the viewport live block.
+		go func() {
+			for evt := range thinkCh {
+				if token, ok := evt.Payload["token"].(string); ok && token != "" {
+					btUI.UpdateWorkerBlock(evt.WorkerID, token)
+				}
+			}
+		}()
+
+		// Forward tool-call events to the viewport live block.
+		go func() {
+			for evt := range toolCh {
+				if toolName, ok := evt.Payload["tool_name"].(string); ok && toolName != "" {
+					btUI.UpdateWorkerBlockTool(evt.WorkerID, toolName)
+				}
+			}
+		}()
 
 		go func() {
 			for evt := range eventCh {
@@ -1596,17 +1671,49 @@ Output format: start with [ and end with ]. No markdown. No explanation. No tool
 				}
 				elapsedDur, _ := time.ParseDuration(elapsedStr)
 
-				btUI.UpdateWorkerStatus(ui.WorkerStatus{
-					WorkerID: evt.WorkerID,
-					Number:   num,
-					Role:     role,
-					Model:    roleModel(role),
-					Label:    label,
-					Done:     evt.Type == multiagent.EventTaskCompleted,
-					HasError: hasError,
-					Started:  time.Now(),
-					Elapsed:  elapsedDur,
-				})
+				if evt.Type == multiagent.EventTaskStarted {
+					// Create a live thinking block in the viewport
+					btUI.CreateWorkerBlock(ui.WorkerBlockInit{
+						WorkerID: evt.WorkerID,
+						Number:   num,
+						Role:     role,
+						Model:    roleModel(role),
+						Label:    label,
+					})
+					// Also update status bar
+					btUI.UpdateWorkerStatus(ui.WorkerStatus{
+						WorkerID: evt.WorkerID,
+						Number:   num,
+						Role:     role,
+						Model:    roleModel(role),
+						Label:    label,
+						Started:  time.Now(),
+					})
+				} else {
+					// Collapse the viewport block
+					btUI.CollapseWorkerBlock(ui.WorkerStatus{
+						WorkerID: evt.WorkerID,
+						Number:   num,
+						Role:     role,
+						Model:    roleModel(role),
+						Label:    label,
+						Done:     true,
+						HasError: hasError,
+						Elapsed:  elapsedDur,
+					})
+					// Also update status bar
+					btUI.UpdateWorkerStatus(ui.WorkerStatus{
+						WorkerID: evt.WorkerID,
+						Number:   num,
+						Role:     role,
+						Model:    roleModel(role),
+						Label:    label,
+						Done:     true,
+						HasError: hasError,
+						Started:  time.Now(),
+						Elapsed:  elapsedDur,
+					})
+				}
 			}
 		}()
 	}
@@ -1671,7 +1778,7 @@ Output format: start with [ and end with ]. No markdown. No explanation. No tool
 		}
 	}
 
-	app.ui.Info("🔀 Parallel execution complete: %d/%d succeeded  %s",
+	app.ui.Info("[>>] Parallel execution complete: %d/%d succeeded  %s",
 		successCount, len(results),
 		dimStyle.Render(fmt.Sprintf("· %s · model: %s", maxDuration.Round(time.Second), defaultModel)))
 	app.ui.ShowResponse(summary.String())
@@ -2694,78 +2801,8 @@ func (app *App) handleSkillCommand(parts []string) {
 	}
 }
 
-// registerTools registers all available tools
-func registerTools(registry tools.ToolRegistry, llmClient *llm.Client, cfg *config.Config, logger *logger.Logger, permissionMgr tools.ToolPermissionManager, todoMgr *tools.TodoManager, appUI ui.UI) {
-	// Unified File operation tool
-	registry.RegisterTool(tools.NewFileManageTool())
-	registry.RegisterTool(tools.NewFileUndoTool())
-	registry.RegisterTool(tools.NewGrepSearchTool())
-	registry.RegisterTool(tools.NewMultiReplaceTool())
-	registry.RegisterTool(tools.NewRepoMapGeneratorTool())
+// registerTools is defined in tool_setup.go
 
-	// Create analyzer factory and register analyzer tool
-	analyzerModel := cfg.LLM.Models.Fast
-	if analyzerModel == "" {
-		analyzerModel = cfg.LLM.Models.Default
-	}
-	analyzerFactory := tools.NewAnalyzerFactory(llmClient, cfg.LLM.Provider, analyzerModel, logger)
-
-	// Wrap the progress printFunc so it hides the spinner before writing and
-	// restores it afterwards, preventing interleaving with the thinking indicator.
-	analyzerPrint := func(format string, args ...interface{}) {
-		appUI.HideThinking()
-		fmt.Fprintf(os.Stderr, format, args...)
-		appUI.ShowThinking()
-	}
-
-	// Register the analyzer (formerly V2)
-	projectAnalyzer := analyzerFactory.CreateProjectScanAnalyzerWithPrint(analyzerPrint)
-	projectAnalyzer.SetStatusUpdater(func(status string) {
-		appUI.UpdateThinkingStatus(status)
-	})
-	registry.RegisterTool(projectAnalyzer)
-
-	// All tools are auto-approved (NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("fileManage", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("fileEdit", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("fileUndo", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("multiReplace", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("grepSearch", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("projectScanAnalyzer", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("repoMapGenerator", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("execute", tools.NeverAsk)
-
-	registry.RegisterTool(tools.NewExecuteTool(30))
-	registry.RegisterTool(tools.NewJobOutputTool())
-	registry.RegisterTool(tools.NewJobKillTool())
-	permissionMgr.SetDefaultPermissionLevel("jobOutput", tools.NeverAsk)
-	permissionMgr.SetDefaultPermissionLevel("jobKill", tools.NeverAsk)
-
-	// Todo management tools — manager is passed in from NewApp so the UI hook can access it
-	for _, tool := range tools.GetTodoTools(todoMgr) {
-		registry.RegisterTool(tool)
-	}
-
-	// Web search – embedded metasearch engine (DDG HTML + Wikipedia + optional Bing), no API key needed
-	msConfig := tools.MetasearchConfig{
-		EnableBing:     cfg.Metasearch.EnableBing,
-		TimeoutSeconds: cfg.Metasearch.TimeoutSeconds,
-		MaxResults:     cfg.Metasearch.MaxResults,
-		JitterMs:       cfg.Metasearch.JitterMs,
-	}
-	if msConfig.TimeoutSeconds <= 0 {
-		msConfig.TimeoutSeconds = 8
-	}
-	if msConfig.MaxResults <= 0 {
-		msConfig.MaxResults = 5
-	}
-	registry.RegisterTool(tools.NewWebSearchTool(msConfig))
-	permissionMgr.SetDefaultPermissionLevel("webSearch", tools.NeverAsk)
-
-	// Fetch URL – converts any webpage to clean markdown via Jina AI Reader (free, no key)
-	registry.RegisterTool(tools.NewFetchURLTool())
-	permissionMgr.SetDefaultPermissionLevel("fetchURL", tools.NeverAsk)
-}
 
 // sanitizeJSONNewlines replaces bare newlines inside JSON string values with
 // the escaped sequence \n. LLMs frequently produce multi-line descriptions

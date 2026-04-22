@@ -27,6 +27,22 @@ const (
 	MaxExplainLen  = 200
 )
 
+// CoreToolNames defines the tool names included in default-tier requests.
+// These are the essential tools for standard coding tasks. Everything else
+// (web search, project analyzer, sub-agent, todo, fetchURL) is heavy-tier only,
+// reducing tool schema overhead by ~1,500 tokens for the default model.
+var CoreToolNames = map[string]bool{
+	"fileManage":       true,
+	"fileUndo":         true,
+	"grepSearch":       true,
+	"multiReplace":     true,
+	"repoMapGenerator": true,
+	"execute":          true,
+	"listFiles":        true,
+	"jobOutput":        true,
+	"jobKill":          true,
+}
+
 // String returns a human-readable label for the tier.
 func (t RequestTier) String() string {
 	switch t {

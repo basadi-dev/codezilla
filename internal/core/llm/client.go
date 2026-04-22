@@ -497,6 +497,18 @@ func IsTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
+
+	// Check Go's net.Error interface for explicit timeout detection
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	// Check for context deadline exceeded (HTTP client timeout)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
 	msg := strings.ToLower(err.Error())
 	patterns := []string{
 		"internal server error",
@@ -509,6 +521,10 @@ func IsTransientError(err error) bool {
 		"eof",
 		"broken pipe",
 		"gateway timeout",
+		"connection refused",
+		"no such host",
+		"i/o timeout",
+		"client.timeout exceeded",
 	}
 	for _, p := range patterns {
 		if strings.Contains(msg, p) {

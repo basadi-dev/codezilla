@@ -55,7 +55,8 @@ func (m *MockAgent) FilterTools(predicate func(string) bool)  {}
 func (m *MockAgent) ContextStats() (msgCount int, currentTokens int, maxTokens int) {
 	return 0, 0, 0
 }
-func (m *MockAgent) Clone() agent.Agent                     { return &MockAgent{} }
+func (m *MockAgent) Clone() agent.Agent                          { return &MockAgent{} }
+func (m *MockAgent) SetOnToolPreparing(fn func(toolName string)) {} // stub
 
 func TestOrchestrator_ExecuteParallel(t *testing.T) {
 	mockAgent := &MockAgent{}

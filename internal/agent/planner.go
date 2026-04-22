@@ -78,7 +78,7 @@ Example format:
 
 	targetModel := a.GetModelForTier(TierHeavy)
 
-	completion, err := a.generateCompletion(ctx, targetModel, llmTools)
+	completion, err := a.generateCompletion(ctx, targetModel, llmTools, TierHeavy)
 	if err != nil {
 		return "", err
 	}

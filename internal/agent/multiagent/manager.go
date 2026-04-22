@@ -125,10 +125,13 @@ func (o *Orchestrator) ExecuteParallel(ctx context.Context, tasks []Task) ([]Res
 	completedOutputs := make(map[string]string, len(tasks))
 	var results []Result
 
-	// runningWorkers tracks goroutines that have been dispatched but haven't
-	// sent their result yet. It IS written from goroutines (via mu) and read
-	// in the main loop for deadlock detection.
+	// runningWorkers tracks goroutines that have acquired the semaphore and
+	// are actively calling the LLM. It IS written from goroutines (via mu).
 	var runningWorkers int
+	// pendingWorkers tracks goroutines that have been spawned but are still
+	// waiting to acquire the semaphore. Together with runningWorkers it gives
+	// the full count of in-flight goroutines for deadlock detection.
+	var pendingWorkers int
 	var mu sync.Mutex
 
 	// Use a ticker rather than time.After to avoid allocating a new timer
@@ -171,12 +174,17 @@ func (o *Orchestrator) ExecuteParallel(ctx context.Context, tasks []Task) ([]Res
 			taskChan <- t
 			close(taskChan)
 
+			mu.Lock()
+			pendingWorkers++
+			mu.Unlock()
+
 			wg.Add(1)
 			go func(w *ConcreteWorker, ch <-chan Task) {
 				defer wg.Done()
 				select {
 				case sem <- struct{}{}:
 					mu.Lock()
+					pendingWorkers-- // now running, no longer just pending
 					runningWorkers++
 					mu.Unlock()
 
@@ -187,6 +195,9 @@ func (o *Orchestrator) ExecuteParallel(ctx context.Context, tasks []Task) ([]Res
 						<-sem
 					}()
 				case <-ctx.Done():
+					mu.Lock()
+					pendingWorkers--
+					mu.Unlock()
 					return
 				}
 				w.Start(ctx, ch, resultChan)
@@ -210,11 +221,21 @@ func (o *Orchestrator) ExecuteParallel(ctx context.Context, tasks []Task) ([]Res
 			// Cycle detection already ran upfront, but this catches the
 			// edge case where a dependency references an ID that was validated
 			// but somehow never enqueued (shouldn't happen, but defensive).
+			//
+			// IMPORTANT: check both runningWorkers AND pendingWorkers. A goroutine
+			// that has been spawned but is still blocked on sem <- struct{}{}
+			// is NOT yet counted in runningWorkers, so checking only runningWorkers
+			// produces false positives when the concurrency limit is hit.
+			//
+			// Also check len(resultChan): a worker's defer decrements runningWorkers
+			// before the main loop processes the result. If results are buffered
+			// but not yet consumed, we are NOT stalled — children just haven't
+			// been enqueued yet.
 			mu.Lock()
-			active := runningWorkers
+			inflight := runningWorkers + pendingWorkers
 			mu.Unlock()
 
-			if active == 0 && pending > 0 && len(readyChan) == 0 {
+			if inflight == 0 && pending > 0 && len(readyChan) == 0 && len(resultChan) == 0 {
 				o.logger.Error("Unexpected stall in DAG execution", "pending_count", pending)
 				return results, fmt.Errorf("DAG execution stalled: %d tasks pending but no workers active and no tasks ready", pending)
 			}

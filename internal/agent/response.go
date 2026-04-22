@@ -53,8 +53,8 @@ func toolJSONSchemaToMap(schema tools.JSONSchema) map[string]any {
 	return m
 }
 
-func (a *agent) generateCompletion(ctx context.Context, modelOverride string, llmTools []anyllm.Tool) (*anyllm.ChatCompletion, error) {
-	systemPrompt := a.buildSystemPrompt()
+func (a *agent) generateCompletion(ctx context.Context, modelOverride string, llmTools []anyllm.Tool, tier RequestTier) (*anyllm.ChatCompletion, error) {
+	systemPrompt := a.buildSystemPromptForTier(tier)
 	rawMessages := a.buildChatMessages()
 
 	var chatMessages []anyllm.Message
@@ -106,22 +106,24 @@ func (a *agent) buildSystemPrompt() string {
 			systemParts = append(systemParts, msg.ContentString())
 		}
 	}
-	systemPrompt := strings.Join(systemParts, "\n\n")
+	// Tool descriptions are already injected via the {{tools}} placeholder in
+	// FormatSystemPrompt() AND sent as native JSON tool schemas. A third listing
+	// ("You have access to the following tools") is pure token waste (~800 tokens).
+	return strings.Join(systemParts, "\n\n")
+}
 
-	// We still append the prompt descriptions, but without the hardcoded XML XML/Bash rules if desired by Strategy.
-	// We'll keep the basic description for backward compatibility logic inside the prompt.go strategy.
-	if a.toolRegistry != nil && len(a.toolRegistry.ListTools()) > 0 {
-		if !strings.Contains(systemPrompt, "You have access to the following tools") {
-			var sb strings.Builder
-			sb.WriteString("You have access to the following tools:\n\n")
-			for _, tool := range a.toolRegistry.ListTools() {
-				sb.WriteString(fmt.Sprintf("- **%s**: %s\n", tool.Name(), tool.Description()))
-			}
-			systemPrompt = systemPrompt + "\n\n" + sb.String()
-		}
+// buildSystemPromptForTier returns a tier-appropriate system prompt.
+//   - Fast tier: minimal 2-line prompt (no XML rules, no planning, no tool priorities)
+//   - Default/Heavy: full system prompt with all instructions
+//
+// This dramatically reduces prompt token overhead for simple Q&A that gets
+// routed to lightweight models.
+func (a *agent) buildSystemPromptForTier(tier RequestTier) string {
+	if tier == TierFast {
+		return "You are Codezilla, a helpful AI coding assistant. " +
+			"Answer concisely and directly. Use markdown formatting."
 	}
-
-	return systemPrompt
+	return a.buildSystemPrompt()
 }
 
 func (a *agent) buildChatMessages() []anyllm.Message {

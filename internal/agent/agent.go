@@ -43,6 +43,9 @@ type Agent interface {
 	Clone() Agent
 	ClearTools() // strips all tools from this agent so it does plain LLM completions
 	FilterTools(predicate func(string) bool)
+	// SetOnToolPreparing registers a callback invoked just before each tool call executes.
+	// Useful for parallel workers that need to publish tool-use events to a shared bus.
+	SetOnToolPreparing(fn func(toolName string))
 }
 
 type Config struct {
@@ -102,6 +105,13 @@ type Config struct {
 	OnVerifyFailed func(errors []string, retryNum int)
 	// OnVerifyPassed is called when post-edit verification succeeds.
 	OnVerifyPassed func()
+	// OnLLMError is called when an LLM request fails — both for recoverable errors
+	// (before retry) and unrecoverable ones. The UI can use this to show the user
+	// what's happening instead of leaving the spinner running silently.
+	//   model   – the model that failed
+	//   err     – the error
+	//   willRetry – true if the orchestrator will retry, false if fatal
+	OnLLMError func(model string, err error, willRetry bool)
 }
 
 func DefaultConfig() *Config {
@@ -404,4 +414,8 @@ func (a *agent) ClearTools() {
 
 func (a *agent) FilterTools(predicate func(string) bool) {
 	a.toolRegistry.FilterTools(predicate)
+}
+
+func (a *agent) SetOnToolPreparing(fn func(toolName string)) {
+	a.config.OnToolPreparing = fn
 }
