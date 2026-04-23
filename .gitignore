@@ -8,17 +8,10 @@ build/
 bin/
 /codezilla
 
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool
-*.out
-
-# Dependency directories
-vendor/
-
-# Go workspace file
-go.work
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
 
 # Log files
 logs/*.log
@@ -39,3 +32,4 @@ Thumbs.db
 
 # Environment variables and local configs
 .env
+.codezilla/
