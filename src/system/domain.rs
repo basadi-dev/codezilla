@@ -172,7 +172,7 @@ pub struct TokenUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ModelSettings {
     pub model_id: ModelId,
     pub provider_id: ProviderId,

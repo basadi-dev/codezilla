@@ -123,6 +123,7 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     Text(String),
+    Thinking(String),
     ToolCallDelta {
         index: usize,
         id: Option<String>,
@@ -140,6 +141,7 @@ pub trait LlmClient: Send + Sync {
     /// Non-streaming completion.
     async fn complete(
         &self,
+        provider_id: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
         model: &str,
@@ -151,6 +153,7 @@ pub trait LlmClient: Send + Sync {
     /// Streaming completion — returns a channel of `StreamChunk`s.
     async fn stream(
         &self,
+        provider_id: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
         model: &str,

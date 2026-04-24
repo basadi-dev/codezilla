@@ -6,30 +6,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+// ── LLM connection config (API keys, provider URLs) ───────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LlmConfig {
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    #[serde(default)]
-    pub models: LlmModelsConfig,
     #[serde(default)]
     pub api_keys: LlmApiKeysConfig,
     #[serde(default)]
     pub ollama: OllamaConfig,
     #[serde(default)]
     pub openai: OpenAiConfig,
-    #[serde(default)]
-    pub context_lengths: HashMap<String, usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LlmModelsConfig {
-    #[serde(default = "default_model")]
-    pub default: String,
-    #[serde(default)]
-    pub fast: Option<String>,
-    #[serde(default)]
-    pub heavy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -64,21 +50,19 @@ pub struct OpenAiConfig {
     pub base_url: Option<String>,
 }
 
-fn default_provider() -> String {
-    "ollama".into()
-}
-fn default_model() -> String {
-    "qwen3-coder:480b".into()
-}
 fn default_ollama_url() -> String {
     "http://localhost:11434".into()
 }
+
+// ── Domain imports ────────────────────────────────────────────────────────────
 
 use super::domain::{
     now_seconds, AccountSession, ApprovalPolicy, ApprovalsReviewerKind, AuthMode,
     ConversationPathSet, FeatureKey, McpServerConfig, ModelSettings, PathString, PermissionProfile,
     SandboxMode,
 };
+
+// ── Process context ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ProcessContext {
@@ -92,7 +76,7 @@ pub struct ProcessContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct ConfigResolutionInput {
     pub process_context: SerializableProcessContext,
     pub profile_name: Option<String>,
@@ -103,53 +87,7 @@ pub struct ConfigResolutionInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EffectiveConfig {
-    pub app_home: PathString,
-    pub sqlite_home: PathString,
-    pub model_settings: ModelSettings,
-    pub approval_policy: ApprovalPolicy,
-    pub approvals_reviewer: ApprovalsReviewerKind,
-    pub permission_profile: PermissionProfile,
-    #[serde(default)]
-    pub add_dirs: Vec<PathString>,
-    #[serde(default = "default_true")]
-    pub notifications_enabled: bool,
-    #[serde(default)]
-    pub mcp_servers: Vec<McpServerConfig>,
-    #[serde(default = "default_true")]
-    pub plugins_enabled: bool,
-    #[serde(default = "default_true")]
-    pub apps_enabled: bool,
-    #[serde(default)]
-    pub features: HashMap<FeatureKey, bool>,
-    #[serde(default)]
-    pub trusted_projects: Vec<PathString>,
-    /// Working directory resolved at startup (from process context cwd).
-    pub working_directory: PathString,
-    /// System prompt loaded from config.yaml.
-    pub system_prompt: String,
-    /// LLM connection and model config (merged from config.yaml llm block).
-    #[serde(default)]
-    pub llm: LlmConfig,
-    /// Log level (e.g. "info", "debug").
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-    /// Log file path.
-    #[serde(default = "default_log_file")]
-    pub log_file: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct ConfigEdit {
-    pub path: String,
-    pub value: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct SerializableProcessContext {
     pub argv: Vec<String>,
     pub env: HashMap<String, String>,
@@ -174,8 +112,55 @@ impl From<&ProcessContext> for SerializableProcessContext {
     }
 }
 
+// ── Effective config (resolved, ready to use) ─────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EffectiveConfig {
+    pub app_home: PathString,
+    pub sqlite_home: PathString,
+    pub model_settings: ModelSettings,
+    pub approval_policy: ApprovalPolicy,
+    pub approvals_reviewer: ApprovalsReviewerKind,
+    pub permission_profile: PermissionProfile,
+    #[serde(default)]
+    pub add_dirs: Vec<PathString>,
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+    #[serde(default = "default_true")]
+    pub plugins_enabled: bool,
+    #[serde(default = "default_true")]
+    pub apps_enabled: bool,
+    #[serde(default)]
+    pub features: HashMap<FeatureKey, bool>,
+    #[serde(default)]
+    pub trusted_projects: Vec<PathString>,
+    pub working_directory: PathString,
+    pub system_prompt: String,
+    pub llm: LlmConfig,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
+    /// User-defined model presets shown in the /model autocomplete list.
+    #[serde(default)]
+    pub models: Vec<ModelSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub struct ConfigEdit {
+    pub path: String,
+    pub value: Value,
+}
+
+// ── Raw spec config (parsed from config file) ─────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct RawSpecConfig {
     pub app_home: Option<String>,
     pub model_settings: Option<ModelSettings>,
@@ -196,10 +181,20 @@ struct RawSpecConfig {
     #[serde(default)]
     pub profiles: HashMap<String, RawSpecProfile>,
     pub managed: Option<ManagedRequirements>,
+    #[serde(default)]
+    pub llm: LlmConfig,
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
+    #[serde(default)]
+    pub models: Vec<ModelSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct RawSpecProfile {
     pub model_settings: Option<ModelSettings>,
     pub approval_policy: Option<ApprovalPolicy>,
@@ -215,11 +210,13 @@ struct RawSpecProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct ManagedRequirements {
     #[serde(default)]
     pub immutable_paths: Vec<String>,
 }
+
+// ── Config manager ────────────────────────────────────────────────────────────
 
 pub struct ConfigManager {
     config_path: PathBuf,
@@ -271,20 +268,14 @@ impl ConfigManager {
             .join("state")
             .to_string_lossy()
             .to_string();
-        let mut legacy = load_or_default_legacy_config(&self.config_path)?;
-        if let Some(model_settings) = raw.model_settings.clone() {
-            legacy.llm.provider = model_settings.provider_id.clone();
-            legacy.llm.models.default = model_settings.model_id.clone();
-            legacy.reasoning_effort = model_settings.reasoning_effort.clone();
-        }
-        legacy.working_directory = input.process_context.cwd.clone();
+
+        let mut llm = raw.llm;
+        apply_env_overrides(&mut llm);
 
         let effective = EffectiveConfig {
             app_home,
             sqlite_home,
-            model_settings: raw.model_settings.unwrap_or_else(|| {
-                model_settings_from_legacy_llm(&legacy.llm, &legacy.reasoning_effort)
-            }),
+            model_settings: raw.model_settings.unwrap_or_default(),
             approval_policy: raw.approval_policy.unwrap_or_default(),
             approvals_reviewer: raw
                 .approvals_reviewer
@@ -300,10 +291,11 @@ impl ConfigManager {
             features: raw.features,
             trusted_projects: raw.trusted_projects,
             working_directory: input.process_context.cwd.clone(),
-            system_prompt: legacy.system_prompt.clone(),
-            llm: legacy.llm.clone(),
-            log_level: legacy.log_level.clone(),
-            log_file: legacy.log_file.clone(),
+            system_prompt: raw.system_prompt,
+            llm,
+            log_level: raw.log_level,
+            log_file: raw.log_file,
+            models: raw.models,
         };
 
         *self.cached_effective_config.write().unwrap() = Some(effective.clone());
@@ -382,6 +374,8 @@ impl ConfigManager {
         })
     }
 }
+
+// ── Auth manager ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -492,6 +486,8 @@ impl AuthManager {
     }
 }
 
+// ── Path resolution ───────────────────────────────────────────────────────────
+
 pub fn resolve_paths(
     app_home_override: Option<PathBuf>,
     config_path: PathBuf,
@@ -524,22 +520,29 @@ fn default_app_home() -> PathBuf {
     }
 }
 
+// ── Defaults ──────────────────────────────────────────────────────────────────
+
 fn default_spec_config_json() -> Value {
     json!({
-        "approvalPolicy": { "kind": "ON_REQUEST" },
-        "approvalsReviewer": "USER",
-        "permissionProfile": {
+        "model_settings": {
+            "model_id": "qwen3-coder:480b",
+            "provider_id": "ollama",
+            "web_search_enabled": false
+        },
+        "approval_policy": { "kind": "ON_REQUEST" },
+        "approvals_reviewer": "USER",
+        "permission_profile": {
             "sandboxMode": "workspace-write",
             "writableRoots": [],
             "networkEnabled": false,
             "allowedDomains": [],
             "allowedUnixSockets": []
         },
-        "notificationsEnabled": true,
-        "pluginsEnabled": true,
-        "appsEnabled": true,
+        "notifications_enabled": true,
+        "plugins_enabled": true,
+        "apps_enabled": true,
         "features": {},
-        "trustedProjects": []
+        "trusted_projects": []
     })
 }
 
@@ -560,96 +563,63 @@ fn default_permission_profile(cwd: &str) -> PermissionProfile {
 fn default_log_level() -> String {
     "info".into()
 }
+
 fn default_log_file() -> String {
     "logs/codezilla.log".into()
 }
 
-fn model_settings_from_legacy_llm(
-    llm: &LlmConfig,
-    reasoning_effort: &Option<String>,
-) -> ModelSettings {
-    ModelSettings {
-        model_id: llm.models.default.clone(),
-        provider_id: llm.provider.clone(),
-        reasoning_effort: reasoning_effort.clone(),
-        summary_mode: None,
-        service_tier: None,
-        web_search_enabled: false,
-    }
-}
+// ── Environment variable overrides ────────────────────────────────────────────
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct LegacyConfig {
-    #[serde(default)]
-    pub llm: LlmConfig,
-    #[serde(default)]
-    pub reasoning_effort: Option<String>,
-    #[serde(default)]
-    pub system_prompt: String,
-    #[serde(default = "default_log_file")]
-    pub log_file: String,
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-    #[serde(default)]
-    pub working_directory: String,
-}
-
-fn load_or_default_legacy_config(path: &Path) -> Result<LegacyConfig> {
-    if !path.exists() {
-        return Ok(LegacyConfig::default());
-    }
-    let data = std::fs::read_to_string(path)?;
-    let mut c: LegacyConfig = serde_yaml::from_str(&data).unwrap_or_default();
-
-    // Apply environment variable overrides for LLM
+fn apply_env_overrides(llm: &mut LlmConfig) {
     let _ = dotenvy::dotenv();
+
     if let Ok(v) = std::env::var("OLLAMA_API_KEY") {
         if !v.is_empty() {
-            c.llm.api_keys.ollama = v;
-            if c.llm.ollama.auth_type.is_none() {
-                c.llm.ollama.auth_type = Some("bearer".into());
+            llm.api_keys.ollama = v;
+            if llm.ollama.auth_type.is_none() {
+                llm.ollama.auth_type = Some("bearer".into());
             }
         }
     }
     if let Ok(v) = std::env::var("OLLAMA_USERNAME") {
         if !v.is_empty() {
-            c.llm.ollama.username = Some(v);
-            c.llm.ollama.auth_type = Some("basic".into());
+            llm.ollama.username = Some(v);
+            llm.ollama.auth_type = Some("basic".into());
         }
     }
     if let Ok(v) = std::env::var("OLLAMA_PASSWORD") {
         if !v.is_empty() {
-            c.llm.ollama.password = Some(v);
+            llm.ollama.password = Some(v);
         }
     }
     if let Ok(v) = std::env::var("OLLAMA_BASE_URL") {
         if !v.is_empty() {
-            c.llm.ollama.base_url = v;
+            llm.ollama.base_url = v;
         }
     }
     if let Ok(v) = std::env::var("OPENAI_BASE_URL") {
         if !v.is_empty() {
-            c.llm.openai.base_url = Some(v);
+            llm.openai.base_url = Some(v);
         }
     }
     if let Ok(v) = std::env::var("OPENAI_API_KEY") {
         if !v.is_empty() {
-            c.llm.api_keys.openai = v;
+            llm.api_keys.openai = v;
         }
     }
     if let Ok(v) = std::env::var("ANTHROPIC_API_KEY") {
         if !v.is_empty() {
-            c.llm.api_keys.anthropic = v;
+            llm.api_keys.anthropic = v;
         }
     }
     if let Ok(v) = std::env::var("GEMINI_API_KEY") {
         if !v.is_empty() {
-            c.llm.api_keys.gemini = v;
+            llm.api_keys.gemini = v;
         }
     }
-
-    Ok(c)
 }
+
+// ── Config helpers ────────────────────────────────────────────────────────────
 
 fn immutable_paths(value: &Value) -> Vec<String> {
     value

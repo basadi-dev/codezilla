@@ -1,139 +1,60 @@
-# Codezilla Configuration Example
-# By default, Codezilla looks for this config at ~/.config/codezilla/config.yaml
-# You can override it by using the -config flag: `codezilla -config ./config.yaml`
+# Codezilla Configuration
+# Loaded from ./config.yaml (project root) or ~/.config/codezilla/config.yaml
+# Override location: codezilla -config /path/to/config.yaml
 
-# LLM Provider Configuration
+# Model selection
+model_settings:
+  model_id: "glm-5.1:cloud"
+  provider_id: "ollama"
+  # reasoning_effort: "medium"   # low | medium | high  (Anthropic / OpenAI o-series only)
+
+# Model presets shown in the /model autocomplete list.
+# Format: model_id + provider_id required; reasoning_effort optional.
+models:
+  - model_id: "glm-5.1:cloud"
+    provider_id: "ollama"
+  - model_id: "qwen3-coder:480b"
+    provider_id: "ollama"
+  - model_id: "kimi-k2.6:cloud"
+    provider_id: "ollama"
+  - model_id: "deepseek-v4-flash:cloud"
+    provider_id: "ollama"
+  - model_id: "claude-opus-4-5"
+    provider_id: "anthropic"
+    reasoning_effort: "medium"
+
+# LLM connection settings (API keys, provider URLs)
+# API keys can also be set via environment variables:
+#   OLLAMA_API_KEY, OLLAMA_BASE_URL, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY
 llm:
-  # Provider: ollama (default), openai, anthropic, gemini
-  provider: "ollama"
-
-  models:
-    # Default model — your main workhorse for coding tasks, tool use, and general conversation.
-    # Pick the most capable model you can afford. This handles everything the router doesn't fast-path.
-    default: "glm-5.1:cloud"
-
-    # Fast model — a small, cheap model for trivial exchanges (greetings, "yes/no", "what is X?").
-    # The auto-router sends simple inputs here to save tokens and latency.
-    # Pick a lightweight model with good instruction-following. Leave blank to disable fast-routing.
-    fast: "ministral-3:8b-cloud"
-
-    # Heavy model — the most powerful model for complex multi-step tasks (refactors, migrations, architecture).
-    # The auto-router sends clearly complex inputs here. Falls back to default if unset.
-    heavy: "kimi-k2.6:cloud"
-
-  # Ollama-specific settings
   ollama:
     base_url: "https://ollama.com"
-    auth_type: "bearer"  # bearer, basic, or custom
-
-  # OpenAI-specific settings (also used for OpenAI-compatible APIs)
+    auth_type: "bearer"   # bearer | basic
+    # username: ""
+    # password: ""
   # openai:
   #   base_url: "https://api.openai.com/v1"
-
-  # API keys can also be set via environment variables:
-  #   OLLAMA_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY
   # api_keys:
   #   ollama: ""
   #   openai: ""
   #   anthropic: ""
   #   gemini: ""
 
-  # Model context window sizes (in tokens).
-  # For Ollama models, this is auto-detected via /api/show.
-  # Use this to override or specify context windows for any provider.
-  # Prefix matching is supported: "gpt-4o" matches "gpt-4o-mini", "gpt-4o-2024-05-13", etc.
-  context_lengths:
-    # Ollama Cloud models
-    gpt-oss:120b: 128000
-    glm-5.1: 198000
-    qwen3-coder:480b: 262144
-    deepseek-v3.2: 128000
-    # Ollama Local models
-    devstral-small-2:24b: 128000
-    qwen3-coder-next: 262144
-    ministral-3:14b: 256000
-    gemma3:12b: 128000
-    # OpenAI models
-    gpt-4o: 128000
-    gpt-4-turbo: 128000
-    gpt-4: 8192
-    gpt-3.5-turbo: 4096
-    o3: 200000
-    o4: 200000
-    # Anthropic models
-    claude-3: 200000
-    claude-4: 200000
-    # Google models
-    gemini-2: 1000000
-    gemini-3: 1000000
-
-# Embedded metasearch engine — no API keys required.
-# Queries DuckDuckGo HTML + Wikipedia concurrently. Bing is opt-in.
-metasearch:
-  enable_bing: false        # Enable Bing HTML scraping (more fragile, off by default)
-  timeout_seconds: 8        # Per-backend timeout
-  max_results: 5            # Default number of results to return
-  jitter_ms: 0              # Random request delay in ms, helps avoid rate limits (0 = off)
-
-temperature: 0.7
-max_tokens: 32768
 system_prompt: |
   You are Codezilla, a helpful AI coding assistant. You have access to various tools that allow you to interact with the local system, read and write files, execute commands, and more.
 
-  When the user refers to "the project", "this project", "search", or uses relative paths, assume they mean the current working directory and its contents. Always strive to be helpful, accurate, and safe in your responses.
+  When the user refers to "the project", "this project", or uses relative paths, assume they mean the current working directory and its contents. Always strive to be helpful, accurate, and safe in your responses.
 
   IMPORTANT RULES FOR TOOL USAGE:
-  1. When the user asks to see, show, display, read, or print a file, you MUST use the fileRead tool with the appropriate file_path parameter. DO NOT say you cannot read files.
+  1. When the user asks to see, show, display, read, or print a file, use the fileRead tool.
   2. When the user asks to list files, explore, or scan the project, use the listFiles tool.
   3. When the user asks to run a command, use the execute tool.
   4. When the user asks to write or create a file, use the fileWrite tool.
-  5. When the user asks about current events, needs up-to-date documentation, or asks you to look something up on the web, use the webSearch tool.
+  5. When the user asks about current events or needs up-to-date info, use the webSearch tool.
   6. For complex multi-step tasks, explain your plan step-by-step before executing.
-  7. Always show what tool you are using and why.
-  8. Always reply in markdown format.
-  9. Be concise, accurate, and helpful.
-  10. DO NOT make up file contents or command outputs — always use the appropriate tool to get real data.
+  7. Always reply in markdown format.
+  8. Be concise, accurate, and helpful.
+  9. DO NOT make up file contents or command outputs — always use the appropriate tool.
 
-# Logging outputs
-log_file: "logs/codezilla.log"
 log_level: "debug"
-log_silent: false
-
-retain_context: true
-max_context_chars: 50000
-session_events_dir: "logs/sessions"
-
-# Sliding window: number of recent messages to keep verbatim.
-# Older messages are summarised by the summariser model and evicted to save context.
-# Higher = more memory but larger context usage. 0 = disable (use hard drop).
-sliding_window_size: 20
-
-# Auto-planning: automatically create a todo plan for complex multi-step requests
-auto_plan: true
-
-# Intelligent model routing: auto-selects fast/default model per request based on complexity.
-# Requires a fast model to be configured above. Disable with: /router off
-auto_route: true
-
-# Loop detection: stops the agent if the same tool is called with identical args
-# consecutively more than loop_detect_max_repeat times.
-# 0 = use defaults (window: 10, max_repeat: 3)
-loop_detect_window: 10       # sliding history length to examine
-loop_detect_max_repeat: 3    # consecutive identical calls before kill
-
-# Safety Configuration
-dangerous_tools_warn: true
-always_ask_permission: false
-tool_permissions: {}
-
-# Appearance
-force_color: false
-no_color: false
-disable_mouse: false
-
-analyzer_settings:
-    use_llm: true
-    concurrency: 5
-    relevance_threshold: 0.3
-    analysis_timeout: 30
-    max_file_size: 1048576
+log_file: "logs/codezilla.log"

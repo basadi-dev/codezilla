@@ -83,18 +83,26 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
             app.transcript_scroll = 0;
         }
 
-        // Tab / Shift+Tab cycles between Transcript (scroll mode) and Composer (type mode)
+        // Tab / Shift+Tab: autocomplete when suggestions are live, else switch pane
         (KeyCode::Tab, _) => {
-            app.focus = match app.focus {
-                FocusPane::Composer => FocusPane::Transcript,
-                _ => FocusPane::Composer,
-            };
+            if !app.autocomplete_suggestions.is_empty() {
+                app.autocomplete_select_next();
+            } else {
+                app.focus = match app.focus {
+                    FocusPane::Composer => FocusPane::Transcript,
+                    _ => FocusPane::Composer,
+                };
+            }
         }
         (KeyCode::BackTab, _) => {
-            app.focus = match app.focus {
-                FocusPane::Transcript => FocusPane::Composer,
-                _ => FocusPane::Transcript,
-            };
+            if !app.autocomplete_suggestions.is_empty() {
+                app.autocomplete_select_prev();
+            } else {
+                app.focus = match app.focus {
+                    FocusPane::Transcript => FocusPane::Composer,
+                    _ => FocusPane::Transcript,
+                };
+            }
         }
 
         _ => match app.focus {
@@ -146,6 +154,8 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         }
         (KeyCode::Enter, _) => {
             app.jump_transcript_to_bottom();
+            app.autocomplete_suggestions.clear();
+            app.autocomplete_selected = 0;
             app.submit_composer().await?
         }
 
@@ -180,18 +190,22 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         {
             app.jump_transcript_to_bottom();
             app.composer.insert_char(ch);
+            app.update_autocomplete();
         }
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
             app.jump_transcript_to_bottom();
             app.composer.delete_to_line_start();
+            app.update_autocomplete();
         }
         (KeyCode::Backspace, _) => {
             app.jump_transcript_to_bottom();
             app.composer.backspace();
+            app.update_autocomplete();
         }
         (KeyCode::Delete, _) => {
             app.jump_transcript_to_bottom();
             app.composer.delete();
+            app.update_autocomplete();
         }
         // Ctrl+Left / Ctrl+Right or Alt+Left / Alt+Right  →  word jump
         // (covers terminals that send Alt+Arrow directly rather than Esc+b/f)
@@ -212,16 +226,24 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
             app.composer.move_right();
         }
         (KeyCode::Up, _) => {
-            app.jump_transcript_to_bottom();
-            let (first_width, continuation_width) = app.composer_wrap_widths();
-            app.composer
-                .move_visual_up(first_width.max(1), continuation_width.max(1));
+            if !app.autocomplete_suggestions.is_empty() {
+                app.autocomplete_select_prev();
+            } else {
+                app.jump_transcript_to_bottom();
+                let (first_width, continuation_width) = app.composer_wrap_widths();
+                app.composer
+                    .move_visual_up(first_width.max(1), continuation_width.max(1));
+            }
         }
         (KeyCode::Down, _) => {
-            app.jump_transcript_to_bottom();
-            let (first_width, continuation_width) = app.composer_wrap_widths();
-            app.composer
-                .move_visual_down(first_width.max(1), continuation_width.max(1));
+            if !app.autocomplete_suggestions.is_empty() {
+                app.autocomplete_select_next();
+            } else {
+                app.jump_transcript_to_bottom();
+                let (first_width, continuation_width) = app.composer_wrap_widths();
+                app.composer
+                    .move_visual_down(first_width.max(1), continuation_width.max(1));
+            }
         }
         (KeyCode::Home, _) => {
             app.jump_transcript_to_bottom();
@@ -232,6 +254,8 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
             app.composer.move_end();
         }
         (KeyCode::Esc, _) => {
+            app.autocomplete_suggestions.clear();
+            app.autocomplete_selected = 0;
             if !app.composer.is_empty() {
                 app.jump_transcript_to_bottom();
                 app.composer = super::types::ComposerState::default();

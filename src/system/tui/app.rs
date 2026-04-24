@@ -19,8 +19,8 @@ use super::super::runtime::{
 };
 use super::types::{
     entry_from_item, entry_style, format_timestamp, format_tool_result, short_turn_id,
-    split_at_width, thread_label, transcript_lines, ComposerState, EntryKind, FocusPane,
-    PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
+    split_at_width, thread_label, transcript_lines, AutocompleteItem, ComposerState, EntryKind,
+    FocusPane, PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
     COLOR_MUTED, THREAD_LIMIT,
 };
 
@@ -76,6 +76,14 @@ pub struct InteractiveApp {
     /// Composer input area rect — written by the renderer each frame.
     pub composer_area: Rect,
     transcript_render_cache: TranscriptRenderCache,
+    /// Slash-command autocomplete suggestions for the current composer text.
+    pub autocomplete_suggestions: Vec<AutocompleteItem>,
+    /// Index into `autocomplete_suggestions` of the highlighted entry.
+    pub autocomplete_selected: usize,
+    /// First visible row in the autocomplete list (scroll offset).
+    pub autocomplete_scroll: usize,
+    /// Per-session model/reasoning override (None = use thread metadata + config defaults).
+    pub model_settings_override: Option<super::super::domain::ModelSettings>,
 }
 
 impl InteractiveApp {
@@ -111,6 +119,10 @@ impl InteractiveApp {
                 dirty: true,
                 ..TranscriptRenderCache::default()
             },
+            autocomplete_suggestions: Vec::new(),
+            autocomplete_selected: 0,
+            autocomplete_scroll: 0,
+            model_settings_override: None,
         };
         app.refresh_threads().await?;
         let current = app.current_thread_id.clone();
@@ -415,6 +427,10 @@ impl InteractiveApp {
         if self.try_handle_slash_command(raw.trim()).await? {
             return Ok(());
         }
+        if let Some(cmd) = raw.trim().strip_prefix('!') {
+            self.run_shell_command(cmd.trim()).await?;
+            return Ok(());
+        }
 
         if self.pending_approval.is_some() {
             self.error_message =
@@ -440,7 +456,7 @@ impl InteractiveApp {
                         thread_id: self.current_thread_id.clone(),
                         input: vec![UserInput::from_text(raw)],
                         cwd: None,
-                        model_settings: None,
+                        model_settings: self.model_settings_override.clone(),
                         approval_policy: self.current_approval_policy_override(),
                         permission_profile: None,
                         output_schema: None,
@@ -496,8 +512,52 @@ impl InteractiveApp {
         } else if let Some(rest) = command.strip_prefix("/resume ") {
             self.load_thread(rest.trim()).await?;
             true
+        } else if matches!(command, "/model") {
+            let ms = self.effective_model_settings();
+            let reasoning = ms.reasoning_effort.as_deref().unwrap_or("off");
+            self.status_message = format!(
+                "Model: {}/{} · reasoning: {reasoning}",
+                ms.provider_id, ms.model_id
+            );
+            self.error_message = None;
+            true
+        } else if let Some(rest) = command.strip_prefix("/model ") {
+            let rest = rest.trim();
+            let mut ms = self.effective_model_settings();
+            if let Some((provider, model)) = rest.split_once('/') {
+                ms.provider_id = provider.trim().to_string();
+                ms.model_id = model.trim().to_string();
+            } else {
+                ms.model_id = rest.to_string();
+            }
+            self.status_message = format!("Model set to {}/{}", ms.provider_id, ms.model_id);
+            self.error_message = None;
+            self.model_settings_override = Some(ms);
+            true
+        } else if matches!(command, "/reasoning") {
+            let effort = self.effective_model_settings()
+                .reasoning_effort
+                .as_deref()
+                .unwrap_or("off")
+                .to_string();
+            self.status_message = format!("Reasoning: {effort}");
+            self.error_message = None;
+            true
+        } else if let Some(rest) = command.strip_prefix("/reasoning ") {
+            let rest = rest.trim();
+            let mut ms = self.effective_model_settings();
+            ms.reasoning_effort = if rest == "off" { None } else { Some(rest.to_string()) };
+            let label = ms.reasoning_effort.as_deref().unwrap_or("off");
+            self.status_message = format!("Reasoning set to {label}");
+            self.error_message = None;
+            self.model_settings_override = Some(ms);
+            true
         } else if matches!(command, "/help") {
-            self.status_message = "Keys: Tab switch pane, Ctrl+A approvals, Ctrl+N new, Ctrl+F fork, Ctrl+C interrupt, Ctrl+Q quit. Commands: /approve auto|ask|toggle".into();
+            self.status_message =
+                "Keys: Tab/↑↓ autocomplete, Ctrl+A approvals, Ctrl+N new, Ctrl+F fork, \
+                 Ctrl+C interrupt, Ctrl+Q quit  ·  \
+                 Commands: /model [provider/model]  /reasoning [low|medium|high|off]  \
+                 /approve auto|ask|toggle  /new  /fork  /open <id>".into();
             self.error_message = None;
             true
         } else {
@@ -506,6 +566,184 @@ impl InteractiveApp {
         };
 
         Ok(handled)
+    }
+
+    async fn run_shell_command(&mut self, cmd: &str) -> Result<()> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let id_base = format!("shell-{ts}");
+
+        self.push_status_entry(
+            format!("{id_base}-cmd"),
+            EntryKind::User,
+            "Shell",
+            &format!("$ {cmd}"),
+            Some(ts as i64),
+        );
+
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .await;
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let mut body = String::new();
+                if !stdout.is_empty() {
+                    body.push_str(stdout.trim_end());
+                }
+                if !stderr.is_empty() {
+                    if !body.is_empty() {
+                        body.push('\n');
+                    }
+                    body.push_str(stderr.trim_end());
+                }
+                if body.is_empty() {
+                    body = format!("(exit {})", out.status.code().unwrap_or(-1));
+                } else if !out.status.success() {
+                    body.push_str(&format!("\n(exit {})", out.status.code().unwrap_or(-1)));
+                }
+                let kind = if out.status.success() {
+                    EntryKind::ToolResult
+                } else {
+                    EntryKind::Error
+                };
+                self.push_status_entry(
+                    format!("{id_base}-out"),
+                    kind,
+                    "Output",
+                    &body,
+                    Some(ts as i64),
+                );
+            }
+            Err(e) => {
+                self.push_status_entry(
+                    format!("{id_base}-out"),
+                    EntryKind::Error,
+                    "Shell error",
+                    &e.to_string(),
+                    Some(ts as i64),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the model settings that will be used for the next turn:
+    /// the session override if set, otherwise a snapshot from thread metadata + config defaults.
+    pub fn effective_model_settings(&self) -> super::super::domain::ModelSettings {
+        if let Some(ref ms) = self.model_settings_override {
+            return ms.clone();
+        }
+        let cfg = self.runtime.effective_config();
+        let (model_id, provider_id) = self
+            .current_thread_meta
+            .as_ref()
+            .map(|m| (m.model_id.clone(), m.provider_id.clone()))
+            .unwrap_or_else(|| {
+                (cfg.model_settings.model_id.clone(), cfg.model_settings.provider_id.clone())
+            });
+        super::super::domain::ModelSettings {
+            model_id,
+            provider_id,
+            reasoning_effort: cfg.model_settings.reasoning_effort.clone(),
+            summary_mode: None,
+            service_tier: None,
+            web_search_enabled: false,
+        }
+    }
+
+    pub fn update_autocomplete(&mut self) {
+        let text = self.composer.trimmed_text();
+        if !text.starts_with('/') {
+            self.autocomplete_suggestions.clear();
+            self.autocomplete_selected = 0;
+            self.autocomplete_scroll = 0;
+            return;
+        }
+
+        let ms = self.effective_model_settings();
+        let cur_reasoning = ms.reasoning_effort.as_deref().unwrap_or("off");
+        let cur_model_key = format!("{}/{}", ms.provider_id, ms.model_id);
+        let cfg_models = self.runtime.effective_config().models.clone();
+
+        let mut all: Vec<AutocompleteItem> = Vec::new();
+
+        // ── static commands ───────────────────────────────────────────────────
+        for cmd in &[
+            "/approve ask", "/approve auto", "/approve manual", "/approve toggle",
+            "/approve", "/approvals", "/exit", "/fork", "/help", "/interrupt",
+            "/new", "/open ", "/quit", "/reload", "/resume ", "/threads",
+        ] {
+            all.push(AutocompleteItem::simple(*cmd));
+        }
+
+        // ── /model: current entry + presets from config ───────────────────────
+        all.push(AutocompleteItem::simple("/model"));
+        for preset in &cfg_models {
+            let key = format!("{}/{}", preset.provider_id, preset.model_id);
+            let value = format!("/model {key}");
+            let marker = if key == cur_model_key { "  ←" } else { "" };
+            let label = format!("{value}{marker}");
+            all.push(AutocompleteItem::labeled(value, label));
+        }
+
+        // ── /reasoning: sorted off → low → medium → high with current marker ─
+        all.push(AutocompleteItem::simple("/reasoning"));
+        for level in &["off", "low", "medium", "high"] {
+            let value = format!("/reasoning {level}");
+            let marker = if *level == cur_reasoning { "  ←" } else { "" };
+            let label = format!("{value}{marker}");
+            all.push(AutocompleteItem::labeled(value, label));
+        }
+
+        self.autocomplete_suggestions = all
+            .into_iter()
+            .filter(|item| item.value.starts_with(text.as_str()))
+            .collect();
+        self.autocomplete_selected = 0;
+        self.autocomplete_scroll = 0;
+    }
+
+    /// Move selection down (or wrap), fill the composer, scroll to keep selected visible.
+    pub fn autocomplete_select_next(&mut self) {
+        if self.autocomplete_suggestions.is_empty() {
+            return;
+        }
+        self.autocomplete_selected =
+            (self.autocomplete_selected + 1) % self.autocomplete_suggestions.len();
+        let v = self.autocomplete_suggestions[self.autocomplete_selected].value.clone();
+        self.composer.set_text(v);
+        self.autocomplete_clamp_scroll();
+    }
+
+    /// Move selection up (or wrap), fill the composer, scroll to keep selected visible.
+    pub fn autocomplete_select_prev(&mut self) {
+        if self.autocomplete_suggestions.is_empty() {
+            return;
+        }
+        let len = self.autocomplete_suggestions.len();
+        self.autocomplete_selected = (self.autocomplete_selected + len - 1) % len;
+        let v = self.autocomplete_suggestions[self.autocomplete_selected].value.clone();
+        self.composer.set_text(v);
+        self.autocomplete_clamp_scroll();
+    }
+
+    fn autocomplete_clamp_scroll(&mut self) {
+        const MAX_VISIBLE: usize = 8;
+        let viewport = MAX_VISIBLE.min(self.autocomplete_suggestions.len());
+        let sel = self.autocomplete_selected;
+        if sel < self.autocomplete_scroll {
+            self.autocomplete_scroll = sel;
+        } else if sel >= self.autocomplete_scroll + viewport {
+            self.autocomplete_scroll = sel + 1 - viewport;
+        }
     }
 
     pub fn toggle_auto_approve_tools(&mut self) {

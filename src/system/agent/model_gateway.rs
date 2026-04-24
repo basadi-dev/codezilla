@@ -93,6 +93,7 @@ impl ModelGateway {
         tokio::spawn(async move {
             match client
                 .stream(
+                    &model_settings.provider_id,
                     &messages,
                     &tools,
                     &model_settings.model_id,
@@ -112,6 +113,9 @@ impl ModelGateway {
                         match chunk {
                             StreamChunk::Text(text) => {
                                 let _ = tx.send(ModelStreamEvent::AssistantDelta(text)).await;
+                            }
+                            StreamChunk::Thinking(thought) => {
+                                let _ = tx.send(ModelStreamEvent::ReasoningDelta(thought)).await;
                             }
                             StreamChunk::ToolCallDelta {
                                 index,
@@ -170,6 +174,7 @@ impl ModelGateway {
 
                     match client
                         .complete(
+                            &model_settings.provider_id,
                             &messages,
                             &tools,
                             &model_settings.model_id,

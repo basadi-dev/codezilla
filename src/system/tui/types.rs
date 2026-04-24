@@ -60,6 +60,24 @@ pub enum FocusPane {
     Composer,
 }
 
+/// A single autocomplete suggestion.
+/// `value` is inserted into the composer; `label` is displayed (may include markers).
+#[derive(Debug, Clone)]
+pub struct AutocompleteItem {
+    pub value: String,
+    pub label: String,
+}
+
+impl AutocompleteItem {
+    pub fn simple(s: impl Into<String>) -> Self {
+        let s = s.into();
+        Self { label: s.clone(), value: s }
+    }
+    pub fn labeled(value: impl Into<String>, label: impl Into<String>) -> Self {
+        Self { value: value.into(), label: label.into() }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     User,

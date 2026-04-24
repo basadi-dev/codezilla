@@ -25,23 +25,32 @@ use super::types::{
 ///   └────────────────────────────────────────┘
 pub fn draw(app: &mut InteractiveApp, frame: &mut Frame) {
     let ch = composer_height(&app.composer, frame.area().width);
+    let ac_h = if app.autocomplete_suggestions.is_empty() {
+        0
+    } else {
+        (app.autocomplete_suggestions.len() as u16).min(8)
+    };
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // header
-            Constraint::Length(1),  // separator
-            Constraint::Min(4),     // transcript
-            Constraint::Length(ch), // composer
-            Constraint::Length(1),  // status bar
+            Constraint::Length(1),       // header
+            Constraint::Length(1),       // separator
+            Constraint::Min(4),          // transcript
+            Constraint::Length(ac_h),    // autocomplete list (0 when hidden)
+            Constraint::Length(ch),      // composer
+            Constraint::Length(1),       // status bar
         ])
         .split(frame.area());
 
     render_header(app, frame, outer[0]);
     render_separator(frame, outer[1]);
     render_transcript(app, frame, outer[2]);
-    render_composer(app, frame, outer[3]);
-    render_status_bar(app, frame, outer[4]);
+    if ac_h > 0 {
+        render_autocomplete(app, frame, outer[3]);
+    }
+    render_composer(app, frame, outer[4]);
+    render_status_bar(app, frame, outer[5]);
 }
 
 // ─── Header ───────────────────────────────────────────────────────────────────
@@ -53,9 +62,12 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         .and_then(|t| t.cwd.as_ref())
         .map(|c| basename(c))
         .unwrap_or_else(|| "~".into());
-    let model = meta
-        .map(|t| t.model_id.clone())
-        .unwrap_or_else(|| "—".into());
+    let (model, reasoning) = {
+        let ms = app.effective_model_settings();
+        let model = format!("{}/{}", ms.provider_id, ms.model_id);
+        let reasoning = ms.reasoning_effort.unwrap_or_default();
+        (model, reasoning)
+    };
     let approval_mode = app.approval_mode_label();
     let state = current_state_label(app.active_turn_id.is_some(), app.pending_approval.is_some());
 
@@ -89,6 +101,15 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         Span::styled(thread, Style::default().fg(COLOR_USER)),
         Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
         Span::styled(model, Style::default().fg(COLOR_MUTED)),
+        Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
+        Span::styled(
+            if reasoning.is_empty() {
+                "reasoning:off".into()
+            } else {
+                format!("reasoning:{reasoning}")
+            },
+            Style::default().fg(COLOR_MUTED),
+        ),
         Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
         Span::styled(
             format!("approve:{approval_mode}"),
@@ -479,6 +500,49 @@ fn render_approval_panel(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         ])),
         hint_area,
     );
+}
+
+// ─── Autocomplete section ─────────────────────────────────────────────────────
+
+fn render_autocomplete(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let suggestions = &app.autocomplete_suggestions;
+    let selected = app.autocomplete_selected;
+
+    let scroll = app.autocomplete_scroll;
+    let lines: Vec<Line> = suggestions
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(area.height as usize)
+        .map(|(i, item)| {
+            if i == selected {
+                Line::from(vec![
+                    Span::styled(
+                        "  ❯  ",
+                        Style::default()
+                            .fg(COLOR_ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        item.label.trim_end().to_owned(),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled(item.label.trim_end().to_owned(), Style::default().fg(COLOR_MUTED)),
+                ])
+            }
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 /// Shrink a rect by `left` columns and `top` rows (simple inset helper).

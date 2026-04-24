@@ -103,25 +103,28 @@ impl TurnExecutor {
                 .inner
                 .tool_orchestrator
                 .list_available_tools(&listing);
+            let effective_model_settings = params
+                .model_settings
+                .clone()
+                .unwrap_or_else(|| ModelSettings {
+                    model_id: thread_metadata.model_id.clone(),
+                    provider_id: thread_metadata.provider_id.clone(),
+                    reasoning_effort: self
+                        .runtime
+                        .inner
+                        .effective_config
+                        .model_settings
+                        .reasoning_effort
+                        .clone(),
+                    summary_mode: None,
+                    service_tier: None,
+                    web_search_enabled: false,
+                });
             let request = super::model_gateway::ModelRequest {
-                model_settings: params
-                    .model_settings
-                    .clone()
-                    .unwrap_or_else(|| ModelSettings {
-                        model_id: thread_metadata.model_id.clone(),
-                        provider_id: thread_metadata.provider_id.clone(),
-                        reasoning_effort: self
-                            .runtime
-                            .inner
-                            .effective_config
-                            .model_settings
-                            .reasoning_effort
-                            .clone(),
-                        summary_mode: None,
-                        service_tier: None,
-                        web_search_enabled: false,
-                    }),
-                system_instructions: self.system_instructions(&cwd).await?,
+                system_instructions: self
+                    .system_instructions(&cwd, effective_model_settings.reasoning_effort.as_deref())
+                    .await?,
+                model_settings: effective_model_settings,
                 conversation_items: items.clone(),
                 tool_definitions: tools,
                 output_schema: params.output_schema.clone(),
@@ -550,8 +553,11 @@ impl TurnExecutor {
         Ok(turn.cancel_token.is_cancelled())
     }
 
-    async fn system_instructions(&self, cwd: &str) -> Result<Vec<String>> {
+    async fn system_instructions(&self, cwd: &str, reasoning_effort: Option<&str>) -> Result<Vec<String>> {
         let mut instructions = vec![self.runtime.inner.effective_config.system_prompt.clone()];
+        if let Some(instruction) = thinking_instruction(reasoning_effort) {
+            instructions.push(instruction);
+        }
         let skills = self.runtime.inner.extension_manager.list_skills(cwd).await;
         for skill in skills {
             if skill.enabled {
@@ -559,6 +565,26 @@ impl TurnExecutor {
             }
         }
         Ok(instructions)
+    }
+}
+
+// ─── thinking instruction helper ─────────────────────────────────────────────
+
+fn thinking_instruction(reasoning_effort: Option<&str>) -> Option<String> {
+    match reasoning_effort {
+        None | Some("off") => None,
+        Some("low") => Some(
+            "Think briefly before responding. A short internal reasoning pass is enough.".into(),
+        ),
+        Some("medium") => Some(
+            "Think through this carefully, step by step, before giving your final answer.".into(),
+        ),
+        Some("high") => Some(
+            "Think extra hard. Reason deeply and thoroughly, considering multiple angles and edge \
+             cases, before providing your answer."
+                .into(),
+        ),
+        Some(other) => Some(format!("Reasoning effort: {other}. Think carefully before responding.")),
     }
 }
 

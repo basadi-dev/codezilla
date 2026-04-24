@@ -51,12 +51,15 @@ fn build_chat_body(
     temperature: f32,
     max_tokens: usize,
     stream: bool,
+    reasoning_effort: Option<&str>,
 ) -> Value {
     let msgs = build_chat_messages(messages);
+    let think = matches!(reasoning_effort, Some(e) if e != "off");
     let mut body = json!({
         "model": model,
         "messages": msgs,
         "stream": stream,
+        "think": think,
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
@@ -172,9 +175,10 @@ pub async fn complete(
     model: &str,
     temperature: f32,
     max_tokens: usize,
+    reasoning_effort: Option<&str>,
 ) -> Result<LlmResponse> {
     let url = chat_url(cfg);
-    let body = build_chat_body(messages, tools, model, temperature, max_tokens, false);
+    let body = build_chat_body(messages, tools, model, temperature, max_tokens, false, reasoning_effort);
 
     let mut req = http.post(&url).json(&body);
     for (k, v) in auth_headers(cfg) {
@@ -205,9 +209,10 @@ pub async fn stream(
     model: &str,
     temperature: f32,
     max_tokens: usize,
+    reasoning_effort: Option<&str>,
 ) -> Result<mpsc::Receiver<StreamChunk>> {
     let url = chat_url(cfg);
-    let body = build_chat_body(messages, tools, model, temperature, max_tokens, true);
+    let body = build_chat_body(messages, tools, model, temperature, max_tokens, true, reasoning_effort);
 
     let mut req = http.post(&url).json(&body);
     for (k, v) in auth_headers(cfg) {
@@ -290,6 +295,15 @@ fn parse_chat_response(resp: &Value) -> Result<LlmResponse> {
 
 fn parse_chat_chunk(v: &Value) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
+    if let Some(thinking) = v
+        .get("message")
+        .and_then(|m| m.get("thinking"))
+        .and_then(Value::as_str)
+    {
+        if !thinking.is_empty() {
+            chunks.push(StreamChunk::Thinking(thinking.to_string()));
+        }
+    }
     if let Some(text) = v
         .get("message")
         .and_then(|message| message.get("content"))
