@@ -4,9 +4,11 @@ use std::collections::HashMap;
 
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+
+use super::markdown::md_to_lines;
 
 use super::super::domain::{
     ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalPolicyKind, ApprovalResolution,
@@ -19,9 +21,9 @@ use super::super::runtime::{
 };
 use super::types::{
     entry_from_item, entry_style, format_timestamp, format_tool_result, short_turn_id,
-    split_at_width, thread_label, transcript_lines, AutocompleteItem, ComposerState, EntryKind,
-    FocusPane, PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
-    COLOR_MUTED, THREAD_LIMIT,
+    split_at_width, thread_label, relative_time_ago, transcript_lines, AutocompleteItem,
+    ComposerState, EntryKind, FocusPane, PendingApprovalView, SelectionPoint, SelectionRange,
+    TranscriptEntry, COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
 };
 
 #[derive(Debug, Clone)]
@@ -30,6 +32,12 @@ struct CachedTranscriptEntry {
     title: String,
     timestamp: Option<i64>,
     pending: bool,
+    /// For markdown entries (Assistant/Summary/Reasoning), stores the original
+    /// raw body text so the renderer can call md_to_lines each frame.
+    /// For plain entries, this is empty.
+    raw_body: String,
+    /// Pre-chunked plain-text lines (used for non-markdown entries and for
+    /// counting lines in the scroll arithmetic for markdown entries).
     body_lines: Vec<String>,
     line_count: usize,
 }
@@ -557,7 +565,8 @@ impl InteractiveApp {
                 "Keys: Tab/↑↓ autocomplete, Ctrl+A approvals, Ctrl+N new, Ctrl+F fork, \
                  Ctrl+C interrupt, Ctrl+Q quit  ·  \
                  Commands: /model [provider/model]  /reasoning [low|medium|high|off]  \
-                 /approve auto|ask|toggle  /new  /fork  /open <id>".into();
+                 /approve auto|ask|toggle  /new  /fork  /open <id>  /threads (autocomplete)  ·  \
+                 CLI: codezilla -r (resume last thread)".into();
             self.error_message = None;
             true
         } else {
@@ -703,9 +712,20 @@ impl InteractiveApp {
             all.push(AutocompleteItem::labeled(value, label));
         }
 
+        // ── /threads: list known threads as /resume <id> entries ─────────────
+        for thread in &self.threads {
+            let label = thread_label(thread);
+            let age = relative_time_ago(thread.updated_at);
+            let id = thread.thread_id.clone();
+            let marker = if id == self.current_thread_id { "  ←" } else { "" };
+            let value = format!("/resume {id}");
+            let display = format!("/threads  {label}  {age}{marker}");
+            all.push(AutocompleteItem::labeled(value, display));
+        }
+
         self.autocomplete_suggestions = all
             .into_iter()
-            .filter(|item| item.value.starts_with(text.as_str()))
+            .filter(|item| item.label.starts_with(text.as_str()) || item.value.starts_with(text.as_str()))
             .collect();
         self.autocomplete_selected = 0;
         self.autocomplete_scroll = 0;
@@ -1255,16 +1275,34 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
     let mut total_lines = 0usize;
 
     for entry in entries {
-        let body_lines = if entry.body.is_empty() && entry.pending {
-            vec!["…".to_string()]
+        let use_markdown = matches!(
+            entry.kind,
+            EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
+        );
+
+        let (raw_body, body_lines): (String, Vec<String>) = if entry.body.is_empty() && entry.pending {
+            (String::new(), vec!["…".to_string()])
+        } else if use_markdown {
+            // Render now to get the correct line count for scroll arithmetic.
+            // The rendered Lines themselves are discarded; raw_body is kept so
+            // append_cached_transcript_entry_lines can re-render with styles.
+            let rendered = md_to_lines(&entry.body, Color::White, body_width);
+            let count = rendered.len().max(1);
+            (
+                entry.body.clone(),
+                // Placeholders — count matters, content does not.
+                vec![String::new(); count],
+            )
         } else {
-            entry
+            let plain: Vec<String> = entry
                 .body
                 .split('\n')
                 .flat_map(|body_line| split_at_width(body_line, body_width))
-                .collect::<Vec<_>>()
+                .collect();
+            (String::new(), plain)
         };
-        let line_count = 1 + body_lines.len() + 1;
+
+        let line_count = 1 + body_lines.len().max(1) + 1;
         total_lines += line_count;
         line_ends.push(total_lines);
         cached_entries.push(CachedTranscriptEntry {
@@ -1272,6 +1310,7 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             title: entry.title.clone(),
             timestamp: entry.timestamp,
             pending: entry.pending,
+            raw_body,
             body_lines,
             line_count,
         });
@@ -1297,6 +1336,7 @@ fn append_cached_transcript_entry_lines(
     let (sigil, sigil_color, body_color) = entry_style(entry.kind);
     let mut current_line = entry_start;
 
+    // ── Header ───────────────────────────────────────────────────────────────
     if current_line >= start_line && current_line < end_line {
         let mut header_spans = vec![
             Span::raw("  "),
@@ -1334,14 +1374,34 @@ fn append_cached_transcript_entry_lines(
     }
     current_line += 1;
 
-    for body_line in &entry.body_lines {
-        if current_line >= start_line && current_line < end_line {
-            out.push(Line::from(vec![
-                Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(body_line.clone(), Style::default().fg(body_color)),
-            ]));
+    // ── Body ─────────────────────────────────────────────────────────────────
+    let use_markdown = matches!(
+        entry.kind,
+        EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
+    );
+
+    if use_markdown && !entry.raw_body.is_empty() {
+        // Re-render from the raw Markdown source so all spans carry proper styles.
+        // We hard-cap at 120 cols; ratatui will clip to the actual terminal width.
+        let md_rendered = md_to_lines(&entry.raw_body, body_color, 120);
+        for md_line in md_rendered {
+            if current_line >= start_line && current_line < end_line {
+                let mut spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                spans.extend(md_line.spans);
+                out.push(Line::from(spans));
+            }
+            current_line += 1;
         }
-        current_line += 1;
+    } else {
+        for body_line in &entry.body_lines {
+            if current_line >= start_line && current_line < end_line {
+                out.push(Line::from(vec![
+                    Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                    Span::styled(body_line.clone(), Style::default().fg(body_color)),
+                ]));
+            }
+            current_line += 1;
+        }
     }
 
     if current_line >= start_line && current_line < end_line {

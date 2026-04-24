@@ -6,6 +6,8 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use super::markdown::md_to_lines;
+
 use crate::system::domain::PendingApproval;
 use crate::system::domain::{ConversationItem, ItemKind, ThreadMetadata};
 
@@ -698,12 +700,19 @@ pub fn split_at_width(s: &str, width: usize) -> Vec<String> {
 fn transcript_entry_line_count(entry: &TranscriptEntry, body_width: usize) -> usize {
     let body_lines = if entry.body.is_empty() && entry.pending {
         1
+    } else if matches!(
+        entry.kind,
+        EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
+    ) {
+        // Use the actual rendered markdown line count for accurate scroll math.
+        md_to_lines(&entry.body, Color::White, body_width).len().max(1)
     } else {
         entry
             .body
             .split('\n')
             .map(|body_line| split_at_width(body_line, body_width).len())
-            .sum()
+            .sum::<usize>()
+            .max(1)
     };
     1 + body_lines + 1
 }
@@ -757,6 +766,12 @@ fn append_transcript_entry_lines(
     }
     current_line += 1;
 
+    // ── Body ─────────────────────────────────────────────────────────────────
+    let use_markdown = matches!(
+        entry.kind,
+        EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
+    );
+
     if entry.body.is_empty() && entry.pending {
         if current_line >= start_line && current_line < end_line {
             out.push(Line::from(vec![
@@ -765,6 +780,18 @@ fn append_transcript_entry_lines(
             ]));
         }
         current_line += 1;
+    } else if use_markdown {
+        // Render via pulldown-cmark for rich Markdown (headings, tables, code, etc.)
+        let md_rendered = md_to_lines(&entry.body, body_color, body_width);
+        for md_line in md_rendered {
+            if current_line >= start_line && current_line < end_line {
+                // Prepend gutter to each rendered Markdown line.
+                let mut spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                spans.extend(md_line.spans);
+                out.push(Line::from(spans));
+            }
+            current_line += 1;
+        }
     } else {
         for body_line in entry.body.split('\n') {
             for chunk in split_at_width(body_line, body_width) {
@@ -899,6 +926,21 @@ pub fn thread_label(thread: &ThreadMetadata) -> String {
         }
     }
     format!("thread {}", short_thread_id(&thread.thread_id))
+}
+
+/// Returns a compact relative-time string for a Unix-seconds timestamp,
+/// e.g. "just now", "45s ago", "12m ago", "3h ago", "2d ago", "4w ago".
+pub fn relative_time_ago(ts: i64) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let secs = (now - ts).max(0) as u64;
+    match secs {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86399 => format!("{}h ago", secs / 3600),
+        86400..=604799 => format!("{}d ago", secs / 86400),
+        604800..=2591999 => format!("{}w ago", secs / 604800),
+        _ => format!("{}mo ago", secs / 2592000),
+    }
 }
 
 pub fn pretty_json_or_text(primary: Option<&Value>, secondary: Option<&Value>) -> String {

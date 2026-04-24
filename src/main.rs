@@ -209,11 +209,16 @@ async fn async_main() -> Result<i32> {
         }
         Some((command, _)) => bail!("unsupported subcommand: {command}"),
         None => {
+            let resume_thread_id = if matches.get_flag("resume") {
+                Some(latest_thread_id(&runtime).await?)
+            } else {
+                None
+            };
             let surface = InteractiveSurface::new(runtime);
             surface
                 .start(InteractiveInvocation {
                     prompt: matches.get_one::<String>("prompt").cloned(),
-                    resume_thread_id: None,
+                    resume_thread_id,
                     fork_thread_id: None,
                     cwd: Some(cwd),
                 })
@@ -299,6 +304,13 @@ fn build_cli() -> Command {
                 .global(true),
         )
         .arg(Arg::new("prompt").value_name("PROMPT"))
+        .arg(
+            Arg::new("resume")
+                .short('r')
+                .long("resume")
+                .action(ArgAction::SetTrue)
+                .help("Resume the most recent thread"),
+        )
         .subcommand(
             Command::new("exec")
                 .arg(Arg::new("prompt").value_name("PROMPT"))
