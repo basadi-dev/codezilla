@@ -20,10 +20,10 @@ use super::super::runtime::{
     ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnSteerParams,
 };
 use super::types::{
-    entry_from_item, entry_style, format_timestamp, format_tool_result, short_turn_id,
-    split_at_width, thread_label, relative_time_ago, transcript_lines, AutocompleteItem,
-    ComposerState, EntryKind, FocusPane, PendingApprovalView, SelectionPoint, SelectionRange,
-    TranscriptEntry, COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
+    basename, entry_from_item, entry_style, format_timestamp, format_tool_result,
+    relative_time_ago, short_turn_id, split_at_width, thread_label, transcript_lines,
+    AutocompleteItem, ComposerState, EntryKind, FocusPane, PendingApprovalView, SelectionPoint,
+    SelectionRange, TranscriptEntry, COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
 };
 
 #[derive(Debug, Clone)]
@@ -743,12 +743,19 @@ impl InteractiveApp {
 
         // ── /threads: list known threads as /resume <id> entries ─────────────
         for thread in &self.threads {
-            let label = thread_label(thread);
+            let title = thread_label(thread);
+            let dir = thread
+                .cwd
+                .as_deref()
+                .map(basename)
+                .filter(|d| !d.is_empty())
+                .map(|d| format!("  │  {d}"))
+                .unwrap_or_default();
             let age = relative_time_ago(thread.updated_at);
             let id = thread.thread_id.clone();
             let marker = if id == self.current_thread_id { "  ←" } else { "" };
             let value = format!("/resume {id}");
-            let display = format!("/threads  {label}  {age}{marker}");
+            let display = format!("/threads  {title}{dir}  {age}{marker}");
             all.push(AutocompleteItem::labeled(value, display));
         }
 

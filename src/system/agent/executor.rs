@@ -336,6 +336,22 @@ impl TurnExecutor {
                 payload: json!({ "text": text.text }),
             })
             .await?;
+
+            // ── Auto-title: set thread title from first user message ──────────
+            // Only fires once — when the thread still has no title.
+            if let Some(thread) = self.runtime.load_thread(thread_id).await? {
+                let mut guard = thread.lock().await;
+                if guard.metadata.title.is_none() {
+                    let title = derive_thread_title(&text.text);
+                    guard.metadata.title = Some(title);
+                    guard.metadata.updated_at = now_seconds();
+                    let _ = self
+                        .runtime
+                        .inner
+                        .persistence_manager
+                        .update_thread(&guard.metadata);
+                }
+            }
         }
         if let Some(image) = &input.image {
             self.persist_turn_item(ConversationItem {
@@ -635,5 +651,30 @@ fn action_for_tool_call(call: &ToolCall, cwd: &str) -> ActionDescriptor {
         paths,
         domains: Vec::new(),
         category,
+    }
+}
+
+// ─── derive_thread_title ──────────────────────────────────────────────────────
+
+/// Build a short, human-readable title from the first user message.
+/// Takes the first non-empty line, strips leading `/` commands, and
+/// truncates to 72 chars with an ellipsis when needed.
+fn derive_thread_title(text: &str) -> String {
+    const MAX: usize = 72;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('/'))
+        .unwrap_or_else(|| text.lines().next().unwrap_or("").trim());
+
+    if line.is_empty() {
+        return "Untitled thread".into();
+    }
+
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= MAX {
+        line.to_string()
+    } else {
+        chars[..MAX].iter().collect::<String>() + "…"
     }
 }
