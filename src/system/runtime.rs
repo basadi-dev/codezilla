@@ -16,6 +16,7 @@ use super::agent::{
     PermissionManager, RequestUserInputToolProvider, SandboxManager, SearchToolProvider,
     ShellToolProvider, SpawnAgentToolProvider, ToolOrchestrator, TurnExecutor, WebToolProvider,
 };
+use super::agent::model_gateway::build_compaction_messages;
 // Agent types re-exported for callers outside runtime.rs
 #[allow(unused_imports)]
 pub use super::agent::{AutoReviewer, EventFilter, EventSubscription, ModelDescription};
@@ -598,30 +599,116 @@ impl ConversationRuntime {
     }
 
     pub async fn compact_thread(&self, params: ThreadCompactParams) -> Result<ThreadCompactResult> {
+
+        // ── 1. Read the full thread from persistence ──────────────────────────
+        let persisted = self
+            .inner
+            .persistence_manager
+            .read_thread(&params.thread_id)?;
+
+        let item_count_before = persisted.items.len();
+        if item_count_before == 0 {
+            return Ok(ThreadCompactResult {
+                thread_id: params.thread_id,
+                summary_item_id: None,
+                items_removed: 0,
+            });
+        }
+
+        // ── 2. Build system instructions (same as a normal turn) ───────────────
+        let cwd = persisted
+            .metadata
+            .cwd
+            .clone()
+            .unwrap_or_else(|| self.inner.effective_config.working_directory.clone());
+        let skills = self.inner.extension_manager.list_skills(&cwd).await;
+        let mut system_instructions =
+            vec![self.inner.effective_config.system_prompt.clone()];
+        for skill in skills {
+            if skill.enabled {
+                system_instructions
+                    .push(format!("Skill {}: {}", skill.name, skill.description));
+            }
+        }
+
+        // ── 3. Ask the LLM to summarise ────────────────────────────────────────
+        // Use the thread's configured model for compaction.
+        let model_settings = ModelSettings {
+            model_id: persisted.metadata.model_id.clone(),
+            provider_id: persisted.metadata.provider_id.clone(),
+            reasoning_effort: None, // no extended thinking needed for summaries
+            summary_mode: None,
+            service_tier: None,
+            web_search_enabled: false,
+        };
+
+        let compaction_messages =
+            build_compaction_messages(&system_instructions, &persisted.items);
+
+        let llm_response = self
+            .inner
+            .model_gateway
+            .inner_client()
+            .complete(
+                &model_settings.provider_id,
+                &compaction_messages,
+                &[], // no tools needed for summarisation
+                &model_settings.model_id,
+                0.2,
+                None,
+                4096,
+            )
+            .await
+            .map_err(|e| anyhow!("compact_thread_llm_failed: {e}"))?;
+
+        let summary_text = if llm_response.content.trim().is_empty() {
+            "[Compaction summary unavailable]".to_string()
+        } else {
+            llm_response.content.trim().to_string()
+        };
+
+        // ── 4. Tombstone all existing items ────────────────────────────────────
+        let items_removed = self
+            .inner
+            .persistence_manager
+            .tombstone_all_items(&params.thread_id)? as i32;
+
+        // ── 5. Insert the summary as a single ReasoningSummary item ────────────
         let summary_item_id = format!("item_{}", Uuid::new_v4().simple());
-        let item = ConversationItem {
+        let summary_item = ConversationItem {
             item_id: summary_item_id.clone(),
             thread_id: params.thread_id.clone(),
             turn_id: "compaction".into(),
             created_at: now_seconds(),
             kind: ItemKind::ReasoningSummary,
             payload: json!({
+                "text": summary_text,
                 "strategy": params.strategy,
-                "summary": "Compaction marker created by runtime"
+                "items_compacted": items_removed,
             }),
         };
-        self.inner.persistence_manager.append_item(&item)?;
+        self.inner.persistence_manager.append_item(&summary_item)?;
+
+        // ── 6. Reload the in-memory session so the live thread sees the summary ─
+        {
+            let mut loaded = self.inner.loaded_threads.write().await;
+            loaded.remove(&params.thread_id);
+        }
+        // Warm the cache again so the next turn picks up the new state.
+        let _ = self.load_thread(&params.thread_id).await;
+
         self.publish_event(
             RuntimeEventKind::ItemCompleted,
             Some(params.thread_id.clone()),
-            Some(item.turn_id.clone()),
-            serde_json::to_value(&item)?,
+            Some(summary_item.turn_id.clone()),
+            serde_json::to_value(&summary_item)?,
         )
         .await?;
+
         Ok(ThreadCompactResult {
             thread_id: params.thread_id,
             summary_item_id: Some(summary_item_id),
-            items_removed: 0,
+            items_removed,
         })
     }
 

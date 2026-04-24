@@ -2,11 +2,11 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::model_gateway::ModelStreamEvent;
+use super::model_gateway::{is_context_overflow_error, ModelStreamEvent};
 use crate::system::domain::{
     now_seconds, ActionDescriptor, ApprovalCategory, ApprovalDecision, ApprovalRequest,
-    ConversationItem, ItemKind, ModelSettings, ThreadStatus, TokenUsage, ToolCall,
-    ToolExecutionContext, ToolListingContext, ToolResult, TurnStatus, UserInput,
+    ConversationItem, ItemKind, ModelSettings, RuntimeEventKind, ThreadStatus, TokenUsage,
+    ToolCall, ToolExecutionContext, ToolListingContext, ToolResult, TurnStatus, UserInput,
 };
 
 // ─── TurnExecutor ─────────────────────────────────────────────────────────────
@@ -50,6 +50,10 @@ impl TurnExecutor {
             self.append_user_input(&params.thread_id, &turn_id, &input)
                 .await?;
         }
+
+        // Tracks whether we have already done one automatic context-overflow
+        // trim this turn. We only retry once to avoid an infinite loop.
+        let mut auto_trim_attempted = false;
 
         loop {
             if self.is_cancelled(&params.thread_id, &turn_id).await? {
@@ -141,6 +145,9 @@ impl TurnExecutor {
             let mut assistant_text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut final_usage = TokenUsage::default();
+            // Set to Some(error) when the model returns Failed so we can
+            // handle context-overflow recovery outside the inner loop.
+            let mut pending_fail: Option<String> = None;
 
             while let Some(event) = response.recv().await {
                 if cancel_token.is_cancelled() {
@@ -152,21 +159,21 @@ impl TurnExecutor {
                             let item_id = format!("item_{}", Uuid::new_v4().simple());
                             assistant_item_id = Some(item_id.clone());
                             self.runtime.publish_event(
-                                crate::system::domain::RuntimeEventKind::ItemStarted,
+                                RuntimeEventKind::ItemStarted,
                                 Some(params.thread_id.clone()), Some(turn_id.clone()),
                                 json!({"itemId": item_id, "kind": ItemKind::AgentMessage, "payload": {"text": ""}}),
                             ).await?;
                         }
                         assistant_text.push_str(&delta);
                         self.runtime.publish_event(
-                            crate::system::domain::RuntimeEventKind::ItemUpdated,
+                            RuntimeEventKind::ItemUpdated,
                             Some(params.thread_id.clone()), Some(turn_id.clone()),
                             json!({"itemId": assistant_item_id, "delta": delta, "mode": "append"}),
                         ).await?;
                     }
                     ModelStreamEvent::ReasoningDelta(delta) => {
                         self.runtime.publish_event(
-                            crate::system::domain::RuntimeEventKind::ItemUpdated,
+                            RuntimeEventKind::ItemUpdated,
                             Some(params.thread_id.clone()), Some(turn_id.clone()),
                             json!({"itemId": format!("reasoning_{turn_id}"), "delta": delta, "mode": "append"}),
                         ).await?;
@@ -178,9 +185,47 @@ impl TurnExecutor {
                         final_usage = usage;
                     }
                     ModelStreamEvent::Failed(error) => {
-                        return self.fail_turn(&params.thread_id, &turn_id, &error).await;
+                        pending_fail = Some(error);
+                        break;
                     }
                 }
+            }
+
+            // ── Context-overflow auto-recovery ────────────────────────────────
+            // On the first context-overflow error, trim all older turns from
+            // the in-memory session (keeps the current turn intact) and retry.
+            // A second overflow is not retried — it surfaces as a normal error.
+            if let Some(ref error) = pending_fail {
+                if !auto_trim_attempted && is_context_overflow_error(error) {
+                    auto_trim_attempted = true;
+
+                    // Notify the user via a Warning event (TUI renders this).
+                    self.runtime.publish_event(
+                        RuntimeEventKind::Warning,
+                        Some(params.thread_id.clone()),
+                        Some(turn_id.clone()),
+                        json!({
+                            "message": "Context limit reached — trimming history and retrying automatically…"
+                        }),
+                    ).await?;
+
+                    // Drop items from every completed turn so only the current
+                    // turn's items remain in memory. Layer 1's token-budget guard
+                    // will then fit the history safely on the next iteration.
+                    {
+                        let mut guard = thread.lock().await;
+                        for lt in guard.turns.iter_mut() {
+                            if lt.metadata.turn_id != turn_id {
+                                lt.items.clear();
+                            }
+                        }
+                    }
+
+                    continue; // retry the outer agent loop
+                }
+
+                // Second overflow or a different error — fail the turn.
+                return self.fail_turn(&params.thread_id, &turn_id, error).await;
             }
 
             if let Some(item_id) = assistant_item_id {

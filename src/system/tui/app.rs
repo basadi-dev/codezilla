@@ -250,6 +250,44 @@ impl InteractiveApp {
         Ok(())
     }
 
+    pub async fn compact_current_thread(&mut self) -> Result<()> {
+        use super::super::domain::CompactionStrategy;
+        use super::super::runtime::ThreadCompactParams;
+
+        if self.active_turn_id.is_some() {
+            self.error_message =
+                Some("Cannot compact while a turn is active — interrupt first".into());
+            return Ok(());
+        }
+
+        self.status_message = "Compacting thread… (calling LLM for summary)".into();
+        self.error_message = None;
+
+        let result = self
+            .runtime
+            .compact_thread(ThreadCompactParams {
+                thread_id: self.current_thread_id.clone(),
+                strategy: CompactionStrategy::SummarizePrefix,
+            })
+            .await;
+
+        match result {
+            Ok(r) => {
+                // Reload transcript to show the summary item.
+                self.load_thread(&self.current_thread_id.clone()).await?;
+                self.status_message = format!(
+                    "✓ Compacted — {} item(s) replaced with summary",
+                    r.items_removed
+                );
+                self.error_message = None;
+            }
+            Err(e) => {
+                self.error_message = Some(format!("Compact failed: {e}"));
+            }
+        }
+        Ok(())
+    }
+
     // ── Drag-to-select helpers ────────────────────────────────────────────────
 
     pub fn begin_transcript_drag(&mut self, col: u16, row: u16) {
@@ -530,6 +568,9 @@ impl InteractiveApp {
         } else if matches!(command, "/interrupt") {
             self.interrupt_active_turn().await?;
             true
+        } else if matches!(command, "/compact") {
+            self.compact_current_thread().await?;
+            true
         } else if matches!(command, "/approve auto") {
             self.set_auto_approve_tools(true);
             true
@@ -594,7 +635,7 @@ impl InteractiveApp {
                 "Keys: Tab/↑↓ autocomplete, Ctrl+A approvals, Ctrl+N new, Ctrl+F fork, \
                  Ctrl+C interrupt, Ctrl+Q quit  ·  \
                  Commands: /model [provider/model]  /reasoning [low|medium|high|off]  \
-                 /approve auto|ask|toggle  /new  /fork  /open <id>  /threads (autocomplete)  ·  \
+                 /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads (autocomplete)  ·  \
                  CLI: codezilla -r (resume last thread)".into();
             self.error_message = None;
             true
@@ -716,7 +757,7 @@ impl InteractiveApp {
         // ── static commands ───────────────────────────────────────────────────
         for cmd in &[
             "/approve ask", "/approve auto", "/approve manual", "/approve toggle",
-            "/approve", "/approvals", "/exit", "/fork", "/help", "/interrupt",
+            "/approve", "/approvals", "/compact", "/exit", "/fork", "/help", "/interrupt",
             "/new", "/open ", "/quit", "/reload", "/resume ", "/threads",
         ] {
             all.push(AutocompleteItem::simple(*cmd));

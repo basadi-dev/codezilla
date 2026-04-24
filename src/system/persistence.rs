@@ -190,6 +190,18 @@ impl PersistenceManager {
         })
     }
 
+    /// Mark every non-tombstoned item in `thread_id` as deleted.
+    /// Returns the number of rows affected.
+    pub fn tombstone_all_items(&self, thread_id: &str) -> Result<usize> {
+        self.with_conn(|conn| {
+            let count = conn.execute(
+                "UPDATE items SET tombstoned = 1 WHERE thread_id = ?1 AND tombstoned = 0",
+                params![thread_id],
+            )?;
+            Ok(count)
+        })
+    }
+
     pub fn read_thread(&self, thread_id: &str) -> Result<PersistedThread> {
         self.with_conn(|conn| {
             let metadata = read_thread_metadata(conn, thread_id)?
