@@ -361,14 +361,35 @@ impl InteractiveApp {
     }
 
     /// Copy the selected transcript text to the system clipboard.
-    /// For the first/last lines only the selected character range is taken;
-    /// middle lines are included in full. The "  │  " gutter is stripped.
+    /// For markdown entries (Assistant/Summary/Reasoning) the raw Markdown
+    /// source is copied. For all other entry types the rendered visual text
+    /// is used (gutter stripped).
     pub fn copy_selection_to_clipboard(&mut self) {
         let Some(sel) = self.current_selection_range() else {
             return;
         };
 
-        let (lines, total) = self.transcript_lines_all(self.transcript_area.width, None);
+        let width = self.transcript_area.width;
+        self.ensure_transcript_render_cache(width);
+
+        // ── Try raw-markdown copy for single markdown entries ─────────────────
+        if let Some(raw_text) = self.try_copy_raw_markdown(&sel) {
+            let char_count = raw_text.chars().count();
+            match arboard::Clipboard::new() {
+                Ok(mut cb) => match cb.set_text(raw_text) {
+                    Ok(_) => {
+                        self.status_message = format!("✓ Copied {char_count} chars (markdown)");
+                        self.error_message = None;
+                    }
+                    Err(e) => { self.error_message = Some(format!("Clipboard write failed: {e}")); }
+                },
+                Err(e) => { self.error_message = Some(format!("Clipboard unavailable: {e}")); }
+            }
+            return;
+        }
+
+        // ── Fallback: copy from rendered span text (non-markdown entries) ─────
+        let (lines, total) = self.transcript_lines_all(width, None);
         let end_clamped = sel.end_line.min(total.saturating_sub(1));
         if sel.start_line > end_clamped {
             return;
@@ -378,35 +399,20 @@ impl InteractiveApp {
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                // Build the full text of this rendered line
                 let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 let chars: Vec<char> = full.chars().collect();
-
-                // Determine character slice bounds for this line
                 let line_idx = sel.start_line + i;
-                let from = if line_idx == sel.start_line {
-                    sel.start_col
-                } else {
-                    0
-                };
-                let to = if line_idx == end_clamped {
-                    sel.end_col + 1
-                } else {
-                    chars.len()
-                };
+                let from = if line_idx == sel.start_line { sel.start_col } else { 0 };
+                let to   = if line_idx == end_clamped { sel.end_col + 1 } else { chars.len() };
                 let from = from.min(chars.len());
-                let to = to.min(chars.len());
-
+                let to   = to.min(chars.len());
                 let text: String = chars[from..to].iter().collect();
-                // Strip the "  │  " gutter prefix when present
                 text.strip_prefix("  │  ").unwrap_or(&text).to_string()
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        if selected.trim().is_empty() {
-            return;
-        }
+        if selected.trim().is_empty() { return; }
         let char_count = selected.chars().count();
 
         match arboard::Clipboard::new() {
@@ -415,14 +421,37 @@ impl InteractiveApp {
                     self.status_message = format!("✓ Copied {char_count} chars");
                     self.error_message = None;
                 }
-                Err(e) => {
-                    self.error_message = Some(format!("Clipboard write failed: {e}"));
-                }
+                Err(e) => { self.error_message = Some(format!("Clipboard write failed: {e}")); }
             },
-            Err(e) => {
-                self.error_message = Some(format!("Clipboard unavailable: {e}"));
-            }
+            Err(e) => { self.error_message = Some(format!("Clipboard unavailable: {e}")); }
         }
+    }
+
+    /// If the selection falls within a single markdown entry, return its raw
+    /// body text. Returns `None` if the selection spans multiple entries or
+    /// lands in a non-markdown entry.
+    fn try_copy_raw_markdown(&self, sel: &SelectionRange) -> Option<String> {
+        let cache = &self.transcript_render_cache;
+        if cache.entries.is_empty() { return None; }
+
+        // Which cache entry owns sel.start_line and sel.end_line?
+        let start_idx = cache.line_ends.partition_point(|&end| end <= sel.start_line);
+        let end_idx   = cache.line_ends.partition_point(|&end| end <= sel.end_line);
+
+        // Both must land in the same entry.
+        if start_idx != end_idx || start_idx >= cache.entries.len() {
+            return None;
+        }
+
+        let entry = &cache.entries[start_idx];
+        if !matches!(entry.kind, EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning) {
+            return None;
+        }
+        if entry.raw_body.is_empty() {
+            return None;
+        }
+
+        Some(entry.raw_body.clone())
     }
 
     pub async fn submit_composer(&mut self) -> Result<()> {
