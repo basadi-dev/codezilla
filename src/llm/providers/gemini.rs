@@ -5,10 +5,10 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::system::config::LlmConfig as Config;
 use crate::llm::{
     FunctionCall, LlmResponse, Message, Role, StreamChunk, TokenUsage, ToolCall, ToolDefinition,
 };
+use crate::system::config::LlmConfig as Config;
 
 fn api_url(cfg: &Config, model: &str, stream: bool) -> String {
     let key = &cfg.api_keys.gemini;

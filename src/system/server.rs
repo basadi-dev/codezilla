@@ -453,12 +453,7 @@ impl AppServer {
                     .get("target")
                     .and_then(|t| t.get("basePath"))
                     .and_then(Value::as_str)
-                    .unwrap_or(
-                        &self
-                            .runtime
-                            .effective_config()
-                            .working_directory,
-                    )
+                    .unwrap_or(&self.runtime.effective_config().working_directory)
                     .to_string();
                 let prompt = "Review the current working tree and report findings.".to_string();
                 let thread = self

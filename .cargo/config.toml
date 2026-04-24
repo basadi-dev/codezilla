@@ -1,0 +1,33 @@
+# ── Codezilla .cargo/config.toml ──────────────────────────────────────────────
+# Project-local Cargo configuration. Checked in so all contributors get the
+# same build-speed improvements automatically.
+
+[build]
+# Cargo already uses all logical CPUs by default; no override needed.
+
+# ── macOS (aarch64 / x86_64) linker speedups ──────────────────────────────────
+# The default Apple ld runs dsymutil after every link which is very slow for
+# debug builds. We suppress that here via the split-debuginfo profile flag
+# (Cargo.toml) and pass -Wl flags to ld64 to skip some slow default passes.
+#
+# OPTIONAL FASTER ALTERNATIVE: install lld via Homebrew then uncomment below.
+#   brew install llvm
+#   (then uncomment the [target.aarch64-apple-darwin] block below)
+
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-no_deduplicate",  # skip dedup pass — safe for dev
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-no_deduplicate",
+]
+
+# ── Uncomment this block if you have LLVM lld installed (brew install llvm) ───
+# [target.aarch64-apple-darwin]
+# linker = "/opt/homebrew/opt/llvm/bin/clang"
+# rustflags = [
+#     "-C", "link-arg=-fuse-ld=/opt/homebrew/opt/llvm/bin/ld64.lld",
+#     "-C", "link-arg=-Wl,-no_deduplicate",
+# ]

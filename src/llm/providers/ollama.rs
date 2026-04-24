@@ -5,10 +5,10 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::system::config::LlmConfig as Config;
 use crate::llm::{
     FunctionCall, LlmResponse, Message, Role, StreamChunk, TokenUsage, ToolCall, ToolDefinition,
 };
+use crate::system::config::LlmConfig as Config;
 
 fn chat_url(cfg: &Config) -> String {
     let base = cfg.ollama.base_url.trim_end_matches('/');

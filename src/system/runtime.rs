@@ -12,28 +12,22 @@ use crate::llm::LlmClient;
 
 // Agent subsystem — types used only internally in this file
 use super::agent::{
-    ApprovalManager, EventBus, ExtensionManager,
-    FileToolProvider, ImageToolProvider,
-    ModelGateway,
-    PermissionManager, RequestUserInputToolProvider, SandboxManager,
-    SearchToolProvider, ShellToolProvider, SpawnAgentToolProvider, ToolOrchestrator,
-    TurnExecutor, WebToolProvider,
+    ApprovalManager, EventBus, ExtensionManager, FileToolProvider, ImageToolProvider, ModelGateway,
+    PermissionManager, RequestUserInputToolProvider, SandboxManager, SearchToolProvider,
+    ShellToolProvider, SpawnAgentToolProvider, ToolOrchestrator, TurnExecutor, WebToolProvider,
 };
 // Agent types re-exported for callers outside runtime.rs
 #[allow(unused_imports)]
-pub use super::agent::{
-    AutoReviewer, EventFilter, EventSubscription, ModelDescription,
-};
+pub use super::agent::{AutoReviewer, EventFilter, EventSubscription, ModelDescription};
 
 use super::config::EffectiveConfig;
 use super::domain::{
-    now_millis, now_seconds, AccountSession, ApprovalDecision, ApprovalPolicy,
-    ApprovalResolution, CompactionStrategy, ConnectorDefinition, ConversationItem, ItemId, ItemKind,
-    McpServerDefinition, MemoryMode, ModelSettings, PathString,
-    PermissionProfile, PersistedThread, PluginDefinition, PrefixRule, RuntimeEvent,
-    RuntimeEventKind, SessionId, SkillDefinition, SurfaceKind,
-    ThreadFilter, ThreadId, ThreadMetadata, ThreadStatus, TokenUsage, ToolCall, ToolCallId,
-    TurnId, TurnMetadata, TurnStatus, UserInput,
+    now_millis, now_seconds, AccountSession, ApprovalDecision, ApprovalPolicy, ApprovalResolution,
+    CompactionStrategy, ConnectorDefinition, ConversationItem, ItemId, ItemKind,
+    McpServerDefinition, MemoryMode, ModelSettings, PathString, PermissionProfile, PersistedThread,
+    PluginDefinition, PrefixRule, RuntimeEvent, RuntimeEventKind, SessionId, SkillDefinition,
+    SurfaceKind, ThreadFilter, ThreadId, ThreadMetadata, ThreadStatus, TokenUsage, ToolCall,
+    ToolCallId, TurnId, TurnMetadata, TurnStatus, UserInput,
 };
 use super::persistence::PersistenceManager;
 
@@ -266,9 +260,7 @@ impl ConversationRuntime {
         );
 
         let sandbox = Arc::new(SandboxManager::new());
-        let permissions = Arc::new(PermissionManager::new(
-            &effective_config.trusted_projects,
-        ));
+        let permissions = Arc::new(PermissionManager::new(&effective_config.trusted_projects));
         let tool_orchestrator = ToolOrchestrator::new();
         tool_orchestrator.register_provider(Arc::new(ShellToolProvider::new(
             sandbox.clone(),
@@ -313,7 +305,9 @@ impl ConversationRuntime {
             model_gateway: Arc::new(ModelGateway::new(llm_client)),
             extension_manager: extensions,
         };
-        Ok(Self { inner: Arc::new(inner) })
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 
     #[allow(dead_code)]
@@ -333,9 +327,9 @@ impl ConversationRuntime {
         let model = params
             .model_settings
             .unwrap_or_else(|| self.inner.effective_config.model_settings.clone());
-        let cwd = params.cwd.unwrap_or_else(|| {
-            self.inner.effective_config.working_directory.clone()
-        });
+        let cwd = params
+            .cwd
+            .unwrap_or_else(|| self.inner.effective_config.working_directory.clone());
         let metadata = ThreadMetadata {
             thread_id: format!("thread_{}", Uuid::new_v4().simple()),
             title: None,
@@ -537,10 +531,7 @@ impl ConversationRuntime {
         })
     }
 
-    pub async fn interrupt_turn(
-        &self,
-        params: TurnInterruptParams,
-    ) -> Result<TurnInterruptResult> {
+    pub async fn interrupt_turn(&self, params: TurnInterruptParams) -> Result<TurnInterruptResult> {
         let thread = self
             .load_thread(&params.thread_id)
             .await?
@@ -606,10 +597,7 @@ impl ConversationRuntime {
         })
     }
 
-    pub async fn compact_thread(
-        &self,
-        params: ThreadCompactParams,
-    ) -> Result<ThreadCompactResult> {
+    pub async fn compact_thread(&self, params: ThreadCompactParams) -> Result<ThreadCompactResult> {
         let summary_item_id = format!("item_{}", Uuid::new_v4().simple());
         let item = ConversationItem {
             item_id: summary_item_id.clone(),
@@ -664,10 +652,7 @@ impl ConversationRuntime {
         })
     }
 
-    pub async fn set_thread_memory_mode(
-        &self,
-        params: ThreadMemoryModeParams,
-    ) -> Result<()> {
+    pub async fn set_thread_memory_mode(&self, params: ThreadMemoryModeParams) -> Result<()> {
         let thread = self
             .load_thread(&params.thread_id)
             .await?
@@ -838,4 +823,3 @@ impl ConversationRuntime {
         Ok(())
     }
 }
-

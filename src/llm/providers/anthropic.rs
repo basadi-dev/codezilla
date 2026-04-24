@@ -5,10 +5,10 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::system::config::LlmConfig as Config;
 use crate::llm::{
     FunctionCall, LlmResponse, Message, Role, StreamChunk, TokenUsage, ToolCall, ToolDefinition,
 };
+use crate::system::config::LlmConfig as Config;
 
 const ANTHROPIC_API: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2023-06-01";

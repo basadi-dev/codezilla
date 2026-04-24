@@ -6,19 +6,24 @@ pub mod types;
 use anyhow::Result;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 use tokio::sync::broadcast::error::TryRecvError;
+use tracing::warn;
 
 use super::runtime::{ConversationRuntime, EventFilter};
 use app::InteractiveApp;
 use types::FocusPane;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(40);
+const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(40);
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -28,7 +33,7 @@ impl TerminalSession {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, Hide)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
@@ -39,7 +44,12 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            Show,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -56,27 +66,63 @@ pub async fn run_interactive_tui(
         .event_bus()
         .subscribe(subscriber_id.clone(), EventFilter { thread_id: None });
     let mut app = InteractiveApp::bootstrap(runtime.clone(), initial_thread_id).await?;
+    let mut dirty = true;
+    let mut last_draw = Instant::now();
 
     if let Some(prompt) = initial_prompt {
         app.composer.set_text(prompt);
         app.submit_composer().await?;
+        dirty = true;
     }
 
+    // Track the last-applied mouse capture state so we can react to changes.
+    let mut mouse_capture_active = true; // matches EnableMouseCapture called in TerminalSession::enter
+
     loop {
-        session.terminal.draw(|frame| render::draw(&mut app, frame))?;
+        let spinner_active = app.active_turn_id.is_some();
+        if spinner_active && last_draw.elapsed() >= ACTIVE_POLL_INTERVAL {
+            app.spinner_tick = app.spinner_tick.wrapping_add(1);
+            dirty = true;
+        }
+
+        if dirty {
+            session
+                .terminal
+                .draw(|frame| render::draw(&mut app, frame))?;
+            last_draw = Instant::now();
+            dirty = false;
+        }
+
+        // Sync mouse capture with app preference whenever it changes.
+        if app.mouse_capture_enabled != mouse_capture_active {
+            mouse_capture_active = app.mouse_capture_enabled;
+            dirty = true;
+            if mouse_capture_active {
+                let _ = execute!(session.terminal.backend_mut(), EnableMouseCapture);
+            } else {
+                let _ = execute!(session.terminal.backend_mut(), DisableMouseCapture);
+            }
+        }
 
         // Drain all pending runtime events before polling keyboard input
         loop {
             match subscription.receiver.try_recv() {
-                Ok(event) => app.handle_runtime_event(event).await?,
+                Ok(event) => {
+                    app.handle_runtime_event(event).await?;
+                    dirty = true;
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(count)) => {
+                    warn!(dropped = count, "tui lagged runtime events");
                     app.error_message =
                         Some(format!("UI dropped {count} runtime events while rendering"));
+                    dirty = true;
                     break;
                 }
                 Err(TryRecvError::Closed) => {
+                    warn!("tui runtime event stream closed");
                     app.error_message = Some("Runtime event stream closed".into());
+                    dirty = true;
                     break;
                 }
             }
@@ -86,15 +132,55 @@ pub async fn run_interactive_tui(
             break;
         }
 
-        if event::poll(POLL_INTERVAL)? {
+        let poll_interval = if app.active_turn_id.is_some() {
+            ACTIVE_POLL_INTERVAL
+        } else {
+            IDLE_POLL_INTERVAL
+        };
+
+        if event::poll(poll_interval)? {
             match event::read()? {
-                Event::Key(key) => input::handle_key(&mut app, key).await?,
-                Event::Paste(text) => {
-                    if app.pending_approval.is_none() && app.focus == FocusPane::Composer {
-                        app.composer.insert_str(&text);
+                Event::Key(key) => {
+                    input::handle_key(&mut app, key).await?;
+                    dirty = true;
+                }
+                Event::Mouse(mouse) if mouse_capture_active => {
+                    match mouse.kind {
+                        // ── Wheel scroll ─────────────────────────────────────
+                        MouseEventKind::ScrollUp => {
+                            app.scroll_transcript(-3);
+                            dirty = true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.scroll_transcript(3);
+                            dirty = true;
+                        }
+                        // ── Drag-to-select (left button) ─────────────────────
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            app.begin_transcript_drag(mouse.column, mouse.row);
+                            dirty = true;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            app.update_transcript_drag(mouse.column, mouse.row);
+                            dirty = true;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            app.finish_transcript_drag(mouse.column, mouse.row);
+                            dirty = true;
+                        }
+                        _ => {}
                     }
                 }
-                Event::Resize(_, _) => {}
+                Event::Paste(text) => {
+                    if app.pending_approval.is_none() && app.focus == FocusPane::Composer {
+                        app.jump_transcript_to_bottom();
+                        app.composer.insert_str(&text);
+                        dirty = true;
+                    }
+                }
+                Event::Resize(_, _) => {
+                    dirty = true;
+                }
                 _ => {}
             }
         }

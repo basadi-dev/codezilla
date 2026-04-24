@@ -32,10 +32,72 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             app.interrupt_active_turn().await?;
         }
-        (KeyCode::Tab, _) => app.next_focus(),
-        (KeyCode::BackTab, _) => app.previous_focus(),
+        (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+            app.toggle_auto_approve_tools();
+        }
+        // Ctrl+M — toggle mouse capture.
+        //   ON  → wheel scrolls transcript (default)
+        //   OFF → terminal handles mouse natively; drag-to-select works
+        (KeyCode::Char('m'), KeyModifiers::CONTROL) => {
+            app.mouse_capture_enabled = !app.mouse_capture_enabled;
+            app.status_message = if app.mouse_capture_enabled {
+                "Mouse: scroll mode  (Ctrl+M to switch back to select mode)".into()
+            } else {
+                "Mouse: select mode  (Ctrl+M to switch back to scroll mode)".into()
+            };
+            app.error_message = None;
+        }
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) if app.focus == FocusPane::Composer => {
+            handle_composer_key(app, key).await?;
+        }
+
+        // ── Global scroll — works in ANY focus pane ───────────────────────
+        // Ctrl+U / Ctrl+D  →  half-page scroll (12 lines)
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+            app.scroll_transcript(-12);
+        }
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+            app.scroll_transcript(12);
+        }
+        // PageUp / PageDown  →  8-line scroll
+        (KeyCode::PageUp, _) => {
+            app.scroll_transcript(-8);
+        }
+        (KeyCode::PageDown, _) => {
+            app.scroll_transcript(8);
+        }
+        // Ctrl+Up / Ctrl+Down  →  1-line scroll
+        (KeyCode::Up, KeyModifiers::CONTROL) => {
+            app.scroll_transcript(-1);
+        }
+        (KeyCode::Down, KeyModifiers::CONTROL) => {
+            app.scroll_transcript(1);
+        }
+        // Ctrl+End  →  jump to bottom + re-enable auto-scroll
+        (KeyCode::End, KeyModifiers::CONTROL) => {
+            app.auto_scroll = true;
+        }
+        // Ctrl+Home  →  jump to top
+        (KeyCode::Home, KeyModifiers::CONTROL) => {
+            app.auto_scroll = false;
+            app.transcript_scroll = 0;
+        }
+
+        // Tab / Shift+Tab cycles between Transcript (scroll mode) and Composer (type mode)
+        (KeyCode::Tab, _) => {
+            app.focus = match app.focus {
+                FocusPane::Composer => FocusPane::Transcript,
+                _ => FocusPane::Composer,
+            };
+        }
+        (KeyCode::BackTab, _) => {
+            app.focus = match app.focus {
+                FocusPane::Transcript => FocusPane::Composer,
+                _ => FocusPane::Transcript,
+            };
+        }
+
         _ => match app.focus {
-            FocusPane::Threads => handle_threads_key(app, key).await?,
             FocusPane::Transcript => handle_transcript_key(app, key),
             FocusPane::Composer => handle_composer_key(app, key).await?,
         },
@@ -44,62 +106,134 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
 }
 
 async fn handle_approval_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Char('a') | KeyCode::Char('A') => {
-            app.resolve_pending_approval(ApprovalDecision::Approved).await?;
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+            app.toggle_auto_approve_tools();
         }
-        KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => {
-            app.resolve_pending_approval(ApprovalDecision::Denied).await?;
+        (KeyCode::Char('a') | KeyCode::Char('A'), _) => {
+            app.resolve_pending_approval(ApprovalDecision::Approved)
+                .await?;
         }
-        _ => {}
-    }
-    Ok(())
-}
-
-async fn handle_threads_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Up => app.select_thread_delta(-1),
-        KeyCode::Down => app.select_thread_delta(1),
-        KeyCode::Enter => app.open_selected_thread().await?,
-        KeyCode::Char('j') => app.select_thread_delta(1),
-        KeyCode::Char('k') => app.select_thread_delta(-1),
+        (KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc, _) => {
+            app.resolve_pending_approval(ApprovalDecision::Denied)
+                .await?;
+        }
         _ => {}
     }
     Ok(())
 }
 
 fn handle_transcript_key(app: &mut InteractiveApp, key: KeyEvent) {
-    app.auto_scroll = false;
     match key.code {
-        KeyCode::Up => app.transcript_scroll = app.transcript_scroll.saturating_sub(1),
-        KeyCode::Down => app.transcript_scroll = app.transcript_scroll.saturating_add(1),
-        KeyCode::PageUp => app.transcript_scroll = app.transcript_scroll.saturating_sub(8),
-        KeyCode::PageDown => app.transcript_scroll = app.transcript_scroll.saturating_add(8),
-        KeyCode::Home => app.transcript_scroll = 0,
+        KeyCode::Up => app.scroll_transcript(-1),
+        KeyCode::Down => app.scroll_transcript(1),
+        KeyCode::PageUp => app.scroll_transcript(-8),
+        KeyCode::PageDown => app.scroll_transcript(8),
+        KeyCode::Home => {
+            app.auto_scroll = false;
+            app.transcript_scroll = 0;
+        }
         KeyCode::End => app.auto_scroll = true,
         _ => {}
     }
 }
 
 async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+    match (key.code, key.modifiers) {
+        (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+            app.jump_transcript_to_bottom();
             app.composer.insert_char('\n');
         }
-        KeyCode::Enter => app.submit_composer().await?,
-        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        (KeyCode::Enter, _) => {
+            app.jump_transcript_to_bottom();
+            app.submit_composer().await?
+        }
+
+        // ── Alt/Option word navigation ─────────────────────────────────────
+        // macOS terminals translate Option+Left → Esc+b  and  Option+Right → Esc+f
+        // Crossterm decodes those as Char('b'/'f') with ALT modifier.
+        // We handle these *before* the generic char catcher so they don't type.
+        (KeyCode::Char('b'), m) if m.contains(KeyModifiers::ALT) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_word_left();
+        }
+        (KeyCode::Char('f'), m) if m.contains(KeyModifiers::ALT) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_word_right();
+        }
+        // Alt+d  →  delete word right  (emacs M-d)
+        (KeyCode::Char('d'), m) if m.contains(KeyModifiers::ALT) => {
+            app.jump_transcript_to_bottom();
+            app.composer.delete_word_right();
+        }
+        // Alt+Backspace  →  delete word left  (emacs M-DEL)
+        (KeyCode::Backspace, m) if m.contains(KeyModifiers::ALT) => {
+            app.jump_transcript_to_bottom();
+            app.composer.delete_word_left();
+        }
+
+        // Generic printable character — exclude CONTROL and ALT so modifier
+        // combos don't fall through and type raw letters.
+        (KeyCode::Char(ch), modifiers)
+            if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.jump_transcript_to_bottom();
             app.composer.insert_char(ch);
         }
-        KeyCode::Backspace => app.composer.backspace(),
-        KeyCode::Delete => app.composer.delete(),
-        KeyCode::Left => app.composer.move_left(),
-        KeyCode::Right => app.composer.move_right(),
-        KeyCode::Up => app.composer.move_up(),
-        KeyCode::Down => app.composer.move_down(),
-        KeyCode::Home => app.composer.move_home(),
-        KeyCode::End => app.composer.move_end(),
-        KeyCode::Esc => {
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+            app.jump_transcript_to_bottom();
+            app.composer.delete_to_line_start();
+        }
+        (KeyCode::Backspace, _) => {
+            app.jump_transcript_to_bottom();
+            app.composer.backspace();
+        }
+        (KeyCode::Delete, _) => {
+            app.jump_transcript_to_bottom();
+            app.composer.delete();
+        }
+        // Ctrl+Left / Ctrl+Right or Alt+Left / Alt+Right  →  word jump
+        // (covers terminals that send Alt+Arrow directly rather than Esc+b/f)
+        (KeyCode::Left, m) if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_word_left();
+        }
+        (KeyCode::Right, m) if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_word_right();
+        }
+        (KeyCode::Left, _) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_left();
+        }
+        (KeyCode::Right, _) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_right();
+        }
+        (KeyCode::Up, _) => {
+            app.jump_transcript_to_bottom();
+            let (first_width, continuation_width) = app.composer_wrap_widths();
+            app.composer
+                .move_visual_up(first_width.max(1), continuation_width.max(1));
+        }
+        (KeyCode::Down, _) => {
+            app.jump_transcript_to_bottom();
+            let (first_width, continuation_width) = app.composer_wrap_widths();
+            app.composer
+                .move_visual_down(first_width.max(1), continuation_width.max(1));
+        }
+        (KeyCode::Home, _) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_home();
+        }
+        (KeyCode::End, _) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_end();
+        }
+        (KeyCode::Esc, _) => {
             if !app.composer.is_empty() {
+                app.jump_transcript_to_bottom();
                 app.composer = super::types::ComposerState::default();
             }
         }

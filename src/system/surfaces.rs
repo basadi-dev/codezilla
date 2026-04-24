@@ -2,11 +2,11 @@ use anyhow::{bail, Result};
 use std::io::{self, Write};
 
 use super::domain::{OutputMode, RuntimeEventKind, SurfaceKind, UserInput};
-use super::tui::run_interactive_tui;
 use super::runtime::{
     ConversationRuntime, EventFilter, ThreadForkParams, ThreadResumeParams, ThreadStartParams,
     TurnStartParams,
 };
+use super::tui::run_interactive_tui;
 
 #[derive(Debug, Clone)]
 pub struct InteractiveInvocation {

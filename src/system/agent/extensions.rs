@@ -35,14 +35,21 @@ impl ExtensionManager {
         if skills_dir.exists() {
             for entry in fs_entries(&skills_dir)? {
                 if entry.extension().and_then(|s| s.to_str()) == Some("md") {
-                    let name = entry.file_stem().and_then(|s| s.to_str()).unwrap_or("skill").to_string();
-                    skills.insert(name.clone(), SkillDefinition {
-                        skill_id: name.clone(),
-                        name: name.clone(),
-                        description: format!("Local skill loaded from {}", entry.display()),
-                        root_path: entry.to_string_lossy().to_string(),
-                        enabled: true,
-                    });
+                    let name = entry
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("skill")
+                        .to_string();
+                    skills.insert(
+                        name.clone(),
+                        SkillDefinition {
+                            skill_id: name.clone(),
+                            name: name.clone(),
+                            description: format!("Local skill loaded from {}", entry.display()),
+                            root_path: entry.to_string_lossy().to_string(),
+                            enabled: true,
+                        },
+                    );
                 }
             }
         }

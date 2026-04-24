@@ -64,9 +64,15 @@ pub struct OpenAiConfig {
     pub base_url: Option<String>,
 }
 
-fn default_provider() -> String { "ollama".into() }
-fn default_model() -> String { "qwen3-coder:480b".into() }
-fn default_ollama_url() -> String { "http://localhost:11434".into() }
+fn default_provider() -> String {
+    "ollama".into()
+}
+fn default_model() -> String {
+    "qwen3-coder:480b".into()
+}
+fn default_ollama_url() -> String {
+    "http://localhost:11434".into()
+}
 
 use super::domain::{
     now_seconds, AccountSession, ApprovalPolicy, ApprovalsReviewerKind, AuthMode,
@@ -276,9 +282,9 @@ impl ConfigManager {
         let effective = EffectiveConfig {
             app_home,
             sqlite_home,
-            model_settings: raw
-                .model_settings
-                .unwrap_or_else(|| model_settings_from_legacy_llm(&legacy.llm, &legacy.reasoning_effort)),
+            model_settings: raw.model_settings.unwrap_or_else(|| {
+                model_settings_from_legacy_llm(&legacy.llm, &legacy.reasoning_effort)
+            }),
             approval_policy: raw.approval_policy.unwrap_or_default(),
             approvals_reviewer: raw
                 .approvals_reviewer
@@ -551,10 +557,17 @@ fn default_permission_profile(cwd: &str) -> PermissionProfile {
     }
 }
 
-fn default_log_level() -> String { "info".into() }
-fn default_log_file() -> String { "logs/codezilla.log".into() }
+fn default_log_level() -> String {
+    "info".into()
+}
+fn default_log_file() -> String {
+    "logs/codezilla.log".into()
+}
 
-fn model_settings_from_legacy_llm(llm: &LlmConfig, reasoning_effort: &Option<String>) -> ModelSettings {
+fn model_settings_from_legacy_llm(
+    llm: &LlmConfig,
+    reasoning_effort: &Option<String>,
+) -> ModelSettings {
     ModelSettings {
         model_id: llm.models.default.clone(),
         provider_id: llm.provider.clone(),
@@ -593,7 +606,9 @@ fn load_or_default_legacy_config(path: &Path) -> Result<LegacyConfig> {
     if let Ok(v) = std::env::var("OLLAMA_API_KEY") {
         if !v.is_empty() {
             c.llm.api_keys.ollama = v;
-            if c.llm.ollama.auth_type.is_none() { c.llm.ollama.auth_type = Some("bearer".into()); }
+            if c.llm.ollama.auth_type.is_none() {
+                c.llm.ollama.auth_type = Some("bearer".into());
+            }
         }
     }
     if let Ok(v) = std::env::var("OLLAMA_USERNAME") {
@@ -603,22 +618,34 @@ fn load_or_default_legacy_config(path: &Path) -> Result<LegacyConfig> {
         }
     }
     if let Ok(v) = std::env::var("OLLAMA_PASSWORD") {
-        if !v.is_empty() { c.llm.ollama.password = Some(v); }
+        if !v.is_empty() {
+            c.llm.ollama.password = Some(v);
+        }
     }
     if let Ok(v) = std::env::var("OLLAMA_BASE_URL") {
-        if !v.is_empty() { c.llm.ollama.base_url = v; }
+        if !v.is_empty() {
+            c.llm.ollama.base_url = v;
+        }
     }
     if let Ok(v) = std::env::var("OPENAI_BASE_URL") {
-        if !v.is_empty() { c.llm.openai.base_url = Some(v); }
+        if !v.is_empty() {
+            c.llm.openai.base_url = Some(v);
+        }
     }
     if let Ok(v) = std::env::var("OPENAI_API_KEY") {
-        if !v.is_empty() { c.llm.api_keys.openai = v; }
+        if !v.is_empty() {
+            c.llm.api_keys.openai = v;
+        }
     }
     if let Ok(v) = std::env::var("ANTHROPIC_API_KEY") {
-        if !v.is_empty() { c.llm.api_keys.anthropic = v; }
+        if !v.is_empty() {
+            c.llm.api_keys.anthropic = v;
+        }
     }
     if let Ok(v) = std::env::var("GEMINI_API_KEY") {
-        if !v.is_empty() { c.llm.api_keys.gemini = v; }
+        if !v.is_empty() {
+            c.llm.api_keys.gemini = v;
+        }
     }
 
     Ok(c)

@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 
 use crate::llm::{self, LlmClient, StreamChunk};
 use crate::system::domain::{
-    ConversationItem, ItemKind, ModelId, ModelSettings, ToolCall, ToolDefinition, ToolProviderKind,
-    TokenUsage,
+    ConversationItem, ItemKind, ModelId, ModelSettings, TokenUsage, ToolCall, ToolDefinition,
+    ToolProviderKind,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,38 +71,64 @@ impl ModelGateway {
         &self,
         request: ModelRequest,
     ) -> Result<mpsc::Receiver<ModelStreamEvent>> {
-        let messages = build_llm_messages(&request.system_instructions, &request.conversation_items);
-        let tools = request.tool_definitions.iter().map(|t| llm::ToolDefinition {
-            typ: "function".into(),
-            function: llm::FunctionDefinition {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters: t.input_schema.clone(),
-            },
-        }).collect::<Vec<_>>();
+        let messages =
+            build_llm_messages(&request.system_instructions, &request.conversation_items);
+        let tools = request
+            .tool_definitions
+            .iter()
+            .map(|t| llm::ToolDefinition {
+                typ: "function".into(),
+                function: llm::FunctionDefinition {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.input_schema.clone(),
+                },
+            })
+            .collect::<Vec<_>>();
 
         let (tx, rx) = mpsc::channel(256);
         let client = self.client.clone();
         let model_settings = request.model_settings.clone();
 
         tokio::spawn(async move {
-            match client.stream(
-                &messages, &tools, &model_settings.model_id, 0.2,
-                model_settings.reasoning_effort.as_deref(), 8192,
-            ).await {
+            match client
+                .stream(
+                    &messages,
+                    &tools,
+                    &model_settings.model_id,
+                    0.2,
+                    model_settings.reasoning_effort.as_deref(),
+                    8192,
+                )
+                .await
+            {
                 Ok(mut stream) => {
                     let mut usage = TokenUsage::default();
-                    let mut partial_tools: HashMap<usize, (Option<String>, Option<String>, String)> = HashMap::new();
+                    let mut partial_tools: HashMap<
+                        usize,
+                        (Option<String>, Option<String>, String),
+                    > = HashMap::new();
                     while let Some(chunk) = stream.recv().await {
                         match chunk {
                             StreamChunk::Text(text) => {
                                 let _ = tx.send(ModelStreamEvent::AssistantDelta(text)).await;
                             }
-                            StreamChunk::ToolCallDelta { index, id, name, arguments_delta } => {
+                            StreamChunk::ToolCallDelta {
+                                index,
+                                id,
+                                name,
+                                arguments_delta,
+                            } => {
                                 let entry = partial_tools.entry(index).or_default();
-                                if let Some(id) = id { entry.0 = Some(id); }
-                                if let Some(name) = name { entry.1 = Some(name); }
-                                if let Some(args) = arguments_delta { entry.2.push_str(&args); }
+                                if let Some(id) = id {
+                                    entry.0 = Some(id);
+                                }
+                                if let Some(name) = name {
+                                    entry.1 = Some(name);
+                                }
+                                if let Some(args) = arguments_delta {
+                                    entry.2.push_str(&args);
+                                }
                             }
                             StreamChunk::Usage(tokens) => {
                                 usage = TokenUsage {
@@ -115,45 +141,81 @@ impl ModelGateway {
                         }
                     }
                     if !partial_tools.is_empty() {
-                        let calls = partial_tools.into_iter().map(|(_, (id, name, args))| ToolCall {
-                            tool_call_id: id.unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple())),
-                            provider_kind: ToolProviderKind::Builtin,
-                            tool_name: name.unwrap_or_default(),
-                            arguments: serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({})),
-                        }).collect::<Vec<_>>();
+                        let calls = partial_tools
+                            .into_iter()
+                            .map(|(_, (id, name, args))| ToolCall {
+                                tool_call_id: id.unwrap_or_else(|| {
+                                    format!("call_{}", uuid::Uuid::new_v4().simple())
+                                }),
+                                provider_kind: ToolProviderKind::Builtin,
+                                tool_name: name.unwrap_or_default(),
+                                arguments: serde_json::from_str(&args)
+                                    .unwrap_or_else(|_| serde_json::json!({})),
+                            })
+                            .collect::<Vec<_>>();
                         let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
                     }
                     let _ = tx.send(ModelStreamEvent::Completed(usage)).await;
                 }
                 Err(stream_err) => {
-                    match client.complete(
-                        &messages, &tools, &model_settings.model_id, 0.2,
-                        model_settings.reasoning_effort.as_deref(), 8192,
-                    ).await {
+                    let stream_err_text = stream_err.to_string();
+                    if is_non_retryable_stream_error(&stream_err_text) {
+                        let _ = tx
+                            .send(ModelStreamEvent::Failed(humanize_stream_error(
+                                &stream_err_text,
+                            )))
+                            .await;
+                        return;
+                    }
+
+                    match client
+                        .complete(
+                            &messages,
+                            &tools,
+                            &model_settings.model_id,
+                            0.2,
+                            model_settings.reasoning_effort.as_deref(),
+                            8192,
+                        )
+                        .await
+                    {
                         Ok(response) => {
                             if !response.content.is_empty() {
-                                let _ = tx.send(ModelStreamEvent::AssistantDelta(response.content)).await;
+                                let _ = tx
+                                    .send(ModelStreamEvent::AssistantDelta(response.content))
+                                    .await;
                             }
                             if !response.tool_calls.is_empty() {
-                                let calls = response.tool_calls.into_iter().map(|c| ToolCall {
-                                    tool_call_id: c.id,
-                                    provider_kind: ToolProviderKind::Builtin,
-                                    tool_name: c.function.name,
-                                    arguments: serde_json::from_str(&c.function.arguments).unwrap_or_else(|_| serde_json::json!({})),
-                                }).collect::<Vec<_>>();
+                                let calls = response
+                                    .tool_calls
+                                    .into_iter()
+                                    .map(|c| ToolCall {
+                                        tool_call_id: c.id,
+                                        provider_kind: ToolProviderKind::Builtin,
+                                        tool_name: c.function.name,
+                                        arguments: serde_json::from_str(&c.function.arguments)
+                                            .unwrap_or_else(|_| serde_json::json!({})),
+                                    })
+                                    .collect::<Vec<_>>();
                                 let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
                             }
                             let usage = response.usage.unwrap_or_default();
-                            let _ = tx.send(ModelStreamEvent::Completed(TokenUsage {
-                                input_tokens: usage.prompt_tokens as i64,
-                                output_tokens: usage.completion_tokens as i64,
-                                cached_tokens: 0,
-                            })).await;
+                            let _ = tx
+                                .send(ModelStreamEvent::Completed(TokenUsage {
+                                    input_tokens: usage.prompt_tokens as i64,
+                                    output_tokens: usage.completion_tokens as i64,
+                                    cached_tokens: 0,
+                                }))
+                                .await;
                         }
                         Err(complete_err) => {
-                            let _ = tx.send(ModelStreamEvent::Failed(format!(
-                                "{stream_err}; fallback complete failed: {complete_err}"
-                            ))).await;
+                            let _ = tx
+                                .send(ModelStreamEvent::Failed(format!(
+                                    "{}; fallback complete failed: {}",
+                                    humanize_stream_error(&stream_err_text),
+                                    humanize_stream_error(&complete_err.to_string())
+                                )))
+                                .await;
                         }
                     }
                 }
@@ -161,6 +223,36 @@ impl ModelGateway {
         });
 
         Ok(rx)
+    }
+}
+
+fn is_non_retryable_stream_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("api error 400")
+        || lower.contains("api error 401")
+        || lower.contains("api error 403")
+        || lower.contains("api error 404")
+        || lower.contains("api error 413")
+        || lower.contains("api error 422")
+        || lower.contains("context exceeded")
+        || lower.contains("maximum context length")
+        || lower.contains("context window")
+        || lower.contains("prompt is too long")
+}
+
+fn humanize_stream_error(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("context exceeded")
+        || lower.contains("maximum context length")
+        || lower.contains("context window")
+        || lower.contains("prompt is too long")
+        || (lower.contains("api error 400") && lower.contains("context"))
+    {
+        format!(
+            "{err}. The conversation exceeded the model context window. Start a new thread, compact this one, or use a model with a larger context."
+        )
+    } else {
+        err.to_string()
     }
 }
 
@@ -196,7 +288,10 @@ fn build_llm_messages(
                         content: String::new(),
                         tool_calls: vec![llm::ToolCall {
                             id: tc.tool_call_id,
-                            function: llm::FunctionCall { name: tc.tool_name, arguments: tc.arguments.to_string() },
+                            function: llm::FunctionCall {
+                                name: tc.tool_name,
+                                arguments: tc.arguments.to_string(),
+                            },
                         }],
                         tool_result: None,
                         think_content: String::new(),
@@ -205,7 +300,9 @@ fn build_llm_messages(
                 }
             }
             ItemKind::ToolResult => {
-                if let Ok(tr) = serde_json::from_value::<crate::system::domain::ToolResult>(item.payload.clone()) {
+                if let Ok(tr) = serde_json::from_value::<crate::system::domain::ToolResult>(
+                    item.payload.clone(),
+                ) {
                     messages.push(llm::Message {
                         role: llm::Role::Tool,
                         content: String::new(),

@@ -1,18 +1,47 @@
 use anyhow::Result;
+use serde_json::Value;
 use std::collections::HashMap;
 
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+};
+
 use super::super::domain::{
-    ApprovalDecision, ApprovalResolution, ConversationItem, PendingApproval,
-    RuntimeEvent, RuntimeEventKind, ThreadMetadata, TurnStatus, UserInput,
+    ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalPolicyKind, ApprovalResolution,
+    ConversationItem, ItemKind, PendingApproval, RuntimeEvent, RuntimeEventKind, ThreadMetadata,
+    ToolResult, TurnStatus, UserInput,
 };
 use super::super::runtime::{
-    ConversationRuntime, ThreadForkParams, ThreadListParams, ThreadReadParams,
-    ThreadResumeParams, ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnSteerParams,
+    ConversationRuntime, ThreadForkParams, ThreadListParams, ThreadReadParams, ThreadResumeParams,
+    ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnSteerParams,
 };
 use super::types::{
-    entry_from_item, thread_label, short_turn_id, ComposerState, EntryKind, FocusPane,
-    PendingApprovalView, TranscriptEntry, THREAD_LIMIT,
+    entry_from_item, entry_style, format_timestamp, format_tool_result, short_turn_id,
+    split_at_width, thread_label, transcript_lines, ComposerState, EntryKind, FocusPane,
+    PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
+    COLOR_MUTED, THREAD_LIMIT,
 };
+
+#[derive(Debug, Clone)]
+struct CachedTranscriptEntry {
+    kind: EntryKind,
+    title: String,
+    timestamp: Option<i64>,
+    pending: bool,
+    body_lines: Vec<String>,
+    line_count: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+struct TranscriptRenderCache {
+    width: u16,
+    dirty: bool,
+    entries: Vec<CachedTranscriptEntry>,
+    line_ends: Vec<usize>,
+    total_lines: usize,
+}
 
 /// Full application state for the interactive TUI.
 pub struct InteractiveApp {
@@ -28,14 +57,32 @@ pub struct InteractiveApp {
     pub focus: FocusPane,
     pub composer: ComposerState,
     pub pending_approval: Option<PendingApprovalView>,
+    pub approval_policy_override: Option<ApprovalPolicy>,
     pub active_turn_id: Option<String>,
     pub status_message: String,
     pub error_message: Option<String>,
     pub should_quit: bool,
+    /// Monotonically increasing frame counter — drives the spinner animation.
+    pub spinner_tick: u64,
+    /// Whether mouse capture is active (wheel scroll on, native select off).
+    pub mouse_capture_enabled: bool,
+    // ── drag-to-select ────────────────────────────────────────────────────────
+    /// Fixed transcript positions where the left button started and ended.
+    pub drag_start: Option<SelectionPoint>,
+    /// Fixed transcript position of the current/final drag point.
+    pub drag_end: Option<SelectionPoint>,
+    /// Transcript area rect — written by the renderer each frame.
+    pub transcript_area: Rect,
+    /// Composer input area rect — written by the renderer each frame.
+    pub composer_area: Rect,
+    transcript_render_cache: TranscriptRenderCache,
 }
 
 impl InteractiveApp {
-    pub async fn bootstrap(runtime: ConversationRuntime, initial_thread_id: String) -> Result<Self> {
+    pub async fn bootstrap(
+        runtime: ConversationRuntime,
+        initial_thread_id: String,
+    ) -> Result<Self> {
         let mut app = Self {
             runtime,
             current_thread_id: initial_thread_id.clone(),
@@ -49,10 +96,21 @@ impl InteractiveApp {
             focus: FocusPane::Composer,
             composer: ComposerState::default(),
             pending_approval: None,
+            approval_policy_override: None,
             active_turn_id: None,
             status_message: "Ready".into(),
             error_message: None,
             should_quit: false,
+            spinner_tick: 0,
+            mouse_capture_enabled: true,
+            drag_start: None,
+            drag_end: None,
+            transcript_area: Rect::default(),
+            composer_area: Rect::default(),
+            transcript_render_cache: TranscriptRenderCache {
+                dirty: true,
+                ..TranscriptRenderCache::default()
+            },
         };
         app.refresh_threads().await?;
         let current = app.current_thread_id.clone();
@@ -125,6 +183,8 @@ impl InteractiveApp {
             })
             .map(|t| t.turn_id.clone());
         self.pending_approval = None;
+        self.drag_start = None;
+        self.drag_end = None;
         self.auto_scroll = true;
         self.error_message = None;
         self.status_message = format!("Opened {}", thread_label(&persisted.metadata));
@@ -136,21 +196,14 @@ impl InteractiveApp {
             .current_thread_meta
             .as_ref()
             .and_then(|t| t.cwd.clone())
-            .or_else(|| {
-                Some(
-                    self.runtime
-                        .effective_config()
-                        .working_directory
-                        .clone(),
-                )
-            });
+            .or_else(|| Some(self.runtime.effective_config().working_directory.clone()));
 
         let created = self
             .runtime
             .start_thread(ThreadStartParams {
                 cwd,
                 model_settings: None,
-                approval_policy: None,
+                approval_policy: self.current_approval_policy_override(),
                 permission_profile: None,
                 ephemeral: false,
             })
@@ -177,44 +230,179 @@ impl InteractiveApp {
         Ok(())
     }
 
-    pub async fn open_selected_thread(&mut self) -> Result<()> {
-        if let Some(thread_id) = self.selected_thread_id.clone() {
-            self.load_thread(&thread_id).await?;
-        }
-        Ok(())
-    }
+    // ── Drag-to-select helpers ────────────────────────────────────────────────
 
-    pub fn next_focus(&mut self) {
-        self.focus = match self.focus {
-            FocusPane::Threads => FocusPane::Transcript,
-            FocusPane::Transcript => FocusPane::Composer,
-            FocusPane::Composer => FocusPane::Threads,
+    pub fn begin_transcript_drag(&mut self, col: u16, row: u16) {
+        let Some(point) = self.mouse_to_selection_point(col, row, false) else {
+            self.clear_selection();
+            return;
         };
+        self.drag_start = Some(point);
+        self.drag_end = Some(point);
+        self.auto_scroll = false;
     }
 
-    pub fn previous_focus(&mut self) {
-        self.focus = match self.focus {
-            FocusPane::Threads => FocusPane::Composer,
-            FocusPane::Transcript => FocusPane::Threads,
-            FocusPane::Composer => FocusPane::Transcript,
-        };
-    }
-
-    pub fn select_thread_delta(&mut self, delta: isize) {
-        if self.threads.is_empty() {
+    pub fn update_transcript_drag(&mut self, col: u16, row: u16) {
+        if self.drag_start.is_none() {
             return;
         }
-        let current_index = self
-            .selected_thread_id
-            .as_ref()
-            .and_then(|selected| {
-                self.threads
-                    .iter()
-                    .position(|t| &t.thread_id == selected)
+        if let Some(point) = self.mouse_to_selection_point(col, row, true) {
+            self.drag_end = Some(point);
+        }
+    }
+
+    pub fn finish_transcript_drag(&mut self, col: u16, row: u16) {
+        self.update_transcript_drag(col, row);
+        let moved = self.drag_start != self.drag_end;
+        if moved {
+            self.copy_selection_to_clipboard();
+        } else {
+            self.clear_selection();
+        }
+    }
+
+    fn mouse_to_selection_point(
+        &self,
+        col: u16,
+        row: u16,
+        clamp_to_viewport: bool,
+    ) -> Option<SelectionPoint> {
+        let area = self.transcript_area;
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        let right = area.x.saturating_add(area.width.saturating_sub(1));
+        let bottom = area.y.saturating_add(area.height.saturating_sub(1));
+        let (col, row) = if clamp_to_viewport {
+            (col.clamp(area.x, right), row.clamp(area.y, bottom))
+        } else {
+            if col < area.x || col > right || row < area.y || row > bottom {
+                return None;
+            }
+            (col, row)
+        };
+
+        Some(SelectionPoint {
+            line: self.transcript_scroll as usize + (row as usize - area.y as usize),
+            col: col.saturating_sub(area.x) as usize,
+        })
+    }
+
+    fn current_selection_range(&self) -> Option<super::types::SelectionRange> {
+        use super::types::SelectionRange;
+
+        let start = self.drag_start?;
+        let end = self.drag_end?;
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        Some(SelectionRange {
+            start_line: start.line,
+            start_col: start.col,
+            end_line: end.line,
+            end_col: end.col,
+        })
+    }
+
+    fn clear_selection(&mut self) {
+        self.drag_start = None;
+        self.drag_end = None;
+    }
+
+    pub fn scroll_transcript(&mut self, delta: i32) {
+        self.auto_scroll = false;
+        if delta < 0 {
+            self.transcript_scroll = self
+                .transcript_scroll
+                .saturating_sub(delta.unsigned_abs() as u16);
+        } else {
+            self.transcript_scroll = self.transcript_scroll.saturating_add(delta as u16);
+        }
+    }
+
+    pub fn jump_transcript_to_bottom(&mut self) {
+        self.auto_scroll = true;
+    }
+
+    pub fn composer_wrap_widths(&self) -> (usize, usize) {
+        // Both first and continuation lines use the same prefix width (5 chars)
+        // so both wrap at the same column — matching render_composer exactly.
+        let w = self.composer_area.width.saturating_sub(5) as usize;
+        (w, w)
+    }
+
+    /// Convert drag terminal coordinates into a `SelectionRange` (line + column)
+    /// within the `transcript_lines` vec.  Normalises so start ≤ end.
+    pub fn drag_selection_lines(&self) -> Option<super::types::SelectionRange> {
+        self.current_selection_range()
+    }
+
+    /// Copy the selected transcript text to the system clipboard.
+    /// For the first/last lines only the selected character range is taken;
+    /// middle lines are included in full. The "  │  " gutter is stripped.
+    pub fn copy_selection_to_clipboard(&mut self) {
+        let Some(sel) = self.current_selection_range() else {
+            return;
+        };
+
+        let (lines, total) = self.transcript_lines_all(self.transcript_area.width, None);
+        let end_clamped = sel.end_line.min(total.saturating_sub(1));
+        if sel.start_line > end_clamped {
+            return;
+        }
+
+        let selected: String = lines[sel.start_line..=end_clamped]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                // Build the full text of this rendered line
+                let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let chars: Vec<char> = full.chars().collect();
+
+                // Determine character slice bounds for this line
+                let line_idx = sel.start_line + i;
+                let from = if line_idx == sel.start_line {
+                    sel.start_col
+                } else {
+                    0
+                };
+                let to = if line_idx == end_clamped {
+                    sel.end_col + 1
+                } else {
+                    chars.len()
+                };
+                let from = from.min(chars.len());
+                let to = to.min(chars.len());
+
+                let text: String = chars[from..to].iter().collect();
+                // Strip the "  │  " gutter prefix when present
+                text.strip_prefix("  │  ").unwrap_or(&text).to_string()
             })
-            .unwrap_or(0) as isize;
-        let next = (current_index + delta).clamp(0, self.threads.len() as isize - 1) as usize;
-        self.selected_thread_id = Some(self.threads[next].thread_id.clone());
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if selected.trim().is_empty() {
+            return;
+        }
+        let char_count = selected.chars().count();
+
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => match cb.set_text(selected) {
+                Ok(_) => {
+                    self.status_message = format!("✓ Copied {char_count} chars");
+                    self.error_message = None;
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Clipboard write failed: {e}"));
+                }
+            },
+            Err(e) => {
+                self.error_message = Some(format!("Clipboard unavailable: {e}"));
+            }
+        }
     }
 
     pub async fn submit_composer(&mut self) -> Result<()> {
@@ -253,7 +441,7 @@ impl InteractiveApp {
                         input: vec![UserInput::from_text(raw)],
                         cwd: None,
                         model_settings: None,
-                        approval_policy: None,
+                        approval_policy: self.current_approval_policy_override(),
                         permission_profile: None,
                         output_schema: None,
                     },
@@ -289,6 +477,19 @@ impl InteractiveApp {
         } else if matches!(command, "/interrupt") {
             self.interrupt_active_turn().await?;
             true
+        } else if matches!(command, "/approve auto") {
+            self.set_auto_approve_tools(true);
+            true
+        } else if matches!(command, "/approve ask" | "/approve manual") {
+            self.set_auto_approve_tools(false);
+            true
+        } else if matches!(command, "/approve toggle") {
+            self.toggle_auto_approve_tools();
+            true
+        } else if matches!(command, "/approve" | "/approvals") {
+            self.status_message = format!("Approvals: {}", self.approval_mode_label());
+            self.error_message = None;
+            true
         } else if let Some(rest) = command.strip_prefix("/open ") {
             self.load_thread(rest.trim()).await?;
             true
@@ -296,9 +497,7 @@ impl InteractiveApp {
             self.load_thread(rest.trim()).await?;
             true
         } else if matches!(command, "/help") {
-            self.status_message =
-                "Keys: Tab switch pane, Ctrl+N new, Ctrl+F fork, Ctrl+C interrupt, Ctrl+Q quit"
-                    .into();
+            self.status_message = "Keys: Tab switch pane, Ctrl+A approvals, Ctrl+N new, Ctrl+F fork, Ctrl+C interrupt, Ctrl+Q quit. Commands: /approve auto|ask|toggle".into();
             self.error_message = None;
             true
         } else {
@@ -307,6 +506,49 @@ impl InteractiveApp {
         };
 
         Ok(handled)
+    }
+
+    pub fn toggle_auto_approve_tools(&mut self) {
+        let enable = !self.auto_approve_tools_enabled();
+        self.set_auto_approve_tools(enable);
+    }
+
+    pub fn set_auto_approve_tools(&mut self, enabled: bool) {
+        self.approval_policy_override = if enabled {
+            Some(ApprovalPolicy {
+                kind: ApprovalPolicyKind::Never,
+                granular: None,
+            })
+        } else {
+            None
+        };
+        self.status_message = format!("Approvals: {}", self.approval_mode_label());
+        self.error_message = None;
+    }
+
+    pub fn auto_approve_tools_enabled(&self) -> bool {
+        matches!(
+            self.effective_approval_policy().kind,
+            ApprovalPolicyKind::Never
+        )
+    }
+
+    pub fn approval_mode_label(&self) -> &'static str {
+        if self.auto_approve_tools_enabled() {
+            "auto"
+        } else {
+            "ask"
+        }
+    }
+
+    fn current_approval_policy_override(&self) -> Option<ApprovalPolicy> {
+        self.approval_policy_override.clone()
+    }
+
+    fn effective_approval_policy(&self) -> ApprovalPolicy {
+        self.approval_policy_override
+            .clone()
+            .unwrap_or_else(|| self.runtime.effective_config().approval_policy.clone())
     }
 
     pub async fn interrupt_active_turn(&mut self) -> Result<()> {
@@ -384,8 +626,12 @@ impl InteractiveApp {
             RuntimeEventKind::ItemCompleted => self.handle_item_completed(&event)?,
             RuntimeEventKind::ApprovalRequested => {
                 let pending = serde_json::from_value::<PendingApproval>(event.payload.clone())?;
-                let preview = serde_json::to_string_pretty(&pending.request.action)
-                    .unwrap_or_else(|_| pending.request.action.to_string());
+                let preview = format_approval_preview(&pending.request.action);
+                let summary_line = preview
+                    .lines()
+                    .next()
+                    .unwrap_or(&pending.request.justification)
+                    .to_string();
                 self.pending_approval = Some(PendingApprovalView {
                     approval: pending.clone(),
                     action_preview: preview,
@@ -396,13 +642,29 @@ impl InteractiveApp {
                     event.event_id,
                     EntryKind::Status,
                     "Approval",
-                    &pending.request.justification,
+                    &format!("Requested: {summary_line}"),
                     Some(event.emitted_at / 1000),
                 );
             }
             RuntimeEventKind::ApprovalResolved => {
                 let resolution =
                     serde_json::from_value::<ApprovalResolution>(event.payload.clone())?;
+                self.remove_latest_approval_request_entry();
+                let summary = self
+                    .pending_approval
+                    .as_ref()
+                    .map(|approval| {
+                        format!(
+                            "{:?}: {}",
+                            resolution.decision,
+                            approval
+                                .action_preview
+                                .lines()
+                                .next()
+                                .unwrap_or(&approval.approval.request.title)
+                        )
+                    })
+                    .unwrap_or_else(|| format!("{:?}", resolution.decision));
                 self.pending_approval = None;
                 self.status_message = format!("Approval {:?}", resolution.decision);
                 self.error_message = None;
@@ -410,7 +672,7 @@ impl InteractiveApp {
                     event.event_id,
                     EntryKind::Status,
                     "Approval",
-                    &format!("Decision: {:?}", resolution.decision),
+                    &summary,
                     Some(event.emitted_at / 1000),
                 );
             }
@@ -506,6 +768,7 @@ impl InteractiveApp {
 
         if let Some(index) = self.transcript_index.get(item_id).copied() {
             self.transcript[index].body.push_str(delta);
+            self.invalidate_transcript_cache();
         } else {
             self.upsert_transcript_entry(TranscriptEntry {
                 item_id: item_id.to_string(),
@@ -522,7 +785,17 @@ impl InteractiveApp {
 
     fn handle_item_completed(&mut self, event: &RuntimeEvent) -> Result<()> {
         let item = serde_json::from_value::<ConversationItem>(event.payload.clone())?;
-        self.upsert_transcript_entry(entry_from_item(&item));
+        if item.kind == ItemKind::ToolResult {
+            let result = serde_json::from_value::<ToolResult>(item.payload.clone())?;
+            if tool_result_failed(&result) {
+                self.upsert_transcript_entry(self.failed_tool_result_entry(&item, &result));
+            } else {
+                self.remove_latest_tool_context_entries();
+                self.upsert_transcript_entry(entry_from_item(&item));
+            }
+        } else {
+            self.upsert_transcript_entry(entry_from_item(&item));
+        }
         self.auto_scroll = true;
         Ok(())
     }
@@ -535,6 +808,7 @@ impl InteractiveApp {
             self.transcript_index.insert(entry.item_id.clone(), index);
             self.transcript.push(entry);
         }
+        self.invalidate_transcript_cache();
     }
 
     pub fn push_status_entry(
@@ -555,4 +829,401 @@ impl InteractiveApp {
         });
         self.auto_scroll = true;
     }
+
+    fn remove_latest_approval_request_entry(&mut self) {
+        let Some(index) = self.transcript.iter().rposition(|entry| {
+            entry.kind == EntryKind::Status
+                && entry.title == "Approval"
+                && entry.body.starts_with("Requested:")
+        }) else {
+            return;
+        };
+        self.transcript.remove(index);
+        self.rebuild_transcript_index();
+    }
+
+    fn remove_latest_tool_context_entries(&mut self) {
+        let Some(tool_call_index) = self
+            .transcript
+            .iter()
+            .rposition(|entry| entry.kind == EntryKind::ToolCall)
+        else {
+            return;
+        };
+
+        self.transcript = self
+            .transcript
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| {
+                *index != tool_call_index
+                    && !(*index > tool_call_index
+                        && entry.kind == EntryKind::Status
+                        && entry.title == "Approval")
+            })
+            .map(|(_, entry)| entry.clone())
+            .collect();
+        self.rebuild_transcript_index();
+    }
+
+    fn rebuild_transcript_index(&mut self) {
+        self.transcript_index.clear();
+        for (index, entry) in self.transcript.iter().enumerate() {
+            self.transcript_index.insert(entry.item_id.clone(), index);
+        }
+        self.invalidate_transcript_cache();
+    }
+
+    pub fn transcript_total_lines(&mut self, width: u16) -> usize {
+        self.ensure_transcript_render_cache(width);
+        self.transcript_render_cache.total_lines
+    }
+
+    pub fn transcript_window_lines(
+        &mut self,
+        width: u16,
+        start_line: usize,
+        max_lines: usize,
+        selection: Option<SelectionRange>,
+    ) -> (Vec<Line<'static>>, usize) {
+        self.ensure_transcript_render_cache(width);
+        if self.transcript_render_cache.entries.is_empty() {
+            return transcript_lines(&self.transcript, self.spinner_tick, width, selection);
+        }
+
+        let end_line = start_line.saturating_add(max_lines);
+        let first_entry = self
+            .transcript_render_cache
+            .line_ends
+            .partition_point(|&line_end| line_end <= start_line);
+
+        let mut lines = Vec::new();
+        for idx in first_entry..self.transcript_render_cache.entries.len() {
+            let entry_end = self.transcript_render_cache.line_ends[idx];
+            let entry = &self.transcript_render_cache.entries[idx];
+            let entry_start = entry_end.saturating_sub(entry.line_count);
+            if entry_start >= end_line {
+                break;
+            }
+            append_cached_transcript_entry_lines(
+                &mut lines,
+                entry,
+                self.spinner_tick,
+                start_line,
+                end_line,
+                entry_start,
+            );
+        }
+
+        if let Some(sel) = selection {
+            let visible_start = start_line;
+            let visible_end = start_line.saturating_add(lines.len());
+            let selection_start = sel.start_line.max(visible_start);
+            let selection_end = sel.end_line.min(visible_end.saturating_sub(1));
+            if selection_start <= selection_end {
+                for actual_line_idx in selection_start..=selection_end {
+                    let line_idx = actual_line_idx - visible_start;
+                    let col_from = if actual_line_idx == sel.start_line {
+                        sel.start_col
+                    } else {
+                        0
+                    };
+                    let col_to = if actual_line_idx == sel.end_line {
+                        sel.end_col
+                    } else {
+                        usize::MAX / 2
+                    };
+                    let taken = std::mem::replace(&mut lines[line_idx], Line::from(""));
+                    lines[line_idx] = apply_char_selection(taken, col_from, col_to);
+                }
+            }
+        }
+
+        (lines, self.transcript_render_cache.total_lines)
+    }
+
+    fn transcript_lines_all(
+        &mut self,
+        width: u16,
+        selection: Option<SelectionRange>,
+    ) -> (Vec<Line<'static>>, usize) {
+        let total = self.transcript_total_lines(width);
+        self.transcript_window_lines(width, 0, total.max(1), selection)
+    }
+
+    fn ensure_transcript_render_cache(&mut self, width: u16) {
+        if !self.transcript_render_cache.dirty && self.transcript_render_cache.width == width {
+            return;
+        }
+
+        self.transcript_render_cache = build_transcript_render_cache(&self.transcript, width);
+    }
+
+    fn invalidate_transcript_cache(&mut self) {
+        self.transcript_render_cache.dirty = true;
+    }
+
+    fn failed_tool_result_entry(
+        &self,
+        item: &ConversationItem,
+        result: &ToolResult,
+    ) -> TranscriptEntry {
+        let (tool_name, tool_input) = self
+            .transcript
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == EntryKind::ToolCall)
+            .map(|entry| (entry.title.clone(), entry.body.clone()))
+            .unwrap_or_else(|| ("tool".to_string(), String::new()));
+
+        let mut body = Vec::new();
+        if !tool_input.trim().is_empty() {
+            body.push(format!(
+                "input: {}",
+                tool_input.lines().next().unwrap_or_default()
+            ));
+        }
+        let error_value = result.error_message.as_deref().map(Value::from);
+        body.push(format_tool_result(
+            Some(&result.output),
+            error_value.as_ref(),
+        ));
+
+        TranscriptEntry {
+            item_id: item.item_id.clone(),
+            kind: EntryKind::Error,
+            title: format!("{tool_name} failed"),
+            body: body.join("\n"),
+            timestamp: Some(item.created_at),
+            pending: false,
+        }
+    }
+}
+
+fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> TranscriptRenderCache {
+    if entries.is_empty() {
+        return TranscriptRenderCache {
+            width,
+            dirty: false,
+            entries: Vec::new(),
+            line_ends: Vec::new(),
+            total_lines: 3,
+        };
+    }
+
+    let body_width = (width as usize).saturating_sub(5).max(1);
+    let mut cached_entries = Vec::with_capacity(entries.len());
+    let mut line_ends = Vec::with_capacity(entries.len());
+    let mut total_lines = 0usize;
+
+    for entry in entries {
+        let body_lines = if entry.body.is_empty() && entry.pending {
+            vec!["…".to_string()]
+        } else {
+            entry
+                .body
+                .split('\n')
+                .flat_map(|body_line| split_at_width(body_line, body_width))
+                .collect::<Vec<_>>()
+        };
+        let line_count = 1 + body_lines.len() + 1;
+        total_lines += line_count;
+        line_ends.push(total_lines);
+        cached_entries.push(CachedTranscriptEntry {
+            kind: entry.kind,
+            title: entry.title.clone(),
+            timestamp: entry.timestamp,
+            pending: entry.pending,
+            body_lines,
+            line_count,
+        });
+    }
+
+    TranscriptRenderCache {
+        width,
+        dirty: false,
+        entries: cached_entries,
+        line_ends,
+        total_lines,
+    }
+}
+
+fn append_cached_transcript_entry_lines(
+    out: &mut Vec<Line<'static>>,
+    entry: &CachedTranscriptEntry,
+    spinner_tick: u64,
+    start_line: usize,
+    end_line: usize,
+    entry_start: usize,
+) {
+    let (sigil, sigil_color, body_color) = entry_style(entry.kind);
+    let mut current_line = entry_start;
+
+    if current_line >= start_line && current_line < end_line {
+        let mut header_spans = vec![
+            Span::raw("  "),
+            Span::styled(
+                sigil.to_string(),
+                Style::default()
+                    .fg(sigil_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                entry.title.clone(),
+                Style::default()
+                    .fg(sigil_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if let Some(ts) = entry.timestamp {
+            header_spans.push(Span::raw("  "));
+            header_spans.push(Span::styled(
+                format_timestamp(ts),
+                Style::default().fg(COLOR_MUTED),
+            ));
+        }
+        if entry.pending {
+            header_spans.push(Span::raw("  "));
+            header_spans.push(Span::styled(
+                super::types::spinner_frame(spinner_tick).to_string(),
+                Style::default()
+                    .fg(COLOR_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        out.push(Line::from(header_spans));
+    }
+    current_line += 1;
+
+    for body_line in &entry.body_lines {
+        if current_line >= start_line && current_line < end_line {
+            out.push(Line::from(vec![
+                Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                Span::styled(body_line.clone(), Style::default().fg(body_color)),
+            ]));
+        }
+        current_line += 1;
+    }
+
+    if current_line >= start_line && current_line < end_line {
+        out.push(Line::from(""));
+    }
+}
+
+fn apply_char_selection(line: Line<'static>, col_from: usize, col_to: usize) -> Line<'static> {
+    let mut result: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0usize;
+    let col_end = col_to.saturating_add(1);
+
+    for span in line.spans {
+        let content = span.content.as_ref();
+        let char_count = content.chars().count();
+        let span_end = cursor + char_count;
+
+        if span_end <= col_from || cursor >= col_end {
+            result.push(span);
+        } else if cursor >= col_from && span_end <= col_end {
+            result.push(Span::styled(
+                span.content.clone(),
+                span.style.add_modifier(Modifier::REVERSED),
+            ));
+        } else {
+            let local_start = col_from.saturating_sub(cursor);
+            let local_end = col_end.saturating_sub(cursor).min(char_count);
+
+            if local_start > 0 {
+                let pre: String = content.chars().take(local_start).collect();
+                result.push(Span::styled(pre, span.style));
+            }
+            let sel: String = content
+                .chars()
+                .skip(local_start)
+                .take(local_end - local_start)
+                .collect();
+            result.push(Span::styled(
+                sel,
+                span.style.add_modifier(Modifier::REVERSED),
+            ));
+            if local_end < char_count {
+                let post: String = content.chars().skip(local_end).collect();
+                result.push(Span::styled(post, span.style));
+            }
+        }
+        cursor = span_end;
+    }
+    Line::from(result)
+}
+
+fn format_approval_preview(action: &Value) -> String {
+    let Ok(action) = serde_json::from_value::<ActionDescriptor>(action.clone()) else {
+        return serde_json::to_string_pretty(action).unwrap_or_else(|_| action.to_string());
+    };
+
+    let mut lines = Vec::new();
+
+    if let Some(command) = action
+        .command
+        .as_ref()
+        .filter(|command| !command.is_empty())
+    {
+        lines.push(format!("command   {}", shell_command_preview(command)));
+    }
+
+    if let Some(primary_path) = action.paths.first() {
+        if action.action_type == "command" || action.action_type == "shell_exec" {
+            lines.push(format!("cwd       {primary_path}"));
+        } else if action.paths.len() == 1 {
+            lines.push(format!("path      {primary_path}"));
+        }
+    }
+
+    if action.paths.len() > 1 {
+        let label = if action.action_type == "copy_path" {
+            "paths"
+        } else {
+            "targets"
+        };
+        lines.push(format!("{label:<10}{}", action.paths.join(", ")));
+    }
+
+    if !action.domains.is_empty() {
+        lines.push(format!("domains   {}", action.domains.join(", ")));
+    }
+
+    if lines.is_empty() {
+        lines.push(format!("action    {}", action.action_type));
+    } else if action.action_type != "command" && action.action_type != "shell_exec" {
+        lines.insert(0, format!("action    {}", action.action_type));
+    }
+
+    lines.join("\n")
+}
+
+fn shell_command_preview(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| shell_escape(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_escape(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn tool_result_failed(result: &ToolResult) -> bool {
+    !result.ok
+        || result
+            .error_message
+            .as_ref()
+            .is_some_and(|message| !message.trim().is_empty())
+        || result.output.get("error").and_then(Value::as_str).is_some()
 }

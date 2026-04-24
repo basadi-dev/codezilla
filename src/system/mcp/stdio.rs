@@ -18,7 +18,10 @@ pub struct StdioMcpClient {
 
 impl StdioMcpClient {
     pub async fn spawn(config: McpServerConfig) -> Result<Self> {
-        let cmd = config.command.clone().ok_or_else(|| anyhow!("MCP server {} has no command", config.name))?;
+        let cmd = config
+            .command
+            .clone()
+            .ok_or_else(|| anyhow!("MCP server {} has no command", config.name))?;
         if cmd.is_empty() {
             bail!("MCP server command is empty");
         }
@@ -33,14 +36,16 @@ impl StdioMcpClient {
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        
-        let (rpc_tx, mut rpc_rx) = mpsc::channel::<(Value, tokio::sync::oneshot::Sender<Result<Value>>)>(32);
+
+        let (rpc_tx, mut rpc_rx) =
+            mpsc::channel::<(Value, tokio::sync::oneshot::Sender<Result<Value>>)>(32);
 
         // RPC event loop task
         tokio::spawn(async move {
             let mut stdin = stdin;
             let mut reader = BufReader::new(stdout).lines();
-            let mut pending_requests = HashMap::<String, tokio::sync::oneshot::Sender<Result<Value>>>::new();
+            let mut pending_requests =
+                HashMap::<String, tokio::sync::oneshot::Sender<Result<Value>>>::new();
 
             loop {
                 tokio::select! {
@@ -48,7 +53,7 @@ impl StdioMcpClient {
                         let id = Uuid::new_v4().to_string();
                         req["id"] = json!(id.clone());
                         req["jsonrpc"] = json!("2.0");
-                        
+
                         let msg = format!("{}\n", serde_json::to_string(&req).unwrap());
                         if let Err(_) = stdin.write_all(msg.as_bytes()).await {
                             let _ = reply_tx.send(Err(anyhow!("Failed to write to MCP stdin")));
@@ -80,14 +85,19 @@ impl StdioMcpClient {
 
         // Initialize connection
         let client = Self { config, rpc_tx };
-        client.call("initialize", json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "codezilla",
-                "version": "2.0.0"
-            }
-        })).await?;
+        client
+            .call(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "codezilla",
+                        "version": "2.0.0"
+                    }
+                }),
+            )
+            .await?;
         client.call("notifications/initialized", json!({})).await?;
 
         Ok(client)
@@ -95,17 +105,25 @@ impl StdioMcpClient {
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.rpc_tx.send((json!({
-            "method": method,
-            "params": params
-        }), tx)).await?;
+        self.rpc_tx
+            .send((
+                json!({
+                    "method": method,
+                    "params": params
+                }),
+                tx,
+            ))
+            .await?;
         rx.await?
     }
 
     pub async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
         let result = self.call("tools/list", json!({})).await?;
-        let tools = result.get("tools").and_then(Value::as_array).ok_or_else(|| anyhow!("invalid tools/list response"))?;
-        
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("invalid tools/list response"))?;
+
         let mut defs = Vec::new();
         for t in tools {
             defs.push(ToolDefinition {
@@ -121,11 +139,16 @@ impl StdioMcpClient {
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
-        let result = self.call("tools/call", json!({
-            "name": name,
-            "arguments": arguments
-        })).await?;
-        
+        let result = self
+            .call(
+                "tools/call",
+                json!({
+                    "name": name,
+                    "arguments": arguments
+                }),
+            )
+            .await?;
+
         // MCP tools/call returns {"content": [{"type": "text", "text": "..."}]}
         // We simplify this back down to a string/JSON for Codezilla's ToolResult.output
         let content = result.get("content").and_then(Value::as_array);

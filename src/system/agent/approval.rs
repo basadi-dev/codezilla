@@ -126,11 +126,7 @@ impl ApprovalManager {
         }
     }
 
-    pub async fn cancel_for_turn(
-        &self,
-        thread_id: &str,
-        turn_id: &str,
-    ) -> Vec<ApprovalResolution> {
+    pub async fn cancel_for_turn(&self, thread_id: &str, turn_id: &str) -> Vec<ApprovalResolution> {
         let states = self
             .pending
             .read()

@@ -348,53 +348,53 @@ impl PersistenceManager {
     #[allow(dead_code)]
     pub fn rebuild_metadata(&self) -> Result<()> {
         self.with_conn(|conn| {
-        let tx = conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM threads", [])?;
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM threads", [])?;
 
-        let rows = {
-            let mut stmt = tx.prepare(
+            let rows = {
+                let mut stmt = tx.prepare(
                 "SELECT thread_id, MIN(created_at), MAX(created_at) FROM items GROUP BY thread_id",
             )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })?;
-            let mut collected = Vec::new();
-            for row in rows {
-                collected.push(row?);
-            }
-            collected
-        };
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?;
+                let mut collected = Vec::new();
+                for row in rows {
+                    collected.push(row?);
+                }
+                collected
+            };
 
-        for (thread_id, created_at, updated_at) in rows {
-            tx.execute(
-                r#"
+            for (thread_id, created_at, updated_at) in rows {
+                tx.execute(
+                    r#"
                 INSERT INTO threads (
                     thread_id, created_at, updated_at, model_id, provider_id, status,
                     archived, ephemeral, memory_mode, last_sequence
                 ) VALUES (?1, ?2, ?3, '', '', ?4, 0, 0, ?5, 0)
                 "#,
-                params![
-                    thread_id,
-                    created_at,
-                    updated_at,
-                    enum_json(&ThreadStatus::Idle)?,
-                    enum_json(&MemoryMode::Enabled)?,
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+                    params![
+                        thread_id,
+                        created_at,
+                        updated_at,
+                        enum_json(&ThreadStatus::Idle)?,
+                        enum_json(&MemoryMode::Enabled)?,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
         })
     }
 
     fn init(&self) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute_batch(
-            r#"
+                r#"
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS threads (
                 thread_id TEXT PRIMARY KEY,
@@ -438,8 +438,8 @@ impl PersistenceManager {
                 message TEXT NOT NULL
             );
             "#,
-        )?;
-        Ok(())
+            )?;
+            Ok(())
         })
     }
 

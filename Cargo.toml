@@ -70,3 +70,21 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+# ── Fast development profile ──────────────────────────────────────────────────
+# `cargo run` / `cargo build` already use this by default.
+# Tweaks here shorten incremental compile + link times without installing
+# a fast linker (though `brew install llvm` + config.toml would help further).
+[profile.dev]
+opt-level = 0          # no optimisation — fastest codegen
+debug = 1              # line tables only (not full DWARF) — faster link
+incremental = true     # reuse unchanged object files
+codegen-units = 256    # max parallelism across crates
+split-debuginfo = "unpacked"  # avoids slow dsymutil on macOS
+
+# `cargo run --profile dev-fast` — absolute minimum; use when you only want
+# to verify it compiles (e.g. CI smoke check or first-time cold build).
+[profile.dev-fast]
+inherits = "dev"
+debug = 0
+strip = "debuginfo"

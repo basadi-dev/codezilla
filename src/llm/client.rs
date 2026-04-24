@@ -2,9 +2,9 @@ use anyhow::{bail, Context as AnyhowContext, Result};
 use reqwest::Client;
 use std::time::Duration;
 
-use crate::system::config::LlmConfig;
 use crate::llm::providers::{anthropic, gemini, ollama, openai};
 use crate::llm::{LlmClient, LlmResponse, Message, StreamChunk, ToolDefinition};
+use crate::system::config::LlmConfig;
 
 /// Unified LLM client that dispatches to provider implementations.
 pub struct UnifiedClient {

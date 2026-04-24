@@ -6,12 +6,11 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::ollama::{build_openai_messages, parse_openai_response, parse_sse_delta};
-use crate::system::config::LlmConfig as Config;
 use crate::llm::{LlmResponse, Message, StreamChunk, ToolDefinition};
+use crate::system::config::LlmConfig as Config;
 
 fn api_base(cfg: &Config) -> String {
-    cfg
-        .openai
+    cfg.openai
         .base_url
         .clone()
         .unwrap_or_else(|| "https://api.openai.com/v1".into())
