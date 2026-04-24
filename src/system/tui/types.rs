@@ -945,19 +945,21 @@ pub fn relative_time_ago(ts: i64) -> String {
 
 pub fn pretty_json_or_text(primary: Option<&Value>, secondary: Option<&Value>) -> String {
     if let Some(text) = primary.and_then(|v| v.as_str()) {
-        return text.to_string();
+        return summarise_long_output(text, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS);
     }
     if let Some(value) = primary {
         if !value.is_null() {
-            return serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+            let s = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+            return summarise_long_output(&s, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS);
         }
     }
     if let Some(text) = secondary.and_then(|v| v.as_str()) {
-        return text.to_string();
+        return summarise_long_output(text, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS);
     }
     if let Some(value) = secondary {
         if !value.is_null() {
-            return serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+            let s = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+            return summarise_long_output(&s, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS);
         }
     }
     String::new()
@@ -1063,12 +1065,12 @@ fn format_shell_result(output: &Value) -> Option<String> {
 
     if !stdout.is_empty() {
         lines.push(String::new());
-        lines.push(stdout.to_string());
+        lines.push(summarise_long_output(stdout, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS));
     }
     if !stderr.is_empty() {
         lines.push(String::new());
         lines.push("stderr:".to_string());
-        lines.push(stderr.to_string());
+        lines.push(summarise_long_output(stderr, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS));
     }
     if output
         .get("truncated")
@@ -1076,7 +1078,7 @@ fn format_shell_result(output: &Value) -> Option<String> {
         .unwrap_or(false)
     {
         lines.push(String::new());
-        lines.push("output truncated".to_string());
+        lines.push("[backend truncated output]".to_string());
     }
 
     Some(lines.join("\n"))
@@ -1092,4 +1094,48 @@ fn shell_escape(arg: &str) -> String {
     } else {
         format!("'{}'", arg.replace('\'', "'\"'\"'"))
     }
+}
+
+// ─── Output summarisation ─────────────────────────────────────────────────────
+
+/// Maximum lines shown for a single tool output block in the TUI.
+const TOOL_OUTPUT_MAX_LINES: usize = 20;
+/// Maximum total characters shown before summarising.
+const TOOL_OUTPUT_MAX_CHARS: usize = 1_500;
+
+/// Truncate `text` if it exceeds `max_lines` lines **or** `max_chars` characters.
+///
+/// When truncation is needed the function returns the *tail* of the output
+/// (most useful for command output) preceded by a single "▲ N lines hidden"
+/// notice.  If the text fits within both limits it is returned unchanged.
+pub fn summarise_long_output(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let line_count = text.lines().count();
+    let char_count = text.chars().count();
+
+    let needs_truncation = line_count > max_lines || char_count > max_chars;
+    if !needs_truncation {
+        return text.to_string();
+    }
+
+    // Collect lines and keep only the tail window.
+    let all_lines: Vec<&str> = text.lines().collect();
+    let keep = max_lines.min(all_lines.len());
+    let skipped = all_lines.len().saturating_sub(keep);
+
+    // Further trim the kept tail if it still exceeds max_chars.
+    let tail_lines = &all_lines[skipped..];
+    let mut tail = tail_lines.join("\n");
+    if tail.chars().count() > max_chars {
+        // Trim from the start of the tail string to fit.
+        let chars: Vec<char> = tail.chars().collect();
+        let start = chars.len().saturating_sub(max_chars);
+        tail = chars[start..].iter().collect();
+        // Re-align to a line boundary so we don't split mid-line.
+        if let Some(nl) = tail.find('\n') {
+            tail = tail[nl + 1..].to_string();
+        }
+    }
+
+    let notice = format!("▲ {} lines hidden", line_count.saturating_sub(tail.lines().count()));
+    format!("{notice}\n{tail}")
 }
