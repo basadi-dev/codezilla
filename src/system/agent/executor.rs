@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::model_gateway::{is_context_overflow_error, ModelStreamEvent};
+use super::model_gateway::{estimate_items_token_pct, is_context_overflow_error, ModelStreamEvent};
 use crate::system::domain::{
     now_seconds, ActionDescriptor, ApprovalCategory, ApprovalDecision, ApprovalRequest,
     ConversationItem, ItemKind, ModelSettings, RuntimeEventKind, ThreadStatus, TokenUsage,
@@ -263,6 +263,18 @@ impl TurnExecutor {
                 };
                 self.persist_turn_item(call_item).await?;
 
+                // Re-read the live policy per tool call so a Ctrl+A toggle during
+                // an LLM response takes effect on the very next tool, not the
+                // next full loop iteration.
+                let approval_policy = {
+                    let t = thread.lock().await;
+                    t.approval_policy_override.clone()
+                }
+                .or_else(|| params.approval_policy.clone())
+                .unwrap_or_else(|| {
+                    self.runtime.inner.effective_config.approval_policy.clone()
+                });
+
                 let action = action_for_tool_call(&call, &cwd);
                 if self.runtime.inner.permission_manager.requires_approval(
                     &action,
@@ -504,7 +516,84 @@ impl TurnExecutor {
                 serde_json::to_value(&metadata)?,
             )
             .await?;
+
+        self.maybe_auto_compact(thread_id).await;
+
         Ok(())
+    }
+
+    /// Check context usage and trigger compaction in the background if over threshold.
+    async fn maybe_auto_compact(&self, thread_id: &str) {
+        let cfg = self.runtime.inner.effective_config.auto_compaction.clone();
+        if !cfg.enabled {
+            return;
+        }
+
+        // Estimate current token usage from persisted items.
+        let persisted = match self.runtime.inner.persistence_manager.read_thread(thread_id) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Per-model threshold, falling back to the global default.
+        let model_id = persisted.metadata.model_id.clone();
+        let threshold = cfg
+            .model_thresholds
+            .get(&model_id)
+            .copied()
+            .unwrap_or(cfg.threshold_pct);
+
+        let used_pct = estimate_items_token_pct(&persisted.items);
+        if used_pct < threshold as f64 {
+            return;
+        }
+
+        tracing::info!(
+            thread_id,
+            used_pct = format!("{used_pct:.1}"),
+            threshold,
+            "auto-compaction triggered"
+        );
+
+        let runtime = self.runtime.clone();
+        let thread_id = thread_id.to_string();
+        tokio::spawn(async move {
+            let _ = runtime
+                .publish_event(
+                    crate::system::domain::RuntimeEventKind::CompactionStatus,
+                    Some(thread_id.clone()),
+                    None,
+                    json!({ "status": "started", "message": "Auto-compacting context…" }),
+                )
+                .await;
+
+            let result = runtime
+                .compact_thread(crate::system::runtime::ThreadCompactParams {
+                    thread_id: thread_id.clone(),
+                    strategy: crate::system::domain::CompactionStrategy::SummarizePrefix,
+                })
+                .await;
+
+            match result {
+                Ok(r) => {
+                    let _ = runtime
+                        .publish_event(
+                            crate::system::domain::RuntimeEventKind::CompactionStatus,
+                            Some(thread_id),
+                            None,
+                            json!({
+                                "status": "completed",
+                                "message": format!("✓ Auto-compacted ({} items summarised)", r.items_removed),
+                                "items_removed": r.items_removed,
+                            }),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!("auto_compaction_failed: {e}");
+                }
+            }
+        });
     }
 
     pub async fn fail_turn(&self, thread_id: &str, turn_id: &str, reason: &str) -> Result<()> {

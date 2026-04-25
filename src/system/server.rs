@@ -260,6 +260,7 @@ impl AppServer {
                     RuntimeEventKind::ApprovalResolved => "approval/resolved",
                     RuntimeEventKind::Warning => "warning",
                     RuntimeEventKind::Disconnected => "warning",
+                    RuntimeEventKind::CompactionStatus => "compaction/status",
                 };
                 let _ = write_json_line(
                     &writer,

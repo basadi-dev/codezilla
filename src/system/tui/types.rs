@@ -543,7 +543,8 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             title: "summary".into(),
             body: item
                 .payload
-                .get("summary")
+                .get("text")
+                .or_else(|| item.payload.get("summary"))
                 .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or_else(|| item.payload.as_str().unwrap_or_default())
                 .to_string(),

@@ -58,3 +58,27 @@ system_prompt: |
 
 log_level: "debug"
 log_file: "logs/codezilla.log"
+
+# Auto-compaction: automatically summarise the conversation context after each
+# turn when usage exceeds the threshold, keeping plenty of room for new work.
+auto_compaction:
+  enabled: true
+  # Compact when context usage exceeds this % of the prompt budget (≈91k tokens).
+  # 70 means compact once roughly 64k tokens are used, leaving ~27k for new work.
+  threshold_pct: 70
+  # Per-model overrides — larger context windows can wait longer before compacting.
+  model_thresholds:
+    # Anthropic models (200k context window)
+    claude-opus-4-5: 80
+    claude-sonnet-4-5: 80
+    claude-opus-4-7: 80
+    claude-sonnet-4-6: 80
+    # OpenAI (128k context window)
+    gpt-4o: 75
+    gpt-4o-mini: 70
+    # Large ollama models with big context
+    qwen3-coder:480b: 72
+    kimi-k2.6:cloud: 75
+    # Smaller / local models — compact earlier to avoid degradation
+    glm-5.1:cloud: 65
+    deepseek-v4-flash:cloud: 68

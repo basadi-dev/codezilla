@@ -421,6 +421,7 @@ pub enum RuntimeEventKind {
     ApprovalResolved,
     Warning,
     Disconnected,
+    CompactionStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

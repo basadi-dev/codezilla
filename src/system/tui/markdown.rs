@@ -489,10 +489,22 @@ fn render_table(tbl: &TableState, max_width: usize) -> Vec<Line<'static>> {
     let content_budget = max_width.saturating_sub(total_sep).max(col_count);
     let natural_total: usize = col_widths.iter().sum();
     if natural_total > content_budget {
-        let scale = content_budget as f64 / natural_total as f64;
-        for w in &mut col_widths {
-            *w = ((*w as f64 * scale).ceil() as usize).max(1);
+        // Greedy allocation: satisfy smaller columns at their natural width first,
+        // then give the remaining budget to larger ones. This prevents a single
+        // very wide column from starving narrow columns (e.g. a file-path column
+        // next to a long description column).
+        let mut order: Vec<usize> = (0..col_count).collect();
+        order.sort_by_key(|&i| col_widths[i]);
+        let mut remaining = content_budget;
+        let mut new_widths = vec![1usize; col_count];
+        for (pass, &ci) in order.iter().enumerate() {
+            let cols_left = col_count - pass;
+            let fair_share = (remaining / cols_left).max(1);
+            let w = col_widths[ci].min(fair_share).max(1);
+            new_widths[ci] = w;
+            remaining = remaining.saturating_sub(w);
         }
+        col_widths = new_widths;
     }
 
     let sep_style   = Style::default().fg(COLOR_MUTED);
@@ -505,17 +517,30 @@ fn render_table(tbl: &TableState, max_width: usize) -> Vec<Line<'static>> {
         let is_header = ri == 0 && tbl.in_header;
         let cell_style = if is_header { header_style } else { body_style };
 
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        for ci in 0..col_count {
-            if ci > 0 {
-                spans.push(Span::styled("  ·  ".to_string(), sep_style));
+        // Word-wrap each cell into its column width, producing potentially
+        // multiple display lines per row.
+        let wrapped: Vec<Vec<String>> = (0..col_count)
+            .map(|ci| {
+                let cell = row.get(ci).map(String::as_str).unwrap_or("");
+                word_wrap(cell, col_widths[ci])
+            })
+            .collect();
+
+        let row_height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
+
+        for display_line in 0..row_height {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for ci in 0..col_count {
+                if ci > 0 {
+                    spans.push(Span::styled("  ·  ".to_string(), sep_style));
+                }
+                let cell_line = wrapped[ci].get(display_line).map(String::as_str).unwrap_or("");
+                let align = tbl.alignments.get(ci).copied().unwrap_or(Alignment::None);
+                let padded = align_cell(cell_line, col_widths[ci], align);
+                spans.push(Span::styled(padded, cell_style));
             }
-            let cell = row.get(ci).map(String::as_str).unwrap_or("");
-            let align = tbl.alignments.get(ci).copied().unwrap_or(Alignment::None);
-            let padded = align_cell(cell, col_widths[ci], align);
-            spans.push(Span::styled(padded, cell_style));
+            lines.push(Line::from(spans));
         }
-        lines.push(Line::from(spans));
 
         // Thin underline after header row only.
         if is_header {

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
+use tokio::sync::oneshot;
 
 use ratatui::{
     layout::Rect,
@@ -16,8 +17,9 @@ use super::super::domain::{
     ToolResult, TurnStatus, UserInput,
 };
 use super::super::runtime::{
-    ConversationRuntime, ThreadForkParams, ThreadListParams, ThreadReadParams, ThreadResumeParams,
-    ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnSteerParams,
+    ConversationRuntime, ThreadCompactParams, ThreadCompactResult, ThreadForkParams,
+    ThreadListParams, ThreadReadParams, ThreadResumeParams, ThreadStartParams, TurnInterruptParams,
+    TurnStartParams, TurnSteerParams,
 };
 use super::types::{
     basename, entry_from_item, entry_style, format_timestamp, format_tool_result,
@@ -95,6 +97,8 @@ pub struct InteractiveApp {
     composer_history: Vec<String>,
     composer_history_index: Option<usize>,
     composer_history_saved_input: Option<String>,
+    /// Background compaction task result receiver. Set when /compact is running.
+    pub(super) pending_compact: Option<oneshot::Receiver<anyhow::Result<ThreadCompactResult>>>,
 }
 
 impl InteractiveApp {
@@ -137,6 +141,7 @@ impl InteractiveApp {
             composer_history: Vec::new(),
             composer_history_index: None,
             composer_history_saved_input: None,
+            pending_compact: None,
         };
         app.refresh_threads().await?;
         let current = app.current_thread_id.clone();
@@ -258,42 +263,73 @@ impl InteractiveApp {
         Ok(())
     }
 
-    pub async fn compact_current_thread(&mut self) -> Result<()> {
+    pub fn compact_current_thread(&mut self) {
         use super::super::domain::CompactionStrategy;
-        use super::super::runtime::ThreadCompactParams;
 
         if self.active_turn_id.is_some() {
             self.error_message =
                 Some("Cannot compact while a turn is active — interrupt first".into());
-            return Ok(());
+            return;
+        }
+        if self.pending_compact.is_some() {
+            self.error_message = Some("Compaction already in progress…".into());
+            return;
         }
 
-        self.status_message = "Compacting thread… (calling LLM for summary)".into();
+        self.status_message = "Compacting… (summarising with LLM)".into();
         self.error_message = None;
 
-        let result = self
-            .runtime
-            .compact_thread(ThreadCompactParams {
-                thread_id: self.current_thread_id.clone(),
-                strategy: CompactionStrategy::SummarizePrefix,
-            })
-            .await;
+        let (tx, rx) = oneshot::channel();
+        let runtime = self.runtime.clone();
+        let thread_id = self.current_thread_id.clone();
+        tokio::spawn(async move {
+            let result = runtime
+                .compact_thread(ThreadCompactParams {
+                    thread_id,
+                    strategy: CompactionStrategy::SummarizePrefix,
+                })
+                .await;
+            // Ignore send error — TUI may have quit.
+            let _ = tx.send(result);
+        });
+        self.pending_compact = Some(rx);
+    }
 
-        match result {
-            Ok(r) => {
-                // Reload transcript to show the summary item.
-                self.load_thread(&self.current_thread_id.clone()).await?;
-                self.status_message = format!(
-                    "✓ Compacted — {} item(s) replaced with summary",
-                    r.items_removed
-                );
-                self.error_message = None;
+    /// Poll the background compaction task. Returns `true` if a result was
+    /// received and the caller should force a redraw.
+    pub async fn poll_compact_result(&mut self) -> Result<bool> {
+        let rx = match self.pending_compact.as_mut() {
+            None => return Ok(false),
+            Some(rx) => rx,
+        };
+
+        // try_recv both checks readiness *and* extracts the value in one shot.
+        // Never call .await after try_recv — that would panic with "called after complete".
+        match rx.try_recv() {
+            Ok(result) => {
+                self.pending_compact = None;
+                match result {
+                    Ok(r) => {
+                        self.load_thread(&self.current_thread_id.clone()).await?;
+                        self.status_message = format!(
+                            "✓ Compacted — {} item(s) replaced with summary",
+                            r.items_removed
+                        );
+                        self.error_message = None;
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("Compact failed: {e}"));
+                    }
+                }
+                Ok(true)
             }
-            Err(e) => {
-                self.error_message = Some(format!("Compact failed: {e}"));
+            Err(oneshot::error::TryRecvError::Empty) => Ok(false),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.pending_compact = None;
+                self.error_message = Some("Compaction task dropped unexpectedly".into());
+                Ok(true)
             }
         }
-        Ok(())
     }
 
     // ── Drag-to-select helpers ────────────────────────────────────────────────
@@ -673,7 +709,7 @@ impl InteractiveApp {
             self.interrupt_active_turn().await?;
             true
         } else if matches!(command, "/compact") {
-            self.compact_current_thread().await?;
+            self.compact_current_thread();
             true
         } else if matches!(command, "/approve auto") {
             self.set_auto_approve_tools(true).await;
@@ -1162,6 +1198,14 @@ impl InteractiveApp {
                     &text,
                     Some(event.emitted_at / 1000),
                 );
+            }
+            RuntimeEventKind::CompactionStatus => {
+                let msg = event
+                    .payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Compacting…");
+                self.status_message = msg.to_string();
             }
         }
 

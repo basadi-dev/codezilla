@@ -6,6 +6,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+// ── Auto-compaction config ────────────────────────────────────────────────────
+
+/// Controls automatic context compaction triggered after each completed turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AutoCompactionConfig {
+    /// Whether auto-compaction is active. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Compact when estimated context usage exceeds this % of the prompt budget.
+    /// Expressed as an integer 1–100. Default: 70.
+    #[serde(default = "default_compact_threshold")]
+    pub threshold_pct: u8,
+    /// Per-model overrides: model_id → threshold_pct.
+    /// Larger-context models can wait longer; smaller ones should compact earlier.
+    #[serde(default)]
+    pub model_thresholds: HashMap<String, u8>,
+}
+
+impl Default for AutoCompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold_pct: default_compact_threshold(),
+            model_thresholds: HashMap::new(),
+        }
+    }
+}
+
+fn default_compact_threshold() -> u8 {
+    70
+}
+
 // ── LLM connection config (API keys, provider URLs) ───────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -147,6 +180,8 @@ pub struct EffectiveConfig {
     /// User-defined model presets shown in the /model autocomplete list.
     #[serde(default)]
     pub models: Vec<ModelSettings>,
+    #[serde(default)]
+    pub auto_compaction: AutoCompactionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +226,8 @@ struct RawSpecConfig {
     pub log_file: String,
     #[serde(default)]
     pub models: Vec<ModelSettings>,
+    #[serde(default)]
+    pub auto_compaction: AutoCompactionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -296,6 +333,7 @@ impl ConfigManager {
             log_level: raw.log_level,
             log_file: raw.log_file,
             models: raw.models,
+            auto_compaction: raw.auto_compaction,
         };
 
         *self.cached_effective_config.write().unwrap() = Some(effective.clone());

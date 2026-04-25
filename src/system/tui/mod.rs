@@ -80,10 +80,17 @@ pub async fn run_interactive_tui(
     let mut mouse_capture_active = true; // matches EnableMouseCapture called in TerminalSession::enter
 
     loop {
-        let spinner_active = app.active_turn_id.is_some();
+        let spinner_active = app.active_turn_id.is_some() || app.pending_compact.is_some();
         if spinner_active && last_draw.elapsed() >= ACTIVE_POLL_INTERVAL {
             app.spinner_tick = app.spinner_tick.wrapping_add(1);
             dirty = true;
+        }
+
+        // Poll background compaction task (non-blocking try_recv under the hood).
+        if app.pending_compact.is_some() {
+            if app.poll_compact_result().await? {
+                dirty = true;
+            }
         }
 
         if dirty {

@@ -660,7 +660,7 @@ impl ConversationRuntime {
                 &model_settings.model_id,
                 0.2,
                 None,
-                4096,
+                2048,
             )
             .await
             .map_err(|e| anyhow!("compact_thread_llm_failed: {e}"))?;

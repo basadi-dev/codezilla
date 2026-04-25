@@ -289,6 +289,13 @@ fn item_token_estimate(item: &ConversationItem) -> usize {
     item.payload.to_string().len().saturating_add(32) / CHARS_PER_TOKEN
 }
 
+/// Returns estimated context usage as a percentage of `PROMPT_TOKEN_BUDGET`.
+/// Used by auto-compaction to decide when to compact.
+pub fn estimate_items_token_pct(items: &[ConversationItem]) -> f64 {
+    let used: usize = items.iter().map(item_token_estimate).sum();
+    (used as f64 / PROMPT_TOKEN_BUDGET as f64) * 100.0
+}
+
 /// Apply the token-budget guard and convert items to LLM messages.
 ///
 /// Algorithm:
@@ -429,55 +436,208 @@ fn item_to_llm_message(item: &ConversationItem) -> Option<llm::Message> {
 }
 
 /// Build a summarization prompt for `compact_thread`. Returns the messages that
-/// should be sent to a fast model to produce a conversation summary.
+/// should be sent to the model to produce a structured coding-session summary.
+///
+/// The prompt is optimised for coding LLMs: it captures the concrete state
+/// needed to resume work — exact file paths, function/type names, error messages,
+/// task progress, and architectural decisions — rather than a prose retelling.
 pub fn build_compaction_messages(
     system_instructions: &[String],
     items: &[ConversationItem],
 ) -> Vec<llm::Message> {
-    // Render the raw history as a simple text transcript.
+    // ── Separate prior summary (baseline) from new items ──────────────────────
+    // Find the last ReasoningSummary; everything after it is "new" activity.
+    let prior_summary_idx = items
+        .iter()
+        .rposition(|i| i.kind == ItemKind::ReasoningSummary);
+
+    let (baseline_text, new_items) = match prior_summary_idx {
+        Some(idx) => {
+            let text = items[idx]
+                .payload
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            (Some(text), &items[idx + 1..])
+        }
+        None => (None, items),
+    };
+
+    // ── Build a focused transcript of new activity only ───────────────────────
     let mut transcript = String::new();
-    for item in items {
+    let mut last_tool_name = "";
+
+    for item in new_items {
         match item.kind {
             ItemKind::UserMessage => {
                 if let Some(text) = item.payload.get("text").and_then(Value::as_str) {
-                    transcript.push_str(&format!("USER: {text}\n\n"));
+                    let snippet: String = text.chars().take(1200).collect();
+                    transcript.push_str(&format!("[USER]\n{snippet}\n\n"));
                 }
             }
             ItemKind::AgentMessage => {
                 if let Some(text) = item.payload.get("text").and_then(Value::as_str) {
-                    transcript.push_str(&format!("ASSISTANT: {text}\n\n"));
+                    // Skip pure acknowledgement messages to save space.
+                    let trimmed = text.trim();
+                    if trimmed.len() > 20 {
+                        let snippet: String = trimmed.chars().take(600).collect();
+                        transcript.push_str(&format!("[ASSISTANT]\n{snippet}\n\n"));
+                    }
                 }
             }
             ItemKind::ToolCall => {
-                if let Some(name) = item.payload.get("toolName").and_then(Value::as_str) {
-                    transcript.push_str(&format!("TOOL CALL: {name}\n\n"));
-                }
+                let name =
+                    item.payload.get("toolName").and_then(Value::as_str).unwrap_or("unknown");
+                last_tool_name = name;
+                let args = item.payload.get("arguments").map(|v| v.to_string()).unwrap_or_default();
+                // Extract just the key identifying info from arguments (file_path, command, etc.)
+                let args_snippet = extract_key_tool_args(name, &args);
+                transcript.push_str(&format!("[TOOL: {name}] {args_snippet}\n"));
             }
             ItemKind::ToolResult => {
                 let ok = item.payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
                 let out = item.payload.get("output").map(|v| v.to_string()).unwrap_or_default();
-                let status = if ok { "OK" } else { "ERROR" };
-                // Keep tool outputs brief in the compaction prompt.
-                let snippet: String = out.chars().take(512).collect();
-                transcript.push_str(&format!("TOOL RESULT ({status}): {snippet}\n\n"));
+                let err = item.payload.get("errorMessage").and_then(Value::as_str).unwrap_or("");
+
+                if ok {
+                    // For successful reads/edits/writes, record just a one-liner; skip verbose output
+                    // unless it looks like test/build output worth preserving.
+                    let is_diagnostic = looks_like_diagnostic(&out, last_tool_name);
+                    if is_diagnostic {
+                        let snippet: String = out.chars().take(800).collect();
+                        transcript.push_str(&format!("[OK] {snippet}\n\n"));
+                    } else {
+                        transcript.push_str("[OK]\n\n");
+                    }
+                } else {
+                    let combined =
+                        if err.is_empty() { out.clone() } else { format!("{err}\n{out}") };
+                    let snippet: String = combined.chars().take(1600).collect();
+                    transcript.push_str(&format!("[ERROR]\n{snippet}\n\n"));
+                }
             }
             _ => {}
         }
     }
 
     let system_ctx = system_instructions.first().cloned().unwrap_or_default();
+
+    let baseline_section = match &baseline_text {
+        Some(text) => format!(
+            "PRIOR SUMMARY (already compacted — treat as your starting baseline, extend it with new activity below):\n{text}\n\n"
+        ),
+        None => String::new(),
+    };
+
+    let incremental_note = if baseline_text.is_some() {
+        "You have a PRIOR SUMMARY above. Merge new activity into it — update changed sections in place rather than appending. Do not repeat information already captured unless it changed."
+    } else {
+        "Summarise the full conversation below."
+    };
+
     let prompt = format!(
-        "You are summarizing a conversation for context compaction. \
-         Produce a concise but complete summary that preserves: \
-         (1) key decisions made, \
-         (2) files created or modified and their purpose, \
-         (3) open tasks or next steps, \
-         (4) any important context the assistant needs to continue effectively. \
-         Write in third person past tense. \
-         Do NOT include pleasantries or meta-commentary about the summary itself.\n\n\
-         SYSTEM CONTEXT:\n{system_ctx}\n\n\
-         CONVERSATION:\n{transcript}"
+        r#"You are compacting a coding-agent conversation into a structured context summary.
+Your output REPLACES the full conversation history for the next agent turn — it must be self-contained.
+The agent is a coding assistant that reads, writes, and runs code.
+
+LENGTH BUDGET: Keep your entire response under 1400 tokens (~5600 chars). Dense bullet points, no prose padding.
+
+CRITICAL REQUIREMENTS:
+- Be SPECIFIC: exact file paths, function/type names, error messages (quote errors verbatim).
+- NEVER omit unresolved errors or incomplete tasks — those are the most important things to preserve.
+- NO meta-commentary, caveats, or pleasantries.
+- Present tense for ongoing state; past tense for completed actions.
+
+{incremental_note}
+
+OUTPUT FORMAT (use exactly these section headers, omit a section only if truly empty):
+
+## Working Context
+1–2 sentences: what is being built/fixed, language/framework, cwd.
+
+## Environment
+- Language/toolchain version if known (e.g. `rustc 1.78`, `node 20`, `python 3.12`)
+- Key dependencies or workspace layout details that affect the work
+Omit if unknown.
+
+## Files Modified
+- `path/to/file` — what changed — status: complete | in-progress | broken
+If none: "None."
+
+## Current Errors & Failures
+- Exact error text (first relevant line + location)
+If clean: "None."
+
+## Completed Steps
+- Short bullet per finished item (file path where relevant)
+
+## In Progress / Next Steps
+- What was being done when compaction triggered
+- Immediate next action
+Use [BLOCKED: reason] for blocked items.
+
+## Key Decisions & Constraints
+- Architectural choices, API contracts, naming rules that must be respected
+If none: "None."
+
+---
+
+SYSTEM CONTEXT:
+{system_ctx}
+
+{baseline_section}NEW ACTIVITY TO INCORPORATE:
+{transcript}
+---
+Write the structured summary now."#
     );
 
     vec![llm::Message::user(prompt)]
+}
+
+/// Extract a short identifying string from tool call arguments for the compaction transcript.
+fn extract_key_tool_args(tool_name: &str, args_json: &str) -> String {
+    // Try to parse as JSON and pull the most informative field.
+    if let Ok(v) = serde_json::from_str::<Value>(args_json) {
+        // File-targeting tools: show the path.
+        for key in &["file_path", "path", "filePath"] {
+            if let Some(p) = v.get(key).and_then(Value::as_str) {
+                return format!("← {p}");
+            }
+        }
+        // Shell/bash: show the command.
+        if tool_name.to_lowercase().contains("bash") || tool_name.to_lowercase().contains("shell") {
+            if let Some(cmd) = v.get("command").and_then(Value::as_str) {
+                let short: String = cmd.chars().take(120).collect();
+                return format!("$ {short}");
+            }
+        }
+        // Search tools: show the query/pattern.
+        for key in &["query", "pattern", "glob", "search"] {
+            if let Some(q) = v.get(key).and_then(Value::as_str) {
+                let short: String = q.chars().take(80).collect();
+                return format!("search: {short}");
+            }
+        }
+    }
+    // Fallback: first 100 chars of raw JSON.
+    args_json.chars().take(100).collect()
+}
+
+/// Returns true if the tool output looks like compiler/test/lint output worth preserving.
+fn looks_like_diagnostic(output: &str, tool_name: &str) -> bool {
+    if tool_name.to_lowercase().contains("bash") || tool_name.to_lowercase().contains("shell") {
+        // Heuristic: contains keywords typical in compiler/test output.
+        let lower = output.to_lowercase();
+        return lower.contains("error")
+            || lower.contains("warning")
+            || lower.contains("failed")
+            || lower.contains("panic")
+            || lower.contains("test result")
+            || lower.contains("✓")
+            || lower.contains("✗")
+            || lower.contains("passed")
+            || lower.contains("FAILED");
+    }
+    false
 }
