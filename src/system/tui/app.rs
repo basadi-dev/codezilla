@@ -92,6 +92,9 @@ pub struct InteractiveApp {
     pub autocomplete_scroll: usize,
     /// Per-session model/reasoning override (None = use thread metadata + config defaults).
     pub model_settings_override: Option<super::super::domain::ModelSettings>,
+    composer_history: Vec<String>,
+    composer_history_index: Option<usize>,
+    composer_history_saved_input: Option<String>,
 }
 
 impl InteractiveApp {
@@ -131,6 +134,9 @@ impl InteractiveApp {
             autocomplete_selected: 0,
             autocomplete_scroll: 0,
             model_settings_override: None,
+            composer_history: Vec::new(),
+            composer_history_index: None,
+            composer_history_saved_input: None,
         };
         app.refresh_threads().await?;
         let current = app.current_thread_id.clone();
@@ -207,6 +213,8 @@ impl InteractiveApp {
         self.drag_end = None;
         self.auto_scroll = true;
         self.error_message = None;
+        self.reset_composer_history_navigation();
+        self.composer_history = self.build_composer_history(&persisted).await?;
         self.status_message = format!("Opened {}", thread_label(&persisted.metadata));
         Ok(())
     }
@@ -499,6 +507,7 @@ impl InteractiveApp {
         }
 
         let raw = self.composer.take_text();
+        self.reset_composer_history_navigation();
         if self.try_handle_slash_command(raw.trim()).await? {
             return Ok(());
         }
@@ -519,7 +528,7 @@ impl InteractiveApp {
                 .steer_turn(TurnSteerParams {
                     thread_id: self.current_thread_id.clone(),
                     expected_turn_id: turn_id.clone(),
-                    input: vec![UserInput::from_text(raw)],
+                    input: vec![UserInput::from_text(&raw)],
                 })
                 .await?;
             self.status_message = format!("Queued input for {}", short_turn_id(&turn_id));
@@ -529,7 +538,7 @@ impl InteractiveApp {
                 .start_turn(
                     TurnStartParams {
                         thread_id: self.current_thread_id.clone(),
-                        input: vec![UserInput::from_text(raw)],
+                        input: vec![UserInput::from_text(&raw)],
                         cwd: None,
                         model_settings: self.model_settings_override.clone(),
                         approval_policy: self.current_approval_policy_override(),
@@ -542,8 +551,100 @@ impl InteractiveApp {
             self.active_turn_id = Some(turn.turn.turn_id.clone());
             self.status_message = format!("Started {}", short_turn_id(&turn.turn.turn_id));
         }
+        self.push_composer_history_entry(&raw);
         self.auto_scroll = true;
         Ok(())
+    }
+
+    pub fn composer_history_prev(&mut self) -> bool {
+        if self.composer_history.is_empty() {
+            return false;
+        }
+
+        let next_index = match self.composer_history_index {
+            Some(index) => index.saturating_sub(1),
+            None => self.composer_history.len() - 1,
+        };
+
+        if self.composer_history_index.is_none() {
+            self.composer_history_saved_input = Some(self.composer.text().to_string());
+        }
+
+        self.composer_history_index = Some(next_index);
+        self.composer
+            .set_text(self.composer_history[next_index].clone());
+        true
+    }
+
+    pub fn composer_history_next(&mut self) -> bool {
+        if self.composer_history.is_empty() {
+            return false;
+        }
+
+        let Some(index) = self.composer_history_index else {
+            self.composer_history_saved_input = Some(self.composer.text().to_string());
+            self.composer_history_index = Some(0);
+            self.composer.set_text(self.composer_history[0].clone());
+            return true;
+        };
+
+        if index + 1 < self.composer_history.len() {
+            let next_index = index + 1;
+            self.composer_history_index = Some(next_index);
+            self.composer
+                .set_text(self.composer_history[next_index].clone());
+        } else {
+            let restored = self.composer_history_saved_input.take().unwrap_or_default();
+            self.composer_history_index = None;
+            self.composer.set_text(restored);
+        }
+        true
+    }
+
+    pub fn composer_history_active(&self) -> bool {
+        self.composer_history_index.is_some()
+    }
+
+    pub fn reset_composer_history_navigation(&mut self) {
+        self.composer_history_index = None;
+        self.composer_history_saved_input = None;
+    }
+
+    async fn build_composer_history(
+        &self,
+        persisted: &super::super::domain::PersistedThread,
+    ) -> Result<Vec<String>> {
+        let current = extract_user_message_history(&persisted.items);
+        if !current.is_empty() {
+            return Ok(current);
+        }
+
+        if let Some(previous_thread) = self
+            .threads
+            .iter()
+            .find(|thread| thread.thread_id != persisted.metadata.thread_id)
+        {
+            let fallback = self
+                .runtime
+                .read_thread(ThreadReadParams {
+                    thread_id: previous_thread.thread_id.clone(),
+                })
+                .await?
+                .thread;
+            let history = extract_user_message_history(&fallback.items);
+            if !history.is_empty() {
+                return Ok(history);
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    fn push_composer_history_entry(&mut self, raw: &str) {
+        if raw.trim().is_empty() {
+            return;
+        }
+        self.composer_history.push(raw.to_string());
     }
 
     pub async fn try_handle_slash_command(&mut self, command: &str) -> Result<bool> {
@@ -1400,6 +1501,16 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
         line_ends,
         total_lines,
     }
+}
+
+fn extract_user_message_history(items: &[ConversationItem]) -> Vec<String> {
+    items
+        .iter()
+        .filter(|item| item.kind == ItemKind::UserMessage)
+        .filter_map(|item| item.payload.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn append_cached_transcript_entry_lines(

@@ -150,6 +150,7 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
     match (key.code, key.modifiers) {
         (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
             app.jump_transcript_to_bottom();
+            app.reset_composer_history_navigation();
             app.composer.insert_char('\n');
         }
         (KeyCode::Enter, _) => {
@@ -189,21 +190,25 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
                 && !modifiers.contains(KeyModifiers::ALT) =>
         {
             app.jump_transcript_to_bottom();
+            app.reset_composer_history_navigation();
             app.composer.insert_char(ch);
             app.update_autocomplete();
         }
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
             app.jump_transcript_to_bottom();
+            app.reset_composer_history_navigation();
             app.composer.delete_to_line_start();
             app.update_autocomplete();
         }
         (KeyCode::Backspace, _) => {
             app.jump_transcript_to_bottom();
+            app.reset_composer_history_navigation();
             app.composer.backspace();
             app.update_autocomplete();
         }
         (KeyCode::Delete, _) => {
             app.jump_transcript_to_bottom();
+            app.reset_composer_history_navigation();
             app.composer.delete();
             app.update_autocomplete();
         }
@@ -228,6 +233,9 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         (KeyCode::Up, _) => {
             if !app.autocomplete_suggestions.is_empty() {
                 app.autocomplete_select_prev();
+            } else if app.composer_history_active() || app.composer.is_empty() {
+                app.jump_transcript_to_bottom();
+                app.composer_history_prev();
             } else {
                 app.jump_transcript_to_bottom();
                 let (first_width, continuation_width) = app.composer_wrap_widths();
@@ -238,6 +246,9 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         (KeyCode::Down, _) => {
             if !app.autocomplete_suggestions.is_empty() {
                 app.autocomplete_select_next();
+            } else if app.composer_history_active() || app.composer.is_empty() {
+                app.jump_transcript_to_bottom();
+                app.composer_history_next();
             } else {
                 app.jump_transcript_to_bottom();
                 let (first_width, continuation_width) = app.composer_wrap_widths();
@@ -256,6 +267,7 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         (KeyCode::Esc, _) => {
             app.autocomplete_suggestions.clear();
             app.autocomplete_selected = 0;
+            app.reset_composer_history_navigation();
             if !app.composer.is_empty() {
                 app.jump_transcript_to_bottom();
                 app.composer = super::types::ComposerState::default();
