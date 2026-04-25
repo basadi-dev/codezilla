@@ -173,8 +173,11 @@ fn render_transcript(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
     let total_lines = app.transcript_total_lines(content_area.width);
     let max_scroll = (total_lines.saturating_sub(viewport_height)) as u16;
 
-    if app.auto_scroll || app.transcript_scroll > max_scroll {
+    if app.auto_scroll || app.transcript_scroll >= max_scroll {
+        // At the bottom (or already in follow mode) — clamp and re-engage auto-scroll
+        // so that manually scrolling down to the last line re-attaches follow mode.
         app.transcript_scroll = max_scroll;
+        app.auto_scroll = true;
     }
 
     // Pass area.width so body lines are hard-wrapped here rather than by ratatui.

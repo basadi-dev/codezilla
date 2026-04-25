@@ -379,12 +379,15 @@ impl InteractiveApp {
     }
 
     pub fn scroll_transcript(&mut self, delta: i32) {
-        self.auto_scroll = false;
         if delta < 0 {
+            // Scrolling up — detach from the bottom.
+            self.auto_scroll = false;
             self.transcript_scroll = self
                 .transcript_scroll
                 .saturating_sub(delta.unsigned_abs() as u16);
         } else {
+            // Scrolling down — just advance; render.rs will detect if we've
+            // reached max_scroll and re-engage auto-scroll there.
             self.transcript_scroll = self.transcript_scroll.saturating_add(delta as u16);
         }
     }
@@ -673,13 +676,13 @@ impl InteractiveApp {
             self.compact_current_thread().await?;
             true
         } else if matches!(command, "/approve auto") {
-            self.set_auto_approve_tools(true);
+            self.set_auto_approve_tools(true).await;
             true
         } else if matches!(command, "/approve ask" | "/approve manual") {
-            self.set_auto_approve_tools(false);
+            self.set_auto_approve_tools(false).await;
             true
         } else if matches!(command, "/approve toggle") {
-            self.toggle_auto_approve_tools();
+            self.toggle_auto_approve_tools().await;
             true
         } else if matches!(command, "/approve" | "/approvals") {
             self.status_message = format!("Approvals: {}", self.approval_mode_label());
@@ -944,12 +947,12 @@ impl InteractiveApp {
         }
     }
 
-    pub fn toggle_auto_approve_tools(&mut self) {
+    pub async fn toggle_auto_approve_tools(&mut self) {
         let enable = !self.auto_approve_tools_enabled();
-        self.set_auto_approve_tools(enable);
+        self.set_auto_approve_tools(enable).await;
     }
 
-    pub fn set_auto_approve_tools(&mut self, enabled: bool) {
+    pub async fn set_auto_approve_tools(&mut self, enabled: bool) {
         self.approval_policy_override = if enabled {
             Some(ApprovalPolicy {
                 kind: ApprovalPolicyKind::Never,
@@ -958,6 +961,15 @@ impl InteractiveApp {
         } else {
             None
         };
+        // Propagate immediately to any running turn so it takes effect on the
+        // next tool-call evaluation without needing to restart.
+        let _ = self
+            .runtime
+            .set_thread_approval_policy(
+                &self.current_thread_id,
+                self.approval_policy_override.clone(),
+            )
+            .await;
         self.status_message = format!("Approvals: {}", self.approval_mode_label());
         self.error_message = None;
     }
@@ -1188,7 +1200,7 @@ impl InteractiveApp {
             pending: true,
         });
         self.status_message = "Streaming response…".into();
-        self.auto_scroll = true;
+        // Do NOT force auto_scroll here — if the user scrolled up, respect that.
         Ok(())
     }
 
@@ -1216,7 +1228,7 @@ impl InteractiveApp {
             });
         }
         self.status_message = "Streaming response…".into();
-        self.auto_scroll = true;
+        // Do NOT force auto_scroll here — if the user scrolled up, respect that.
     }
 
     fn handle_item_completed(&mut self, event: &RuntimeEvent) -> Result<()> {
@@ -1232,7 +1244,7 @@ impl InteractiveApp {
         } else {
             self.upsert_transcript_entry(entry_from_item(&item));
         }
-        self.auto_scroll = true;
+        // Do NOT force auto_scroll — respect user scroll position.
         Ok(())
     }
 
@@ -1263,7 +1275,7 @@ impl InteractiveApp {
             timestamp,
             pending: false,
         });
-        self.auto_scroll = true;
+        // Do NOT force auto_scroll — respect user scroll position.
     }
 
     fn remove_latest_approval_request_entry(&mut self) {

@@ -62,7 +62,7 @@ impl TurnExecutor {
 
             self.drain_steering(&params.thread_id, &turn_id).await?;
 
-            let (thread_metadata, items, cancel_token) = {
+            let (thread_metadata, items, cancel_token, live_approval_policy) = {
                 let thread = thread.lock().await;
                 let turn = thread
                     .turns
@@ -73,7 +73,14 @@ impl TurnExecutor {
                 for lt in &thread.turns {
                     items.extend(lt.items.clone());
                 }
-                (thread.metadata.clone(), items, turn.cancel_token.clone())
+                (
+                    thread.metadata.clone(),
+                    items,
+                    turn.cancel_token.clone(),
+                    // Read the live policy set on the session — this can change
+                    // mid-turn (e.g. user toggles auto-approve) without restarting.
+                    thread.approval_policy_override.clone(),
+                )
             };
 
             let cwd = params
@@ -93,9 +100,8 @@ impl TurnExecutor {
                     .permission_manager
                     .resolve_permission_profile(&self.runtime.inner.effective_config, &cwd)
             });
-            let approval_policy = params
-                .approval_policy
-                .clone()
+            let approval_policy = live_approval_policy
+                .or_else(|| params.approval_policy.clone())
                 .unwrap_or_else(|| self.runtime.inner.effective_config.approval_policy.clone());
             let listing = ToolListingContext {
                 thread_id: params.thread_id.clone(),

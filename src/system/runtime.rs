@@ -217,6 +217,8 @@ pub(crate) struct ThreadSession {
     #[allow(dead_code)]
     pub(crate) owner_connection_id: Option<String>,
     pub(crate) pending_steering: Vec<UserInput>,
+    /// Live approval-policy override; updated by the TUI without restarting the turn.
+    pub(crate) approval_policy_override: Option<ApprovalPolicy>,
 }
 
 // ─── RuntimeInner ─────────────────────────────────────────────────────────────
@@ -354,6 +356,7 @@ impl ConversationRuntime {
             subscribed_clients: HashSet::new(),
             owner_connection_id: None,
             pending_steering: Vec::new(),
+            approval_policy_override: None,
         }));
         self.inner
             .loaded_threads
@@ -494,6 +497,7 @@ impl ConversationRuntime {
             self.inner.persistence_manager.create_turn(&turn)?;
             thread_guard.active_turn_id = Some(turn.turn_id.clone());
             thread_guard.metadata.status = ThreadStatus::Running;
+            thread_guard.approval_policy_override = params.approval_policy.clone();
             thread_guard.turns.push(LoadedTurn {
                 metadata: turn.clone(),
                 items: Vec::new(),
@@ -755,6 +759,21 @@ impl ConversationRuntime {
         Ok(())
     }
 
+    /// Update the live approval-policy override for a running thread so that
+    /// mid-turn policy changes (e.g. toggling auto-approve) take effect on the
+    /// next tool-call evaluation without restarting the turn.
+    pub async fn set_thread_approval_policy(
+        &self,
+        thread_id: &str,
+        policy: Option<ApprovalPolicy>,
+    ) -> Result<()> {
+        if let Some(thread) = self.load_thread(thread_id).await? {
+            let mut guard = thread.lock().await;
+            guard.approval_policy_override = policy;
+        }
+        Ok(())
+    }
+
     pub async fn resolve_approval(
         &self,
         approval_id: &str,
@@ -875,6 +894,7 @@ impl ConversationRuntime {
             subscribed_clients: HashSet::new(),
             owner_connection_id: None,
             pending_steering: Vec::new(),
+            approval_policy_override: None,
         }));
         self.inner
             .loaded_threads

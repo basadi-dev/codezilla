@@ -33,7 +33,7 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
             app.interrupt_active_turn().await?;
         }
         (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-            app.toggle_auto_approve_tools();
+            app.toggle_auto_approve_tools().await;
         }
         // Ctrl+M — toggle mouse capture.
         //   ON  → wheel scrolls transcript (default)
@@ -116,7 +116,7 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
 async fn handle_approval_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-            app.toggle_auto_approve_tools();
+            app.toggle_auto_approve_tools().await;
         }
         (KeyCode::Char('a') | KeyCode::Char('A'), _) => {
             app.resolve_pending_approval(ApprovalDecision::Approved)
