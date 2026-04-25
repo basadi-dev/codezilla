@@ -823,6 +823,20 @@ fn append_transcript_entry_lines(
             }
             current_line += 1;
         }
+    } else if entry.kind == EntryKind::ToolResult && is_diff_body(&entry.body) {
+        // Colour-coded unified diff view.
+        for body_line in entry.body.split('\n') {
+            for chunk in split_at_width(body_line, body_width) {
+                if current_line >= start_line && current_line < end_line {
+                    let color = diff_line_color(&chunk);
+                    out.push(Line::from(vec![
+                        Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                        Span::styled(chunk, Style::default().fg(color)),
+                    ]));
+                }
+                current_line += 1;
+            }
+        }
     } else {
         for body_line in entry.body.split('\n') {
             for chunk in split_at_width(body_line, body_width) {
@@ -839,6 +853,31 @@ fn append_transcript_entry_lines(
 
     if current_line >= start_line && current_line < end_line {
         out.push(Line::from(""));
+    }
+}
+
+/// Returns true when `body` looks like a unified diff output (to trigger colourised rendering).
+fn is_diff_body(body: &str) -> bool {
+    body.lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.starts_with("---") || l.starts_with("@@") || l.starts_with("+++ "))
+        .unwrap_or(false)
+}
+
+/// Pick a ratatui colour for a single diff line based on its prefix character.
+fn diff_line_color(line: &str) -> Color {
+    if line.starts_with('+') && !line.starts_with("++") {
+        Color::Rgb(100, 220, 120) // green — addition
+    } else if line.starts_with('-') && !line.starts_with("--") {
+        Color::Rgb(255, 100, 100) // red — removal
+    } else if line.starts_with("@@") {
+        Color::Rgb(100, 200, 240) // cyan — hunk header
+    } else if line.starts_with("---") || line.starts_with("+++") {
+        COLOR_MUTED // file header — muted
+    } else if line.starts_with('▲') {
+        COLOR_WARNING // truncation notice
+    } else {
+        Color::Rgb(190, 190, 190) // context lines — slightly dimmed
     }
 }
 
@@ -1054,11 +1093,61 @@ pub fn format_tool_result(output: Option<&Value>, error_message: Option<&Value>)
         return pretty_json_or_text(None, error_message);
     };
 
+    // write_file: prefer the diff view if present
+    if output.get("diff").is_some() {
+        return format_write_file_result(output);
+    }
+
     if let Some(formatted) = format_shell_result(output) {
         return formatted;
     }
 
     pretty_json_or_text(Some(output), error_message)
+}
+
+/// Format the result of a `write_file` call that carries a unified diff.
+fn format_write_file_result(output: &Value) -> String {
+    let path = output
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let is_new = output
+        .get("is_new_file")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let added = output
+        .get("lines_added")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let removed = output
+        .get("lines_removed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let diff = output
+        .get("diff")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let status = if is_new {
+        format!("new file  +{added}")
+    } else {
+        format!("+{added}  -{removed}")
+    };
+
+    let mut lines = vec![format!("{path}  ·  {status}")];
+    if !diff.is_empty() {
+        lines.push(String::new());
+        // Truncate diff to avoid flooding the viewport.
+        let diff_lines: Vec<&str> = diff.lines().collect();
+        let keep = diff_lines.len().min(TOOL_OUTPUT_MAX_LINES);
+        if keep < diff_lines.len() {
+            lines.extend(diff_lines[..keep].iter().map(|l| l.to_string()));
+            lines.push(format!("▲ {} lines hidden", diff_lines.len() - keep));
+        } else {
+            lines.extend(diff_lines.iter().map(|l| l.to_string()));
+        }
+    }
+    lines.join("\n")
 }
 
 fn format_shell_result(output: &Value) -> Option<String> {

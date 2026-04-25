@@ -4,6 +4,7 @@ use glob::Pattern as GlobPattern;
 use regex::Regex;
 use reqwest::Client;
 use serde_json::{json, Value};
+use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
@@ -559,15 +560,37 @@ impl ToolProvider for FileToolProvider {
                 json!({ "path": path("path")?, "content": String::from_utf8_lossy(&content) })
             }
             "write_file" => {
+                let file_path = path("path")?;
                 let content = call
                     .arguments
                     .get("content")
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("tool_invalid_arguments: missing content"))?;
+
+                // Read old content (if any) so we can produce a diff.
+                let old_content = self
+                    .sandbox
+                    .read_file(file_path, &sandbox)
+                    .await
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned());
+                let is_new_file = old_content.is_none();
+
                 self.sandbox
-                    .write_file(path("path")?, content.as_bytes(), &sandbox)
+                    .write_file(file_path, content.as_bytes(), &sandbox)
                     .await?;
-                json!({ "ok": true, "path": path("path")? })
+
+                let (diff_text, lines_added, lines_removed) =
+                    make_unified_diff(file_path, old_content.as_deref(), content);
+
+                json!({
+                    "ok": true,
+                    "path": file_path,
+                    "is_new_file": is_new_file,
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                    "diff": diff_text,
+                })
             }
             "create_directory" => {
                 let recursive = call
@@ -1065,4 +1088,62 @@ fn simple_tokenize(s: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
+}
+
+// ─── Diff helper ─────────────────────────────────────────────────────────────
+
+/// Build a unified diff string between `old` and `new` content for `path`.
+/// Returns `(diff_text, lines_added, lines_removed)`.
+/// If `old` is `None` the entire new content is shown as pure additions.
+fn make_unified_diff(path: &str, old: Option<&str>, new: &str) -> (String, usize, usize) {
+    let old_str = old.unwrap_or("");
+    let header_old = if old.is_none() {
+        "/dev/null".to_string()
+    } else {
+        format!("a/{path}")
+    };
+    let header_new = format!("b/{path}");
+
+    let diff = TextDiff::from_lines(old_str, new);
+    let mut lines_added = 0usize;
+    let mut lines_removed = 0usize;
+    let mut out = format!("--- {header_old}\n+++ {header_new}\n");
+
+    for group in diff.grouped_ops(3) {
+        let first = &group[0];
+        let last = &group[group.len() - 1];
+        let old_start = first.old_range().start;
+        let old_end = last.old_range().end;
+        let new_start = first.new_range().start;
+        let new_end = last.new_range().end;
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            old_start + 1,
+            old_end - old_start,
+            new_start + 1,
+            new_end - new_start,
+        ));
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let prefix = match change.tag() {
+                    ChangeTag::Delete => {
+                        lines_removed += 1;
+                        "-"
+                    }
+                    ChangeTag::Insert => {
+                        lines_added += 1;
+                        "+"
+                    }
+                    ChangeTag::Equal => " ",
+                };
+                out.push_str(prefix);
+                out.push_str(change.value());
+                if !change.value().ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    (out, lines_added, lines_removed)
 }
