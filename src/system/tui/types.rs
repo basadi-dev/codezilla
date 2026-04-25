@@ -101,6 +101,8 @@ pub enum EntryKind {
     Error,
     Attachment,
     Reasoning,
+    FileChange,
+    Command,
 }
 
 // ─── Structs ──────────────────────────────────────────────────────────────────
@@ -486,6 +488,8 @@ pub fn entry_style(kind: EntryKind) -> (&'static str, Color, Color) {
         EntryKind::Error => ("✗", COLOR_ERROR, Color::Rgb(255, 210, 210)),
         EntryKind::Attachment => ("⊞", COLOR_MUTED, Color::Rgb(200, 210, 225)),
         EntryKind::Reasoning => ("⋯", COLOR_REASONING, Color::Rgb(220, 215, 255)),
+        EntryKind::FileChange => ("✏", COLOR_WARNING, Color::Rgb(255, 230, 190)),
+        EntryKind::Command => ("$", COLOR_WARNING, Color::Rgb(200, 220, 200)),
     }
 }
 
@@ -624,6 +628,135 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 kind: EntryKind::Error,
                 title: kind_label,
                 body: message,
+                timestamp: Some(item.created_at),
+                pending: false,
+            }
+        }
+        ItemKind::FileChange => {
+            let path = item
+                .payload
+                .get("path")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or("");
+            let change_kind = item
+                .payload
+                .get("changeKind")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or("modified");
+            let diff = item
+                .payload
+                .get("diff")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or_default();
+            let summary = item
+                .payload
+                .get("summary")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or_default();
+
+            // Format body as a unified-diff-like text so the existing diff
+            // highlighter in append_transcript_entry_lines renders it.
+            let body = if !diff.is_empty() {
+                format!("--- a/{path}\n+++ b/{path}\n{diff}")
+            } else if !summary.is_empty() {
+                summary.to_string()
+            } else {
+                format!("{change_kind} {path}")
+            };
+
+            TranscriptEntry {
+                item_id: item.item_id.clone(),
+                tool_call_id: None,
+                kind: EntryKind::FileChange,
+                title: path.rsplit('/').next().unwrap_or(path).to_string(),
+                body,
+                timestamp: Some(item.created_at),
+                pending: false,
+            }
+        }
+        ItemKind::CommandExecution => {
+            let cmd_parts: Vec<String> = item
+                .payload
+                .get("command")
+                .and_then(|v: &serde_json::Value| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let cmd_str = if cmd_parts.is_empty() {
+                item.payload
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                cmd_parts.join(" ")
+            };
+            let exit_code = item
+                .payload
+                .get("exitCode")
+                .and_then(|v| v.as_i64());
+            let mut body = String::new();
+            if !cmd_str.is_empty() {
+                body.push_str(&cmd_str);
+            }
+            if let Some(code) = exit_code {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(&format!("exit code: {code}"));
+            }
+
+            TranscriptEntry {
+                item_id: item.item_id.clone(),
+                tool_call_id: None,
+                kind: EntryKind::Command,
+                title: cmd_str.split_whitespace().next().unwrap_or("cmd").to_string(),
+                body,
+                timestamp: Some(item.created_at),
+                pending: false,
+            }
+        }
+        ItemKind::CommandOutput => {
+            let stdout = item
+                .payload
+                .get("stdout")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or_default();
+            let stderr = item
+                .payload
+                .get("stderr")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or_default();
+            let exit_code = item
+                .payload
+                .get("exitCode")
+                .and_then(|v| v.as_i64());
+            let mut body = String::new();
+            if !stdout.is_empty() {
+                body.push_str(stdout);
+            }
+            if !stderr.is_empty() {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(&format!(
+                    "stderr:\n{}",
+                    stderr
+                ));
+            }
+            if let Some(code) = exit_code {
+                body.push_str(&format!("\nexit code: {code}"));
+            }
+
+            TranscriptEntry {
+                item_id: item.item_id.clone(),
+                tool_call_id: None,
+                kind: EntryKind::Command,
+                title: "output".into(),
+                body,
                 timestamp: Some(item.created_at),
                 pending: false,
             }
@@ -839,6 +972,21 @@ fn append_transcript_entry_lines(
             }
             current_line += 1;
         }
+    } else if entry.kind == EntryKind::FileChange && is_diff_body(&entry.body) {
+        // FileChange entries with diff content — use diff highlighter.
+        let lang = diff_lang_for_body(&entry.body);
+        for body_line in entry.body.split('\n') {
+            for chunk in split_at_width(body_line, body_width) {
+                if current_line >= start_line && current_line < end_line {
+                    let spans = render_diff_chunk(&chunk, lang);
+                    let mut line_spans =
+                        vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                    line_spans.extend(spans);
+                    out.push(Line::from(line_spans));
+                }
+                current_line += 1;
+            }
+        }
     } else if entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.body) {
         let lang = read_file_lang_for_body(&entry.body);
         for rendered_line in render_read_file_body_lines(&entry.body, lang, body_width) {
@@ -861,6 +1009,43 @@ fn append_transcript_entry_lines(
                     let mut line_spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
                     line_spans.extend(spans);
                     out.push(Line::from(line_spans));
+                }
+                current_line += 1;
+            }
+        }
+    } else if entry.kind == EntryKind::Command {
+        // Command entries: first line is the command ($ prefix), rest is output
+        let mut is_first = true;
+        for body_line in entry.body.split('\n') {
+            for chunk in split_at_width(body_line, body_width) {
+                if current_line >= start_line && current_line < end_line {
+                    let prefix = if is_first {
+                        "$ "
+                    } else {
+                        "  "
+                    };
+                    is_first = false;
+                    out.push(Line::from(vec![
+                        Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                        Span::styled(
+                            prefix,
+                            Style::default().fg(COLOR_WARNING).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(chunk, Style::default().fg(body_color)),
+                    ]));
+                }
+                current_line += 1;
+            }
+        }
+    } else if entry.kind == EntryKind::FileChange {
+        // Non-diff FileChange entries (summary-only): render as plain text
+        for body_line in entry.body.split('\n') {
+            for chunk in split_at_width(body_line, body_width) {
+                if current_line >= start_line && current_line < end_line {
+                    out.push(Line::from(vec![
+                        Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                        Span::styled(chunk, Style::default().fg(body_color)),
+                    ]));
                 }
                 current_line += 1;
             }

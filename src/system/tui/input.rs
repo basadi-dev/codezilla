@@ -10,13 +10,27 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
+    // ── Quit confirmation: second ^Q quits, anything else cancels ─────────
+    if app.quit_requested {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
+                app.should_quit = true;
+            }
+            _ => {
+                app.quit_requested = false;
+                app.status_message = "Ready".into();
+            }
+        }
+        return Ok(());
+    }
+
     if app.pending_approval.is_some() {
         return handle_approval_key(app, key).await;
     }
 
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
-            app.should_quit = true;
+            app.quit_requested = true;
         }
         (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
             app.create_new_thread().await?;
@@ -30,7 +44,12 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
             app.error_message = None;
         }
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            app.interrupt_active_turn().await?;
+            if app.drag_start.is_some() {
+                app.copy_selection_to_clipboard();
+                app.clear_selection();
+            } else {
+                app.interrupt_active_turn().await?;
+            }
         }
         (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
             app.toggle_auto_approve_tools().await;

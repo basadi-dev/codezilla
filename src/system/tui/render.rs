@@ -103,6 +103,16 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         "●"
     };
 
+    // Live activity label: prefer the precise tool/action string, fall back to state label.
+    let live_label: String = if app.active_turn_id.is_some() {
+        app.live_activity
+            .as_deref()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| state.to_string())
+    } else {
+        state.to_string()
+    };
+
     // ── Left side: brand + live state ────────────────────────────────────────
     let mut left_spans: Vec<Span<'static>> = vec![
         Span::styled(
@@ -124,7 +134,7 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
                 .fg(state_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" {state}"), Style::default().fg(state_color)),
+        Span::styled(format!(" {live_label}"), Style::default().fg(state_color)),
     ];
 
     // ── Right side: context info ─────────────────────────────────────────────
@@ -421,6 +431,21 @@ fn render_composer(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
 // Only 3 essential shortcuts are shown permanently. Full list available via /help.
 
 fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
+    // ── Quit-confirm mode: take over the entire status bar ────────────────────
+    if app.quit_requested {
+        let spans = vec![
+            Span::styled("  ⚠ ", Style::default().fg(COLOR_APPROVAL).add_modifier(Modifier::BOLD)),
+            Span::styled("Press ", Style::default().fg(COLOR_MUTED)),
+            Span::styled("^Q", Style::default().fg(COLOR_APPROVAL).add_modifier(Modifier::BOLD)),
+            Span::styled(" again to quit", Style::default().fg(COLOR_MUTED)),
+            Span::styled("   ", Style::default()),
+            Span::styled("Esc", Style::default().fg(COLOR_ERROR).add_modifier(Modifier::BOLD)),
+            Span::styled(" to cancel", Style::default().fg(COLOR_MUTED)),
+        ];
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+
     let message = app
         .error_message
         .clone()
@@ -615,3 +640,4 @@ fn inset(r: Rect, left: u16, top: u16) -> Rect {
         height: r.height.saturating_sub(top),
     }
 }
+

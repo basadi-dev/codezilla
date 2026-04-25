@@ -30,6 +30,10 @@ use super::types::{
     SelectionRange, TranscriptEntry, COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
 };
 
+/// Sentinel item-id for the "thinking" placeholder injected immediately after
+/// the user submits a message.  Removed when the first real agent content arrives.
+const THINKING_PLACEHOLDER_ID: &str = "__codezilla_thinking__";
+
 #[derive(Debug, Clone)]
 struct CachedTranscriptEntry {
     kind: EntryKind,
@@ -78,6 +82,8 @@ pub struct InteractiveApp {
     pub spinner_tick: u64,
     /// Whether mouse capture is active (wheel scroll on, native select off).
     pub mouse_capture_enabled: bool,
+    /// Whether the user has pressed Ctrl+Q and is awaiting confirmation.
+    pub quit_requested: bool,
     // ── drag-to-select ────────────────────────────────────────────────────────
     /// Fixed transcript positions where the left button started and ended.
     pub drag_start: Option<SelectionPoint>,
@@ -101,6 +107,9 @@ pub struct InteractiveApp {
     composer_history_saved_input: Option<String>,
     /// Background compaction task result receiver. Set when /compact is running.
     pub(super) pending_compact: Option<oneshot::Receiver<anyhow::Result<ThreadCompactResult>>>,
+    /// Live activity description for the header — e.g. "⚙ read_file src/main.rs".
+    /// Set when a tool-call/command/file-change item starts; cleared on turn end.
+    pub live_activity: Option<String>,
 }
 
 impl InteractiveApp {
@@ -127,6 +136,7 @@ impl InteractiveApp {
             error_message: None,
             should_quit: false,
             spinner_tick: 0,
+            quit_requested: false,
             mouse_capture_enabled: true,
             drag_start: None,
             drag_end: None,
@@ -144,6 +154,7 @@ impl InteractiveApp {
             composer_history_index: None,
             composer_history_saved_input: None,
             pending_compact: None,
+            live_activity: None,
         };
         app.refresh_threads().await?;
         let current = app.current_thread_id.clone();
@@ -411,7 +422,7 @@ impl InteractiveApp {
         })
     }
 
-    fn clear_selection(&mut self) {
+    pub fn clear_selection(&mut self) {
         self.drag_start = None;
         self.drag_end = None;
     }
@@ -651,6 +662,29 @@ impl InteractiveApp {
         }
 
         self.error_message = None;
+
+        // ── Immediate visual feedback ─────────────────────────────────────────
+        // Push a pending "thinking" placeholder into the transcript right now so
+        // the user sees something happening in the chat area before the runtime
+        // fires TurnStarted / ItemStarted.
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            self.upsert_transcript_entry(TranscriptEntry {
+                item_id: THINKING_PLACEHOLDER_ID.to_string(),
+                tool_call_id: None,
+                kind: EntryKind::Assistant,
+                title: "Codezilla".into(),
+                body: String::new(),
+                timestamp: Some(ts),
+                pending: true,
+            });
+        }
+        self.auto_scroll = true;
+
         if let Some(turn_id) = self.active_turn_id.clone() {
             self.runtime
                 .steer_turn(TurnSteerParams {
@@ -680,7 +714,6 @@ impl InteractiveApp {
             self.status_message = format!("Started {}", short_turn_id(&turn.turn.turn_id));
         }
         self.push_composer_history_entry(&raw);
-        self.auto_scroll = true;
         Ok(())
     }
 
@@ -1284,6 +1317,8 @@ impl InteractiveApp {
             RuntimeEventKind::TurnCompleted => {
                 self.active_turn_id = None;
                 self.pending_approval = None;
+                self.live_activity = None;
+                self.remove_thinking_placeholder();
                 if let Some(thread) = self.current_thread_meta.as_mut() {
                     thread.status = super::super::domain::ThreadStatus::Idle;
                 }
@@ -1293,6 +1328,8 @@ impl InteractiveApp {
             RuntimeEventKind::TurnFailed => {
                 self.active_turn_id = None;
                 self.pending_approval = None;
+                self.live_activity = None;
+                self.remove_thinking_placeholder();
                 // Prefer "kind" (the structured label) as the title; fall back to "reason".
                 let kind_label = event
                     .payload
@@ -1374,6 +1411,10 @@ impl InteractiveApp {
             EntryKind::Reasoning => "Reasoning",
             _ => "Runtime",
         };
+        // Once real content starts, the thinking placeholder is no longer needed.
+        if entry_kind == EntryKind::Assistant {
+            self.remove_thinking_placeholder();
+        }
         self.upsert_transcript_entry(TranscriptEntry {
             item_id: item_id.to_string(),
             tool_call_id: None,
@@ -1383,7 +1424,70 @@ impl InteractiveApp {
             timestamp: Some(event.emitted_at / 1000),
             pending: true,
         });
-        self.status_message = "Streaming response…".into();
+
+        // ── Contextual status + live activity messages ─────────────────────
+        // `live_activity` drives the header; `status_message` drives the status bar.
+        let (activity, status) = match kind {
+            "TOOL_CALL" => {
+                let tool_name = event
+                    .payload
+                    .get("toolName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool");
+                // Best-effort short label: first arg (path/command) if present.
+                let arg_hint = event
+                    .payload
+                    .get("arguments")
+                    .and_then(|a| {
+                        a.get("path")
+                            .or_else(|| a.get("command"))
+                            .or_else(|| a.get("pattern"))
+                    })
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        // Trim to a short display name (basename for paths)
+                        let short = s.rsplit('/').next().unwrap_or(s);
+                        if short.len() > 40 {
+                            format!("{}…", &short[..37])
+                        } else {
+                            short.to_string()
+                        }
+                    });
+                let activity_str = match arg_hint {
+                    Some(hint) => format!("⚙ {} {}", tool_name, hint),
+                    None => format!("⚙ {}", tool_name),
+                };
+                (activity_str.clone(), format!("{}…", activity_str))
+            }
+            "COMMAND_EXECUTION" => {
+                let cmd = event
+                    .payload
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("cmd");
+                let short_cmd = if cmd.len() > 50 {
+                    format!("{}…", &cmd[..47])
+                } else {
+                    cmd.to_string()
+                };
+                let activity_str = format!("$ {}", short_cmd);
+                (activity_str.clone(), activity_str)
+            }
+            "FILE_CHANGE" => {
+                let path = event
+                    .payload
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("file");
+                let short_path = path.rsplit('/').next().unwrap_or(path);
+                let activity_str = format!("✏ {}", short_path);
+                (activity_str.clone(), format!("✏  {path}"))
+            }
+            _ => (String::new(), "Streaming response…".into()),
+        };
+        self.live_activity = if activity.is_empty() { None } else { Some(activity) };
+        self.status_message = status;
+        self.error_message = None;
         // Do NOT force auto_scroll here — if the user scrolled up, respect that.
         Ok(())
     }
@@ -1413,6 +1517,10 @@ impl InteractiveApp {
             });
         }
         self.status_message = "Streaming response…".into();
+        // While streaming text, keep live_activity as-is (shows last tool) or set generic.
+        if self.live_activity.is_none() {
+            self.live_activity = Some("◆ generating…".to_string());
+        }
         // Do NOT force auto_scroll here — if the user scrolled up, respect that.
     }
 
@@ -1426,6 +1534,11 @@ impl InteractiveApp {
                 self.remove_latest_tool_context_entries();
                 self.upsert_transcript_entry(entry_from_item(&item));
             }
+            // Clear tool activity once the result is in.
+            self.live_activity = None;
+        } else if matches!(item.kind, ItemKind::AgentMessage) {
+            self.upsert_transcript_entry(entry_from_item(&item));
+            self.live_activity = None;
         } else {
             self.upsert_transcript_entry(entry_from_item(&item));
         }
@@ -1462,6 +1575,14 @@ impl InteractiveApp {
             pending: false,
         });
         // Do NOT force auto_scroll — respect user scroll position.
+    }
+
+    /// Remove the "thinking" placeholder from the transcript if it is still present.
+    fn remove_thinking_placeholder(&mut self) {
+        if let Some(index) = self.transcript_index.get(THINKING_PLACEHOLDER_ID).copied() {
+            self.transcript.remove(index);
+            self.rebuild_transcript_index();
+        }
     }
 
     fn remove_latest_approval_request_entry(&mut self) {
