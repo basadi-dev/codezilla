@@ -56,7 +56,36 @@ impl TurnExecutor {
         // trim this turn. We only retry once to avoid an infinite loop.
         let mut auto_trim_attempted = false;
 
+        // ── Loop-break guards ─────────────────────────────────────────────────
+        //
+        // Guard 1 — consecutive failures: incremented each iteration where
+        // every tool call in that round returned ok:false; reset to 0 as soon
+        // as any tool succeeds. Catches stuck loops (e.g. bad args that keep
+        // failing) without harming legitimate long tasks.
+        const MAX_CONSECUTIVE_FAILURES: usize = 5;
+        let mut consecutive_failures: usize = 0;
+
+        // Guard 2 — absolute backstop: a very high ceiling that only fires
+        // when the model loops *successfully* without ever finishing. Legitimate
+        // agentic tasks rarely need more than ~100 rounds.
+        const MAX_AGENT_ITERATIONS: usize = 150;
+        let mut agent_iterations: usize = 0;
+
         loop {
+            agent_iterations += 1;
+            if agent_iterations > MAX_AGENT_ITERATIONS {
+                return self
+                    .fail_turn(
+                        &params.thread_id,
+                        &turn_id,
+                        "loop_limit",
+                        &format!(
+                            "Agent exceeded {MAX_AGENT_ITERATIONS} tool-call iterations without \
+                             finishing. The turn has been stopped to prevent an infinite loop."
+                        ),
+                    )
+                    .await;
+            }
             if self.is_cancelled(&params.thread_id, &turn_id).await? {
                 return self.complete_interrupted(&params.thread_id, &turn_id).await;
             }
@@ -252,6 +281,10 @@ impl TurnExecutor {
                     .await;
             }
 
+            // Track whether any tool in this round succeeded so we can
+            // update the consecutive-failure counter correctly after the loop.
+            let mut had_any_success = false;
+
             for call in tool_calls {
                 // Safety net: if the model put shell operators (|, >, 2>&1, globs) inside
                 // a shell_exec argv, auto-rewrite to bash_exec so they work correctly.
@@ -377,8 +410,38 @@ impl TurnExecutor {
                         output: json!({ "error": e.to_string() }),
                         error_message: Some(e.to_string()),
                     });
+
+                if result.ok {
+                    had_any_success = true;
+                }
+
                 self.persist_tool_result(&params.thread_id, &turn_id, &result)
                     .await?;
+            }
+
+            // ── Consecutive-failure guard ─────────────────────────────────────
+            // Reset counter if any tool succeeded this round; bump it if every
+            // tool failed. Trips the break after MAX_CONSECUTIVE_FAILURES all-fail
+            // rounds in a row — catches stuck loops without harming legitimate
+            // long tasks where tools normally succeed.
+            if had_any_success {
+                consecutive_failures = 0;
+            } else {
+                consecutive_failures += 1;
+                if consecutive_failures > MAX_CONSECUTIVE_FAILURES {
+                    return self
+                        .fail_turn(
+                            &params.thread_id,
+                            &turn_id,
+                            "loop_limit",
+                            &format!(
+                                "Agent made {consecutive_failures} consecutive rounds where every \
+                                 tool call failed. The turn has been stopped. Check that tool \
+                                 arguments are correct and the requested paths/commands exist."
+                            ),
+                        )
+                        .await;
+                }
             }
         }
     }

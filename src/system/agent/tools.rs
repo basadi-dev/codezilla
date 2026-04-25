@@ -364,6 +364,22 @@ impl ToolProvider for ListDirToolProvider {
     }
 
     async fn execute(&self, call: &ToolCall, context: &ToolExecutionContext) -> Result<ToolResult> {
+        // Detect the _raw_arguments sentinel set by model_gateway when it could not
+        // parse the model's argument string. Returning an error here gives the model
+        // clear feedback so it can reformulate, instead of silently falling back to
+        // cwd and causing an infinite retry loop.
+        if call.arguments.get("_raw_arguments").is_some() {
+            let raw = call.arguments["_raw_arguments"].to_string();
+            return Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({ "error": "invalid_arguments", "raw": raw }),
+                error_message: Some(format!(
+                    "tool_invalid_arguments: list_dir received unparseable arguments: {raw}. \
+                     Provide a JSON object with a \"path\" string field, e.g. {{\"path\": \"src/llm\"}}"
+                )),
+            });
+        }
         let root = call
             .arguments
             .get("path")

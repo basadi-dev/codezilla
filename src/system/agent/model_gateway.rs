@@ -158,15 +158,23 @@ impl ModelGateway {
                                 tracing::warn!("model_gateway: discarding tool call with empty name (args: {args:?})");
                                 continue;
                             }
-                            let arguments = parse_tool_arguments_lenient(&tool_name, &args);
-                            calls.push(ToolCall {
-                                tool_call_id: id.unwrap_or_else(|| {
-                                    format!("call_{}", uuid::Uuid::new_v4().simple())
-                                }),
-                                provider_kind: ToolProviderKind::Builtin,
-                                tool_name,
-                                arguments,
+                            let base_id = id.unwrap_or_else(|| {
+                                format!("call_{}", uuid::Uuid::new_v4().simple())
                             });
+                            let argument_list = parse_tool_arguments_lenient(&tool_name, &args);
+                            for (i, arguments) in argument_list.into_iter().enumerate() {
+                                let tool_call_id = if i == 0 {
+                                    base_id.clone()
+                                } else {
+                                    format!("call_{}", uuid::Uuid::new_v4().simple())
+                                };
+                                calls.push(ToolCall {
+                                    tool_call_id,
+                                    provider_kind: ToolProviderKind::Builtin,
+                                    tool_name: tool_name.clone(),
+                                    arguments,
+                                });
+                            }
                         }
                         if !calls.is_empty() {
                             let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
@@ -223,16 +231,23 @@ impl ModelGateway {
                                         tracing::warn!("model_gateway: discarding tool call with empty name in complete() fallback");
                                         continue;
                                     }
-                                    let arguments = parse_tool_arguments_lenient(
+                                    let argument_list = parse_tool_arguments_lenient(
                                         &c.function.name,
                                         &c.function.arguments,
                                     );
-                                    calls.push(ToolCall {
-                                        tool_call_id: c.id,
-                                        provider_kind: ToolProviderKind::Builtin,
-                                        tool_name: c.function.name,
-                                        arguments,
-                                    });
+                                    for (i, arguments) in argument_list.into_iter().enumerate() {
+                                        let tool_call_id = if i == 0 {
+                                            c.id.clone()
+                                        } else {
+                                            format!("call_{}", uuid::Uuid::new_v4().simple())
+                                        };
+                                        calls.push(ToolCall {
+                                            tool_call_id,
+                                            provider_kind: ToolProviderKind::Builtin,
+                                            tool_name: c.function.name.clone(),
+                                            arguments,
+                                        });
+                                    }
                                 }
                                 if !calls.is_empty() {
                                     let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
@@ -440,34 +455,60 @@ fn item_to_llm_message(item: &ConversationItem) -> Option<llm::Message> {
     }
 }
 
-fn parse_tool_arguments_lenient(tool_name: &str, raw_args: &str) -> Value {
+/// Parse raw tool-call argument strings into one or more `Value` objects.
+///
+/// Returns a `Vec` because the model sometimes concatenates multiple JSON
+/// objects into a single argument field (e.g. `{"path":"a"}{"path":"b"}`).
+/// In that case every object is treated as a separate invocation of the same
+/// tool, which is almost always what was intended.
+fn parse_tool_arguments_lenient(tool_name: &str, raw_args: &str) -> Vec<Value> {
     let trimmed = raw_args.trim();
     if trimmed.is_empty() {
         tracing::warn!(
             tool_name = %tool_name,
             "model_gateway: tool call had empty arguments; using empty object"
         );
-        return serde_json::json!({});
+        return vec![serde_json::json!({})];
     }
 
     match serde_json::from_str::<Value>(trimmed) {
-        Ok(v) if v.is_object() => v,
+        Ok(v) if v.is_object() => vec![v],
         Ok(v) => {
             tracing::warn!(
                 tool_name = %tool_name,
                 parsed_args = %v,
                 "model_gateway: tool arguments were valid JSON but not an object; coercing"
             );
-            coerce_non_object_tool_arguments(tool_name, v)
+            vec![coerce_non_object_tool_arguments(tool_name, v)]
         }
-        Err(e) => {
+        Err(_) => {
+            // Attempt to split concatenated JSON objects produced when the
+            // model packs multiple parallel calls into one argument string.
+            // serde_json's streaming deserializer handles adjacent objects.
+            let objects: Vec<Value> = serde_json::Deserializer::from_str(trimmed)
+                .into_iter::<Value>()
+                .filter_map(|r| r.ok())
+                .filter(|v| v.is_object())
+                .collect();
+
+            if !objects.is_empty() {
+                tracing::warn!(
+                    tool_name = %tool_name,
+                    raw_args = %trimmed,
+                    count = objects.len(),
+                    "model_gateway: split {} concatenated JSON objects into separate tool calls",
+                    objects.len()
+                );
+                return objects;
+            }
+
+            // Truly unparseable — fall back to best-effort coercion.
             tracing::warn!(
                 tool_name = %tool_name,
                 raw_args = %trimmed,
-                error = %e,
                 "model_gateway: tool arguments were not valid JSON; preserving as best-effort arguments"
             );
-            coerce_raw_tool_arguments(tool_name, trimmed)
+            vec![coerce_raw_tool_arguments(tool_name, trimmed)]
         }
     }
 }
