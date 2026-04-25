@@ -9,7 +9,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use super::markdown::md_to_lines;
+use super::markdown::{md_to_lines, md_to_lines_with_source_map};
 
 use super::super::domain::{
     ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalPolicyKind, ApprovalResolution,
@@ -446,9 +446,8 @@ impl InteractiveApp {
     }
 
     /// Copy the selected transcript text to the system clipboard.
-    /// For markdown entries (Assistant/Summary/Reasoning) the raw Markdown
-    /// source is copied. For all other entry types the rendered visual text
-    /// is used (gutter stripped).
+    /// For markdown entries the raw markdown source of the selected lines is copied.
+    /// For other entry types the rendered visual text is used (gutter stripped).
     pub fn copy_selection_to_clipboard(&mut self) {
         let Some(sel) = self.current_selection_range() else {
             return;
@@ -457,8 +456,8 @@ impl InteractiveApp {
         let width = self.transcript_area.width;
         self.ensure_transcript_render_cache(width);
 
-        // ── Try raw-markdown copy for single markdown entries ─────────────────
-        if let Some(raw_text) = self.try_copy_raw_markdown(&sel) {
+        // ── Try partial raw-markdown copy for markdown entries ────────────────
+        if let Some(raw_text) = self.try_copy_partial_markdown(&sel, width) {
             let char_count = raw_text.chars().count();
             match arboard::Clipboard::new() {
                 Ok(mut cb) => match cb.set_text(raw_text) {
@@ -473,7 +472,7 @@ impl InteractiveApp {
             return;
         }
 
-        // ── Fallback: copy from rendered span text (non-markdown entries) ─────
+        // ── Fallback: rendered visual text (non-markdown entries) ─────────────
         let (lines, total) = self.transcript_lines_all(width, None);
         let end_clamped = sel.end_line.min(total.saturating_sub(1));
         if sel.start_line > end_clamped {
@@ -512,31 +511,69 @@ impl InteractiveApp {
         }
     }
 
-    /// If the selection falls within a single markdown entry, return its raw
-    /// body text. Returns `None` if the selection spans multiple entries or
-    /// lands in a non-markdown entry.
-    fn try_copy_raw_markdown(&self, sel: &SelectionRange) -> Option<String> {
+    /// For a selection that falls within a single markdown entry, extract the raw
+    /// markdown source lines that correspond to the selected visual lines.
+    ///
+    /// Uses a source-line map built from the rendered output to find which raw
+    /// markdown lines generated the selected visual lines, then expands to the
+    /// nearest block boundaries (empty lines) so complete paragraphs/tables/code
+    /// blocks are always returned rather than mid-block fragments.
+    fn try_copy_partial_markdown(&self, sel: &SelectionRange, width: u16) -> Option<String> {
         let cache = &self.transcript_render_cache;
         if cache.entries.is_empty() { return None; }
 
-        // Which cache entry owns sel.start_line and sel.end_line?
         let start_idx = cache.line_ends.partition_point(|&end| end <= sel.start_line);
         let end_idx   = cache.line_ends.partition_point(|&end| end <= sel.end_line);
-
-        // Both must land in the same entry.
-        if start_idx != end_idx || start_idx >= cache.entries.len() {
-            return None;
-        }
+        if start_idx >= cache.entries.len() { return None; }
 
         let entry = &cache.entries[start_idx];
         if !matches!(entry.kind, EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning) {
             return None;
         }
-        if entry.raw_body.is_empty() {
-            return None;
-        }
+        if entry.raw_body.is_empty() { return None; }
 
-        Some(entry.raw_body.clone())
+        // The entry layout is: 1 header line + N body lines + 1 trailing blank.
+        // body_start is the first visual line of the markdown body within the entry.
+        let entry_vis_start = if start_idx == 0 { 0 } else { cache.line_ends[start_idx - 1] };
+        let body_vis_start  = entry_vis_start + 1;
+
+        let bw = (width as usize).saturating_sub(5).max(10);
+        let (_, source_map) = md_to_lines_with_source_map(&entry.raw_body, ratatui::style::Color::White, bw);
+        if source_map.is_empty() { return None; }
+
+        // Convert absolute visual lines → relative to body start.
+        let rel_start = sel.start_line.saturating_sub(body_vis_start);
+        let rel_end = if end_idx == start_idx {
+            sel.end_line.saturating_sub(body_vis_start)
+        } else {
+            source_map.len().saturating_sub(1)
+        }.min(source_map.len().saturating_sub(1));
+
+        if rel_start >= source_map.len() { return None; }
+
+        let src_a = *source_map.get(rel_start).unwrap_or(&0);
+        let src_b = *source_map.get(rel_end).unwrap_or(&src_a);
+        let (src_start, src_end) = (src_a.min(src_b), src_a.max(src_b));
+
+        // Expand to nearest block boundaries (empty lines) so we always return
+        // complete blocks: whole paragraphs, full tables, fenced code blocks, etc.
+        let raw_lines: Vec<&str> = entry.raw_body.lines().collect();
+        let n = raw_lines.len();
+        if n == 0 { return None; }
+
+        let is_empty = |i: usize| raw_lines.get(i).map(|l| l.trim().is_empty()).unwrap_or(true);
+
+        let block_start = (0..=src_start.min(n - 1))
+            .rev()
+            .find(|&i| i == 0 || is_empty(i.saturating_sub(1)))
+            .unwrap_or(0);
+
+        let block_end = (src_end.min(n - 1)..n)
+            .find(|&i| is_empty(i + 1) || i + 1 >= n)
+            .unwrap_or(n - 1);
+
+        let excerpt = raw_lines[block_start..=block_end].join("\n");
+        if excerpt.trim().is_empty() { None } else { Some(excerpt) }
     }
 
     pub async fn submit_composer(&mut self) -> Result<()> {

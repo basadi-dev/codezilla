@@ -32,9 +32,30 @@ use super::types::{COLOR_ACCENT, COLOR_MUTED, COLOR_REASONING};
 /// * `body_width` – available columns (used for word-wrap & table sizing).
 pub fn md_to_lines(markdown: &str, body_color: Color, body_width: usize) -> Vec<Line<'static>> {
     let width = body_width.max(10);
-    let mut renderer = MdRenderer::new(body_color, width);
-    renderer.render(markdown);
-    renderer.finish()
+    let mut r = MdRenderer::new(body_color, width);
+    r.render(markdown);
+    r.finish()
+}
+
+/// Like `md_to_lines` but also returns a source-line map:
+/// `source_map[i]` is the raw-markdown line index (0-based) that generated visual line `i`.
+///
+/// Used by the copy-to-clipboard path to extract only the selected raw markdown lines
+/// rather than the whole entry.
+pub fn md_to_lines_with_source_map(
+    markdown: &str,
+    body_color: Color,
+    body_width: usize,
+) -> (Vec<Line<'static>>, Vec<usize>) {
+    let width = body_width.max(10);
+    let mut r = MdRenderer::new(body_color, width);
+    let mut source_map = r.render_mapped(markdown);
+    let last_src = source_map.last().copied().unwrap_or(0);
+    let out = r.finish();
+    // finish() may flush remaining inline content or strip trailing blank lines.
+    while source_map.len() < out.len() { source_map.push(last_src); }
+    source_map.truncate(out.len());
+    (out, source_map)
 }
 
 // ─── Inline style ─────────────────────────────────────────────────────────────
@@ -108,6 +129,64 @@ struct TableState {
     in_header: bool,
 }
 
+// ─── Shared event dispatcher ─────────────────────────────────────────────────
+
+/// Dispatch a single pulldown-cmark event into the renderer.
+/// Extracted so both the plain `render` loop and the source-mapped `render_mapped` loop
+/// can share the same event-handling logic without code duplication.
+fn dispatch_md_event(r: &mut MdRenderer, event: Event) {
+    match event {
+        Event::Start(tag) => r.handle_start(tag),
+        Event::End(tag)   => r.handle_end(tag),
+
+        Event::Text(text) => {
+            if r.in_code_block {
+                for line in text.lines() { r.push_code_line(line.to_string()); }
+            } else if let Some(tbl) = r.table.as_mut() {
+                tbl.current_cell.push_str(&text);
+            } else {
+                let style = r.style.to_ratatui(r.body_color);
+                r.inline.push(text.to_string(), style);
+            }
+        }
+
+        Event::Code(text) => {
+            if let Some(tbl) = r.table.as_mut() {
+                tbl.current_cell.push_str(&text);
+            } else {
+                let style = InlineStyle { code: true, ..Default::default() }
+                    .to_ratatui(r.body_color);
+                r.inline.push(text.to_string(), style);
+            }
+        }
+
+        Event::SoftBreak => {
+            if r.table.is_none() {
+                let style = r.style.to_ratatui(r.body_color);
+                r.inline.push(" ".to_string(), style);
+            }
+        }
+        Event::HardBreak => {
+            if r.table.is_none() { r.flush_inline(); }
+        }
+
+        Event::Rule => {
+            r.flush_inline();
+            r.out.push(Line::from(Span::styled(
+                "──────".to_string(),
+                Style::default().fg(COLOR_MUTED),
+            )));
+        }
+
+        Event::TaskListMarker(checked) => {
+            let (mark, color) = if checked { ("✓ ", COLOR_ACCENT) } else { ("○ ", COLOR_MUTED) };
+            r.inline.push(mark.to_string(), Style::default().fg(color));
+        }
+
+        _ => {}
+    }
+}
+
 // ─── Renderer ─────────────────────────────────────────────────────────────────
 
 struct MdRenderer {
@@ -146,69 +225,52 @@ impl MdRenderer {
 
     fn render(&mut self, markdown: &str) {
         let opts = Options::all();
-        let parser = Parser::new_ext(markdown, opts);
+        for event in Parser::new_ext(markdown, opts) {
+            dispatch_md_event(self, event);
+        }
+        self.flush_inline();
+    }
 
-        for event in parser {
-            match event {
-                Event::Start(tag) => self.handle_start(tag),
-                Event::End(tag)   => self.handle_end(tag),
+    /// Like `render` but builds a source-line map in parallel.
+    /// Returns a `Vec<usize>` where index `i` is the raw source line that generated `self.out[i]`.
+    fn render_mapped(&mut self, markdown: &str) -> Vec<usize> {
+        // Build byte-offset → line-number table for O(log n) lookups.
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(markdown.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let byte_to_line =
+            |b: usize| line_starts.partition_point(|&s| s <= b).saturating_sub(1);
 
-                Event::Text(text) => {
-                    if self.in_code_block {
-                        for line in text.lines() {
-                            self.push_code_line(line.to_string());
-                        }
-                    } else if let Some(tbl) = self.table.as_mut() {
-                        tbl.current_cell.push_str(&text);
-                    } else {
-                        let style = self.style.to_ratatui(self.body_color);
-                        self.inline.push(text.to_string(), style);
-                    }
+        let opts = Options::all();
+        let mut source_map: Vec<usize> = Vec::new();
+        let mut table_start_src = 0usize;
+
+        for (event, range) in Parser::new_ext(markdown, opts).into_offset_iter() {
+            let cur_src = byte_to_line(range.start);
+
+            if matches!(event, Event::Start(Tag::Table(_))) {
+                table_start_src = cur_src;
+            }
+
+            let is_end_table = matches!(event, Event::End(TagEnd::Table));
+            let before = self.out.len();
+            dispatch_md_event(self, event);
+            let added = self.out.len() - before;
+
+            if is_end_table && added > 1 {
+                // Table visual lines are all flushed at once. Distribute them linearly
+                // across [table_start_src..=cur_src] so selecting any portion of the
+                // rendered table maps back to a source line within the table.
+                let src_span = cur_src.saturating_sub(table_start_src);
+                for i in 0..added {
+                    let src = table_start_src + (i * src_span) / (added - 1);
+                    source_map.push(src);
                 }
-
-                Event::Code(text) => {
-                    if let Some(tbl) = self.table.as_mut() {
-                        tbl.current_cell.push_str(&text);
-                    } else {
-                        let style = InlineStyle { code: true, ..Default::default() }
-                            .to_ratatui(self.body_color);
-                        self.inline.push(text.to_string(), style);
-                    }
-                }
-
-                Event::SoftBreak => {
-                    if self.table.is_none() {
-                        let style = self.style.to_ratatui(self.body_color);
-                        self.inline.push(" ".to_string(), style);
-                    }
-                }
-                Event::HardBreak => {
-                    if self.table.is_none() { self.flush_inline(); }
-                }
-
-                // Minimal horizontal rule: short dash sequence, not full-width
-                Event::Rule => {
-                    self.flush_inline();
-                    self.out.push(Line::from(Span::styled(
-                        "──────".to_string(),
-                        Style::default().fg(COLOR_MUTED),
-                    )));
-                }
-
-                Event::TaskListMarker(checked) => {
-                    let (mark, color) = if checked {
-                        ("✓ ", COLOR_ACCENT)
-                    } else {
-                        ("○ ", COLOR_MUTED)
-                    };
-                    self.inline.push(mark.to_string(), Style::default().fg(color));
-                }
-
-                _ => {}
+            } else {
+                for _ in 0..added { source_map.push(cur_src); }
             }
         }
-
-        self.flush_inline();
+        source_map
     }
 
     // ── Tag open ──────────────────────────────────────────────────────────────
