@@ -525,9 +525,6 @@ fn render_table(tbl: &TableState, max_width: usize) -> Vec<Line<'static>> {
                 "─".repeat(underline_width),
                 Style::default().fg(COLOR_MUTED),
             )));
-        } else {
-            // Blank line between body rows for readability.
-            lines.push(Line::from(""));
         }
     }
 
