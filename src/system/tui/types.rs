@@ -6,7 +6,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use super::markdown::md_to_lines;
+use super::markdown::{highlight_code_line, lang_for_path, md_to_lines};
 
 use crate::system::domain::PendingApproval;
 use crate::system::domain::{ConversationItem, ItemKind, ThreadMetadata};
@@ -125,6 +125,7 @@ pub struct SelectionPoint {
 #[derive(Debug, Clone)]
 pub struct TranscriptEntry {
     pub item_id: String,
+    pub tool_call_id: Option<String>,
     pub kind: EntryKind,
     pub title: String,
     pub body: String,
@@ -491,9 +492,16 @@ pub fn entry_style(kind: EntryKind) -> (&'static str, Color, Color) {
 // ─── Utility functions shared across tui modules ──────────────────────────────
 
 pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
+    let tool_call_id = item
+        .payload
+        .get("toolCallId")
+        .and_then(|v: &serde_json::Value| v.as_str())
+        .map(ToOwned::to_owned);
+
     match item.kind {
         ItemKind::UserMessage => TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id: None,
             kind: EntryKind::User,
             title: "You".into(),
             body: item
@@ -507,6 +515,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::AgentMessage => TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id: None,
             kind: EntryKind::Assistant,
             title: "Codezilla".into(),
             body: item
@@ -520,6 +529,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::ToolCall => TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id,
             kind: EntryKind::ToolCall,
             title: format!(
                 "{}",
@@ -542,6 +552,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::ToolResult => TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id,
             kind: EntryKind::ToolResult,
             title: "result".into(),
             body: format_tool_result(item.payload.get("output"), item.payload.get("errorMessage")),
@@ -550,6 +561,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::ReasoningSummary => TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id: None,
             kind: EntryKind::Summary,
             title: "summary".into(),
             body: item
@@ -564,6 +576,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::ReasoningText => TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id: None,
             kind: EntryKind::Reasoning,
             title: "thinking".into(),
             body: item
@@ -577,6 +590,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::UserAttachment => TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id: None,
             kind: EntryKind::Attachment,
             title: "attachment".into(),
             body: item
@@ -606,6 +620,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or(fallback_body);
             TranscriptEntry {
                 item_id: item.item_id.clone(),
+                tool_call_id: None,
                 kind: EntryKind::Error,
                 title: kind_label,
                 body: message,
@@ -615,6 +630,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         }
         _ => TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id: None,
             kind: EntryKind::Status,
             title: format!("{:?}", item.kind).to_lowercase(),
             body: pretty_json_or_text(Some(&item.payload), None),
@@ -823,16 +839,28 @@ fn append_transcript_entry_lines(
             }
             current_line += 1;
         }
+    } else if entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.body) {
+        let lang = read_file_lang_for_body(&entry.body);
+        for rendered_line in render_read_file_body_lines(&entry.body, lang, body_width) {
+            if current_line >= start_line && current_line < end_line {
+                let mut spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                spans.extend(rendered_line);
+                out.push(Line::from(spans));
+            }
+            current_line += 1;
+        }
     } else if entry.kind == EntryKind::ToolResult && is_diff_body(&entry.body) {
-        // Colour-coded unified diff view.
+        // Unified diff / write_file result. Reuse the source highlighter when we
+        // can infer a language from the changed path, but keep the diff markers
+        // colored so additions/removals still read as a diff.
+        let lang = diff_lang_for_body(&entry.body);
         for body_line in entry.body.split('\n') {
             for chunk in split_at_width(body_line, body_width) {
                 if current_line >= start_line && current_line < end_line {
-                    let color = diff_line_color(&chunk);
-                    out.push(Line::from(vec![
-                        Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
-                        Span::styled(chunk, Style::default().fg(color)),
-                    ]));
+                    let spans = render_diff_chunk(&chunk, lang);
+                    let mut line_spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                    line_spans.extend(spans);
+                    out.push(Line::from(line_spans));
                 }
                 current_line += 1;
             }
@@ -858,9 +886,20 @@ fn append_transcript_entry_lines(
 
 /// Returns true when `body` looks like a unified diff output (to trigger colourised rendering).
 fn is_diff_body(body: &str) -> bool {
+    let Some(first) = body.lines().find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+
+    first.contains("  ·  ")
+        || first.starts_with("--- ")
+        || first.starts_with("@@")
+        || first.starts_with("+++ ")
+}
+
+pub fn is_read_file_body(body: &str) -> bool {
     body.lines()
         .find(|l| !l.trim().is_empty())
-        .map(|l| l.starts_with("---") || l.starts_with("@@") || l.starts_with("+++ "))
+        .map(|l| l.starts_with("📄 "))
         .unwrap_or(false)
 }
 
@@ -879,6 +918,166 @@ fn diff_line_color(line: &str) -> Color {
     } else {
         Color::Rgb(190, 190, 190) // context lines — slightly dimmed
     }
+}
+
+fn diff_lang_for_body(body: &str) -> &'static str {
+    diff_path_for_body(body)
+        .map(lang_for_path)
+        .unwrap_or("")
+}
+
+pub fn read_file_lang_for_body(body: &str) -> &'static str {
+    read_file_path_for_body(body)
+        .map(lang_for_path)
+        .unwrap_or("")
+}
+
+fn diff_path_for_body(body: &str) -> Option<&str> {
+    let mut non_empty_lines = body.lines().filter(|l| !l.trim().is_empty());
+    let first = non_empty_lines.next()?;
+
+    if let Some((path, _status)) = first.split_once("  ·  ") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+
+    if let Some(path) = diff_header_path(first) {
+        if path != "/dev/null" {
+            return Some(path);
+        }
+    }
+
+    if first.starts_with("--- ") {
+        if let Some(second) = non_empty_lines.next() {
+            if let Some(path) = diff_header_path(second) {
+                if path != "/dev/null" {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn diff_header_path(line: &str) -> Option<&str> {
+    let line = line
+        .strip_prefix("--- ")
+        .or_else(|| line.strip_prefix("+++ "))?;
+    let path = line.split_whitespace().next()?;
+    Some(
+        path.strip_prefix("a/")
+            .or_else(|| path.strip_prefix("b/"))
+            .unwrap_or(path),
+    )
+}
+
+fn read_file_path_for_body(body: &str) -> Option<&str> {
+    let first = body.lines().find(|l| !l.trim().is_empty())?;
+    if !first.starts_with("📄 ") {
+        return None;
+    }
+    let path = first
+        .trim_start_matches("📄 ")
+        .split("  (")
+        .next()?
+        .trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+pub fn render_read_file_body_lines(
+    body: &str,
+    lang: &str,
+    width: usize,
+) -> Vec<Vec<Span<'static>>> {
+    let mut out = Vec::new();
+    let mut lines = body.lines();
+    let header = lines.next().unwrap_or_default();
+    let _blank = lines.next();
+
+    out.push(vec![Span::styled(
+        header.to_string(),
+        Style::default().fg(COLOR_MUTED),
+    )]);
+    out.push(Vec::new());
+
+    for body_line in lines {
+        let chunks = split_at_width(body_line, width);
+        for chunk in chunks {
+            if chunk.trim() == "…" || chunk.starts_with("▲ ") {
+                out.push(vec![Span::styled(chunk, Style::default().fg(COLOR_WARNING))]);
+                continue;
+            }
+
+            if lang.is_empty() {
+                out.push(vec![Span::styled(
+                    chunk,
+                    Style::default().fg(Color::Rgb(190, 190, 190)),
+                )]);
+                continue;
+            }
+
+            out.push(highlight_code_line(&chunk, lang));
+        }
+    }
+
+    out
+}
+
+fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
+    if chunk.starts_with("--- ") || chunk.starts_with("+++ ") {
+        return vec![Span::styled(chunk.to_string(), Style::default().fg(COLOR_MUTED))];
+    }
+    if chunk.starts_with("@@") {
+        return vec![Span::styled(
+            chunk.to_string(),
+            Style::default().fg(Color::Rgb(100, 200, 240)),
+        )];
+    }
+    if chunk.starts_with('▲') {
+        return vec![Span::styled(chunk.to_string(), Style::default().fg(COLOR_WARNING))];
+    }
+
+    if lang.is_empty() {
+        return vec![Span::styled(
+            chunk.to_string(),
+            Style::default().fg(diff_line_color(chunk)),
+        )];
+    }
+
+    if let Some(rest) = chunk.strip_prefix('+') {
+        if !chunk.starts_with("++") {
+            let mut spans = vec![Span::styled(
+                "+".to_string(),
+                Style::default().fg(Color::Rgb(100, 220, 120)),
+            )];
+            spans.extend(highlight_code_line(rest, lang));
+            return spans;
+        }
+    }
+
+    if let Some(rest) = chunk.strip_prefix('-') {
+        if !chunk.starts_with("--") {
+            let mut spans = vec![Span::styled(
+                "-".to_string(),
+                Style::default().fg(Color::Rgb(255, 100, 100)),
+            )];
+            spans.extend(highlight_code_line(rest, lang));
+            return spans;
+        }
+    }
+
+    if let Some(rest) = chunk.strip_prefix(' ') {
+        return highlight_code_line(rest, lang);
+    }
+
+    highlight_code_line(chunk, lang)
 }
 
 /// Split spans at column boundaries so that [col_from, col_to] (inclusive)
@@ -1059,6 +1258,42 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
                 lines.join("\n")
             }
         }
+        "bash_exec" => {
+            let mut lines = Vec::new();
+            if let Some(cmd) = arguments.get("command").and_then(Value::as_str) {
+                lines.push(cmd.to_string());
+            }
+            if let Some(cwd) = arguments.get("cwd").and_then(Value::as_str) {
+                lines.push(format!("cwd: {cwd}"));
+            }
+            if lines.is_empty() {
+                pretty_json_or_text(Some(arguments), None)
+            } else {
+                lines.join("\n")
+            }
+        }
+        "list_dir" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or(".");
+            let depth = arguments
+                .get("depth")
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            format!("{path}  (depth {depth})")
+        }
+        "grep_search" => {
+            let pattern = arguments
+                .get("pattern")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or(".");
+            format!("/{pattern}/  in {path}")
+        }
         "read_file" | "write_file" | "create_directory" | "remove_path" => {
             let mut lines = Vec::new();
             if let Some(path) = arguments.get("path").and_then(Value::as_str) {
@@ -1098,7 +1333,28 @@ pub fn format_tool_result(output: Option<&Value>, error_message: Option<&Value>)
         return format_write_file_result(output);
     }
 
+    // shell_exec / bash_exec results
     if let Some(formatted) = format_shell_result(output) {
+        return formatted;
+    }
+
+    // list_dir results: {root, entries, count, truncated}
+    if let Some(formatted) = format_list_dir_result(output) {
+        return formatted;
+    }
+
+    // read_file results: {path, content}
+    if let Some(formatted) = format_read_file_result(output) {
+        return formatted;
+    }
+
+    // grep_search results: {matches, source}
+    if let Some(formatted) = format_grep_result(output) {
+        return formatted;
+    }
+
+    // Simple ok results: {ok, path} or {ok, source, target}
+    if let Some(formatted) = format_simple_ok_result(output) {
         return formatted;
     }
 
@@ -1210,6 +1466,173 @@ fn format_shell_result(output: &Value) -> Option<String> {
     }
 
     Some(lines.join("\n"))
+}
+
+/// Format a `list_dir` result as a compact visual tree.
+fn format_list_dir_result(output: &Value) -> Option<String> {
+    let entries = output.get("entries")?.as_array()?;
+    let root = output
+        .get("root")
+        .and_then(Value::as_str)
+        .unwrap_or(".");
+    let truncated = output
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut lines: Vec<String> = Vec::new();
+    let count = entries.len();
+
+    // Header
+    lines.push(format!("📁 {root}  ({count} entries)"));
+
+    // Cap display to avoid flooding the viewport
+    let max_show = TOOL_OUTPUT_MAX_LINES.saturating_sub(2);
+    let shown = entries.len().min(max_show);
+    let hidden = entries.len().saturating_sub(shown);
+
+    for entry in &entries[..shown] {
+        let path = entry.get("path").and_then(Value::as_str).unwrap_or("");
+        let is_dir = entry
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|t| t == "dir")
+            .unwrap_or(false);
+        let size = entry.get("size_bytes").and_then(Value::as_u64);
+
+        // Indent based on path depth
+        let depth = path.chars().filter(|&c| c == '/' || c == std::path::MAIN_SEPARATOR).count();
+        let indent = "  ".repeat(depth);
+        let icon = if is_dir { "▸" } else { " " };
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let size_str = if is_dir {
+            String::new()
+        } else if let Some(b) = size {
+            format!("  {}", human_bytes(b))
+        } else {
+            String::new()
+        };
+        lines.push(format!("{indent}{icon} {name}{size_str}"));
+    }
+
+    if hidden > 0 {
+        lines.push(format!("  … {hidden} more entries"));
+    } else if truncated {
+        lines.push("  … (listing truncated)".to_string());
+    }
+
+    Some(lines.join("\n"))
+}
+
+/// Format a `read_file` result as a compact header + content preview.
+fn format_read_file_result(output: &Value) -> Option<String> {
+    // Must have both "path" and "content" keys — unique to read_file
+    let path = output.get("path")?.as_str()?;
+    let content = output.get("content")?.as_str()?;
+    // Exclude write_file results which also carry a "path" but have "diff"
+    if output.get("diff").is_some() || output.get("ok").is_some() {
+        return None;
+    }
+
+    let line_count = content.lines().count();
+    let byte_count = content.len();
+    let header = format!(
+        "📄 {path}  ({line_count} lines · {})",
+        human_bytes(byte_count as u64)
+    );
+
+    let mut lines = vec![header, String::new()];
+    lines.push(summarise_long_output(
+        content,
+        TOOL_OUTPUT_MAX_LINES,
+        TOOL_OUTPUT_MAX_CHARS,
+    ));
+    Some(lines.join("\n"))
+}
+
+/// Format a `grep_search` result as a match count header + list.
+fn format_grep_result(output: &Value) -> Option<String> {
+    let matches = output.get("matches")?.as_array()?;
+    let source = output
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let count = matches.len();
+
+    if count == 0 {
+        return Some(format!("🔍 No matches  (via {source})"));
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("🔍 {count} matches  (via {source})"));
+    lines.push(String::new());
+
+    let max_show = TOOL_OUTPUT_MAX_LINES.saturating_sub(2);
+    let shown = matches.len().min(max_show);
+    let hidden = matches.len().saturating_sub(shown);
+
+    for m in &matches[..shown] {
+        let owned;
+        let line = if let Some(s) = m.as_str() {
+            s
+        } else {
+            owned = m.to_string();
+            owned.as_str()
+        };
+        // Trim very long lines inline
+        let trimmed = if line.chars().count() > 120 {
+            let s: String = line.chars().take(120).collect();
+            format!("{s}…")
+        } else {
+            line.to_string()
+        };
+        lines.push(trimmed);
+    }
+    if hidden > 0 {
+        lines.push(format!("  … {hidden} more matches"));
+    }
+
+    Some(lines.join("\n"))
+}
+
+/// Format simple `{ok: true, path: ...}` style results (create_directory, remove_path, copy_path).
+fn format_simple_ok_result(output: &Value) -> Option<String> {
+    // Only handle objects where ok == true and there's no content/entries/matches
+    let obj = output.as_object()?;
+    if !obj.get("ok")?.as_bool().unwrap_or(false) {
+        return None;
+    }
+    // Bail if it looks like a richer result already handled above
+    if obj.contains_key("entries")
+        || obj.contains_key("content")
+        || obj.contains_key("matches")
+        || obj.contains_key("diff")
+        || obj.contains_key("stdout")
+    {
+        return None;
+    }
+
+    let path = obj.get("path").and_then(Value::as_str);
+    let source = obj.get("source").and_then(Value::as_str);
+    let target = obj.get("target").and_then(Value::as_str);
+
+    let msg = match (path, source, target) {
+        (Some(p), None, None) => format!("✓  {p}"),
+        (None, Some(src), Some(tgt)) => format!("✓  {src}  →  {tgt}"),
+        _ => return None,
+    };
+    Some(msg)
+}
+
+/// Human-readable byte size: "1.2 KB", "34 B", "2.1 MB", etc.
+fn human_bytes(b: u64) -> String {
+    match b {
+        0 => "0 B".into(),
+        1..=1023 => format!("{b} B"),
+        1024..=1_048_575 => format!("{:.1} KB", b as f64 / 1024.0),
+        1_048_576..=1_073_741_823 => format!("{:.1} MB", b as f64 / 1_048_576.0),
+        _ => format!("{:.1} GB", b as f64 / 1_073_741_824.0),
+    }
 }
 
 fn shell_escape(arg: &str) -> String {

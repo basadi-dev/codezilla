@@ -24,7 +24,8 @@ use super::super::runtime::{
 };
 use super::types::{
     basename, entry_from_item, entry_style, format_timestamp, format_tool_result,
-    relative_time_ago, short_turn_id, split_at_width, thread_label, transcript_lines,
+    is_read_file_body, relative_time_ago, render_read_file_body_lines, short_turn_id,
+    split_at_width, thread_label, transcript_lines,
     AutocompleteItem, ComposerState, EntryKind, FocusPane, PendingApprovalView, SelectionPoint,
     SelectionRange, TranscriptEntry, COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
 };
@@ -1375,6 +1376,7 @@ impl InteractiveApp {
         };
         self.upsert_transcript_entry(TranscriptEntry {
             item_id: item_id.to_string(),
+            tool_call_id: None,
             kind: entry_kind,
             title: title.into(),
             body: String::new(),
@@ -1402,6 +1404,7 @@ impl InteractiveApp {
         } else {
             self.upsert_transcript_entry(TranscriptEntry {
                 item_id: item_id.to_string(),
+                tool_call_id: None,
                 kind: EntryKind::Assistant,
                 title: "Codezilla".into(),
                 body: delta.to_string(),
@@ -1451,6 +1454,7 @@ impl InteractiveApp {
     ) {
         self.upsert_transcript_entry(TranscriptEntry {
             item_id,
+            tool_call_id: None,
             kind,
             title: title.into(),
             body: body.into(),
@@ -1522,6 +1526,7 @@ impl InteractiveApp {
         }
 
         let end_line = start_line.saturating_add(max_lines);
+        let body_width = (width as usize).saturating_sub(5).max(1);
         let first_entry = self
             .transcript_render_cache
             .line_ends
@@ -1539,6 +1544,7 @@ impl InteractiveApp {
                 &mut lines,
                 entry,
                 self.spinner_tick,
+                body_width,
                 start_line,
                 end_line,
                 entry_start,
@@ -1602,7 +1608,16 @@ impl InteractiveApp {
             .transcript
             .iter()
             .rev()
-            .find(|entry| entry.kind == EntryKind::ToolCall)
+            .find(|entry| {
+                entry.kind == EntryKind::ToolCall
+                    && entry.tool_call_id.as_deref() == Some(result.tool_call_id.as_str())
+            })
+            .or_else(|| {
+                self.transcript
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.kind == EntryKind::ToolCall)
+            })
             .map(|entry| (entry.title.clone(), entry.body.clone()))
             .unwrap_or_else(|| ("tool".to_string(), String::new()));
 
@@ -1621,6 +1636,7 @@ impl InteractiveApp {
 
         TranscriptEntry {
             item_id: item.item_id.clone(),
+            tool_call_id: Some(result.tool_call_id.clone()),
             kind: EntryKind::Error,
             title: format!("{tool_name} failed"),
             body: body.join("\n"),
@@ -1642,29 +1658,35 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
     }
 
     let body_width = (width as usize).saturating_sub(5).max(1);
-    let mut cached_entries = Vec::with_capacity(entries.len());
+    let mut cached_entries: Vec<CachedTranscriptEntry> = Vec::with_capacity(entries.len());
     let mut line_ends = Vec::with_capacity(entries.len());
     let mut total_lines = 0usize;
+    let mut tool_names_by_call_id: HashMap<String, String> = HashMap::new();
 
     for entry in entries {
         let use_markdown = matches!(
             entry.kind,
             EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
         );
+        let use_read_file = entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.body);
 
         let (raw_body, body_lines): (String, Vec<String>) =
             if entry.body.is_empty() && entry.pending {
                 (String::new(), vec!["…".to_string()])
-            } else if use_markdown {
+            } else if use_markdown || use_read_file {
                 // Render now to get the correct line count for scroll arithmetic.
                 // The rendered Lines themselves are discarded; raw_body is kept so
                 // append_cached_transcript_entry_lines can re-render with styles.
-                let rendered = md_to_lines(&entry.body, Color::White, body_width);
-                let count = rendered.len().max(1);
+                let rendered_len = if use_markdown {
+                    md_to_lines(&entry.body, Color::White, body_width).len()
+                } else {
+                    let lang = super::types::read_file_lang_for_body(&entry.body);
+                    render_read_file_body_lines(&entry.body, lang, body_width).len()
+                };
                 (
                     entry.body.clone(),
                     // Placeholders — count matters, content does not.
-                    vec![String::new(); count],
+                    vec![String::new(); rendered_len.max(1)],
                 )
             } else {
                 let plain: Vec<String> = entry
@@ -1675,12 +1697,34 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
                 (String::new(), plain)
             };
 
+        let mut title = entry.title.clone();
+        if entry.kind == EntryKind::ToolCall {
+            if let Some(call_id) = entry.tool_call_id.as_ref() {
+                tool_names_by_call_id.insert(call_id.clone(), title.clone());
+            }
+        } else if entry.kind == EntryKind::ToolResult {
+            if let Some(call_id) = entry.tool_call_id.as_ref() {
+                if let Some(tool_name) = tool_names_by_call_id.get(call_id) {
+                    title = format!("{tool_name} result");
+                }
+            }
+        }
+
+        if let Some(prev) = cached_entries.last() {
+            let same_kind = prev.kind == entry.kind;
+            let same_title = prev.title == title;
+            let same_body = prev.raw_body == raw_body && prev.body_lines == body_lines;
+            if same_kind && same_title && same_body {
+                title = format!("{title}  ↺ same as above");
+            }
+        }
+
         let line_count = 1 + body_lines.len().max(1) + 1;
         total_lines += line_count;
         line_ends.push(total_lines);
         cached_entries.push(CachedTranscriptEntry {
             kind: entry.kind,
-            title: entry.title.clone(),
+            title,
             timestamp: entry.timestamp,
             pending: entry.pending,
             raw_body,
@@ -1712,6 +1756,7 @@ fn append_cached_transcript_entry_lines(
     out: &mut Vec<Line<'static>>,
     entry: &CachedTranscriptEntry,
     spinner_tick: u64,
+    body_width: usize,
     start_line: usize,
     end_line: usize,
     entry_start: usize,
@@ -1762,6 +1807,7 @@ fn append_cached_transcript_entry_lines(
         entry.kind,
         EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
     );
+    let use_read_file = entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.raw_body);
 
     if use_markdown && !entry.raw_body.is_empty() {
         // Re-render from the raw Markdown source so all spans carry proper styles.
@@ -1771,6 +1817,17 @@ fn append_cached_transcript_entry_lines(
             if current_line >= start_line && current_line < end_line {
                 let mut spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
                 spans.extend(md_line.spans);
+                out.push(Line::from(spans));
+            }
+            current_line += 1;
+        }
+    } else if use_read_file && !entry.raw_body.is_empty() {
+        let lang = super::types::read_file_lang_for_body(&entry.raw_body);
+        let rendered = render_read_file_body_lines(&entry.raw_body, lang, body_width);
+        for rendered_line in rendered {
+            if current_line >= start_line && current_line < end_line {
+                let mut spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                spans.extend(rendered_line);
                 out.push(Line::from(spans));
             }
             current_line += 1;

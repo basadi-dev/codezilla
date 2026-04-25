@@ -706,7 +706,7 @@ const C_OPERATOR: Color = Color::Rgb(171, 178, 191); // light (same as normal)
 const C_NORMAL: Color = Color::Rgb(171, 178, 191); // light gray
 
 /// Tokenise and colour-code a single line of source code.
-fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
+pub fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
     let keywords: &[&str] = match lang {
         "python" | "py" => &[
             "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
@@ -1035,6 +1035,32 @@ fn align_cell(text: &str, width: usize, align: Alignment) -> String {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Infer a language tag from a file extension for syntax highlighting.
+pub fn lang_for_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "rs" => "rust",
+        "go" => "go",
+        "js" | "mjs" | "cjs" => "javascript",
+        "ts" | "mts" => "typescript",
+        "tsx" => "tsx",
+        "jsx" => "jsx",
+        "py" | "pyw" => "python",
+        "sh" | "bash" | "zsh" => "bash",
+        "sql" => "sql",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "json" => "json",
+        "rb" => "ruby",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        _ => "",
+    }
+}
 
 fn heading_color(level: HeadingLevel) -> Color {
     match level {
