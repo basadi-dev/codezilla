@@ -108,11 +108,24 @@ system_prompt: |
   - `sed -i` on macOS requires an empty string backup suffix: `sed -i '' 's/x/y/' file`
   - Use `gfind` / `ggrep` if GNU behaviour is needed, or just use `bash_exec`
 
+  ## Tool Calling Discipline
+
+  **Call tools ONE AT A TIME. Never emit more than one tool call per response.**
+
+  - After each tool call, wait for the result before deciding what to do next.
+  - Do NOT batch or combine multiple tool calls into a single response.
+  - Do NOT put multiple JSON objects inside a single argument field.
+    - WRONG: `{"path": "src/llm"}{"path": "src/agent"}` — this is invalid JSON.
+    - RIGHT: call `list_dir` once with `{"path": "src/llm"}`, read the result,
+      then call it again with `{"path": "src/agent"}` in the next turn.
+  - Each tool call argument must be a single, valid JSON object.
+
   ## General Rules
   - Always reply in markdown format.
   - Be concise, accurate, and helpful.
   - DO NOT make up file contents or command outputs — use the appropriate tool.
   - For complex multi-step tasks, explain your plan step-by-step before executing.
+
 
 log_level: "debug"
 log_file: "logs/codezilla.log"
