@@ -465,9 +465,13 @@ impl InteractiveApp {
                         self.status_message = format!("✓ Copied {char_count} chars (markdown)");
                         self.error_message = None;
                     }
-                    Err(e) => { self.error_message = Some(format!("Clipboard write failed: {e}")); }
+                    Err(e) => {
+                        self.error_message = Some(format!("Clipboard write failed: {e}"));
+                    }
                 },
-                Err(e) => { self.error_message = Some(format!("Clipboard unavailable: {e}")); }
+                Err(e) => {
+                    self.error_message = Some(format!("Clipboard unavailable: {e}"));
+                }
             }
             return;
         }
@@ -486,17 +490,27 @@ impl InteractiveApp {
                 let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 let chars: Vec<char> = full.chars().collect();
                 let line_idx = sel.start_line + i;
-                let from = if line_idx == sel.start_line { sel.start_col } else { 0 };
-                let to   = if line_idx == end_clamped { sel.end_col + 1 } else { chars.len() };
+                let from = if line_idx == sel.start_line {
+                    sel.start_col
+                } else {
+                    0
+                };
+                let to = if line_idx == end_clamped {
+                    sel.end_col + 1
+                } else {
+                    chars.len()
+                };
                 let from = from.min(chars.len());
-                let to   = to.min(chars.len());
+                let to = to.min(chars.len());
                 let text: String = chars[from..to].iter().collect();
                 text.strip_prefix("  │  ").unwrap_or(&text).to_string()
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        if selected.trim().is_empty() { return; }
+        if selected.trim().is_empty() {
+            return;
+        }
         let char_count = selected.chars().count();
 
         match arboard::Clipboard::new() {
@@ -505,9 +519,13 @@ impl InteractiveApp {
                     self.status_message = format!("✓ Copied {char_count} chars");
                     self.error_message = None;
                 }
-                Err(e) => { self.error_message = Some(format!("Clipboard write failed: {e}")); }
+                Err(e) => {
+                    self.error_message = Some(format!("Clipboard write failed: {e}"));
+                }
             },
-            Err(e) => { self.error_message = Some(format!("Clipboard unavailable: {e}")); }
+            Err(e) => {
+                self.error_message = Some(format!("Clipboard unavailable: {e}"));
+            }
         }
     }
 
@@ -520,26 +538,44 @@ impl InteractiveApp {
     /// blocks are always returned rather than mid-block fragments.
     fn try_copy_partial_markdown(&self, sel: &SelectionRange, width: u16) -> Option<String> {
         let cache = &self.transcript_render_cache;
-        if cache.entries.is_empty() { return None; }
-
-        let start_idx = cache.line_ends.partition_point(|&end| end <= sel.start_line);
-        let end_idx   = cache.line_ends.partition_point(|&end| end <= sel.end_line);
-        if start_idx >= cache.entries.len() { return None; }
-
-        let entry = &cache.entries[start_idx];
-        if !matches!(entry.kind, EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning) {
+        if cache.entries.is_empty() {
             return None;
         }
-        if entry.raw_body.is_empty() { return None; }
+
+        let start_idx = cache
+            .line_ends
+            .partition_point(|&end| end <= sel.start_line);
+        let end_idx = cache.line_ends.partition_point(|&end| end <= sel.end_line);
+        if start_idx >= cache.entries.len() {
+            return None;
+        }
+
+        let entry = &cache.entries[start_idx];
+        if !matches!(
+            entry.kind,
+            EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
+        ) {
+            return None;
+        }
+        if entry.raw_body.is_empty() {
+            return None;
+        }
 
         // The entry layout is: 1 header line + N body lines + 1 trailing blank.
         // body_start is the first visual line of the markdown body within the entry.
-        let entry_vis_start = if start_idx == 0 { 0 } else { cache.line_ends[start_idx - 1] };
-        let body_vis_start  = entry_vis_start + 1;
+        let entry_vis_start = if start_idx == 0 {
+            0
+        } else {
+            cache.line_ends[start_idx - 1]
+        };
+        let body_vis_start = entry_vis_start + 1;
 
         let bw = (width as usize).saturating_sub(5).max(10);
-        let (_, source_map) = md_to_lines_with_source_map(&entry.raw_body, ratatui::style::Color::White, bw);
-        if source_map.is_empty() { return None; }
+        let (_, source_map) =
+            md_to_lines_with_source_map(&entry.raw_body, ratatui::style::Color::White, bw);
+        if source_map.is_empty() {
+            return None;
+        }
 
         // Convert absolute visual lines → relative to body start.
         let rel_start = sel.start_line.saturating_sub(body_vis_start);
@@ -547,9 +583,12 @@ impl InteractiveApp {
             sel.end_line.saturating_sub(body_vis_start)
         } else {
             source_map.len().saturating_sub(1)
-        }.min(source_map.len().saturating_sub(1));
+        }
+        .min(source_map.len().saturating_sub(1));
 
-        if rel_start >= source_map.len() { return None; }
+        if rel_start >= source_map.len() {
+            return None;
+        }
 
         let src_a = *source_map.get(rel_start).unwrap_or(&0);
         let src_b = *source_map.get(rel_end).unwrap_or(&src_a);
@@ -559,9 +598,16 @@ impl InteractiveApp {
         // complete blocks: whole paragraphs, full tables, fenced code blocks, etc.
         let raw_lines: Vec<&str> = entry.raw_body.lines().collect();
         let n = raw_lines.len();
-        if n == 0 { return None; }
+        if n == 0 {
+            return None;
+        }
 
-        let is_empty = |i: usize| raw_lines.get(i).map(|l| l.trim().is_empty()).unwrap_or(true);
+        let is_empty = |i: usize| {
+            raw_lines
+                .get(i)
+                .map(|l| l.trim().is_empty())
+                .unwrap_or(true)
+        };
 
         let block_start = (0..=src_start.min(n - 1))
             .rev()
@@ -573,7 +619,11 @@ impl InteractiveApp {
             .unwrap_or(n - 1);
 
         let excerpt = raw_lines[block_start..=block_end].join("\n");
-        if excerpt.trim().is_empty() { None } else { Some(excerpt) }
+        if excerpt.trim().is_empty() {
+            None
+        } else {
+            Some(excerpt)
+        }
     }
 
     pub async fn submit_composer(&mut self) -> Result<()> {
@@ -790,7 +840,8 @@ impl InteractiveApp {
             self.model_settings_override = Some(ms);
             true
         } else if matches!(command, "/reasoning") {
-            let effort = self.effective_model_settings()
+            let effort = self
+                .effective_model_settings()
                 .reasoning_effort
                 .as_deref()
                 .unwrap_or("off")
@@ -801,7 +852,11 @@ impl InteractiveApp {
         } else if let Some(rest) = command.strip_prefix("/reasoning ") {
             let rest = rest.trim();
             let mut ms = self.effective_model_settings();
-            ms.reasoning_effort = if rest == "off" { None } else { Some(rest.to_string()) };
+            ms.reasoning_effort = if rest == "off" {
+                None
+            } else {
+                Some(rest.to_string())
+            };
             let label = ms.reasoning_effort.as_deref().unwrap_or("off");
             self.status_message = format!("Reasoning set to {label}");
             self.error_message = None;
@@ -903,7 +958,10 @@ impl InteractiveApp {
             .as_ref()
             .map(|m| (m.model_id.clone(), m.provider_id.clone()))
             .unwrap_or_else(|| {
-                (cfg.model_settings.model_id.clone(), cfg.model_settings.provider_id.clone())
+                (
+                    cfg.model_settings.model_id.clone(),
+                    cfg.model_settings.provider_id.clone(),
+                )
             });
         super::super::domain::ModelSettings {
             model_id,
@@ -933,9 +991,23 @@ impl InteractiveApp {
 
         // ── static commands ───────────────────────────────────────────────────
         for cmd in &[
-            "/approve ask", "/approve auto", "/approve manual", "/approve toggle",
-            "/approve", "/approvals", "/compact", "/exit", "/fork", "/help", "/interrupt",
-            "/new", "/open ", "/quit", "/reload", "/resume ", "/threads",
+            "/approve ask",
+            "/approve auto",
+            "/approve manual",
+            "/approve toggle",
+            "/approve",
+            "/approvals",
+            "/compact",
+            "/exit",
+            "/fork",
+            "/help",
+            "/interrupt",
+            "/new",
+            "/open ",
+            "/quit",
+            "/reload",
+            "/resume ",
+            "/threads",
         ] {
             all.push(AutocompleteItem::simple(*cmd));
         }
@@ -971,7 +1043,11 @@ impl InteractiveApp {
                 .unwrap_or_default();
             let age = relative_time_ago(thread.updated_at);
             let id = thread.thread_id.clone();
-            let marker = if id == self.current_thread_id { "  ←" } else { "" };
+            let marker = if id == self.current_thread_id {
+                "  ←"
+            } else {
+                ""
+            };
             let value = format!("/resume {id}");
             let display = format!("/threads  {title}{dir}  {age}{marker}");
             all.push(AutocompleteItem::labeled(value, display));
@@ -979,7 +1055,9 @@ impl InteractiveApp {
 
         self.autocomplete_suggestions = all
             .into_iter()
-            .filter(|item| item.label.starts_with(text.as_str()) || item.value.starts_with(text.as_str()))
+            .filter(|item| {
+                item.label.starts_with(text.as_str()) || item.value.starts_with(text.as_str())
+            })
             .collect();
         self.autocomplete_selected = 0;
         self.autocomplete_scroll = 0;
@@ -992,7 +1070,9 @@ impl InteractiveApp {
         }
         self.autocomplete_selected =
             (self.autocomplete_selected + 1) % self.autocomplete_suggestions.len();
-        let v = self.autocomplete_suggestions[self.autocomplete_selected].value.clone();
+        let v = self.autocomplete_suggestions[self.autocomplete_selected]
+            .value
+            .clone();
         self.composer.set_text(v);
         self.autocomplete_clamp_scroll();
     }
@@ -1004,7 +1084,9 @@ impl InteractiveApp {
         }
         let len = self.autocomplete_suggestions.len();
         self.autocomplete_selected = (self.autocomplete_selected + len - 1) % len;
-        let v = self.autocomplete_suggestions[self.autocomplete_selected].value.clone();
+        let v = self.autocomplete_suggestions[self.autocomplete_selected]
+            .value
+            .clone();
         self.composer.set_text(v);
         self.autocomplete_clamp_scroll();
     }
@@ -1551,27 +1633,28 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
         );
 
-        let (raw_body, body_lines): (String, Vec<String>) = if entry.body.is_empty() && entry.pending {
-            (String::new(), vec!["…".to_string()])
-        } else if use_markdown {
-            // Render now to get the correct line count for scroll arithmetic.
-            // The rendered Lines themselves are discarded; raw_body is kept so
-            // append_cached_transcript_entry_lines can re-render with styles.
-            let rendered = md_to_lines(&entry.body, Color::White, body_width);
-            let count = rendered.len().max(1);
-            (
-                entry.body.clone(),
-                // Placeholders — count matters, content does not.
-                vec![String::new(); count],
-            )
-        } else {
-            let plain: Vec<String> = entry
-                .body
-                .split('\n')
-                .flat_map(|body_line| split_at_width(body_line, body_width))
-                .collect();
-            (String::new(), plain)
-        };
+        let (raw_body, body_lines): (String, Vec<String>) =
+            if entry.body.is_empty() && entry.pending {
+                (String::new(), vec!["…".to_string()])
+            } else if use_markdown {
+                // Render now to get the correct line count for scroll arithmetic.
+                // The rendered Lines themselves are discarded; raw_body is kept so
+                // append_cached_transcript_entry_lines can re-render with styles.
+                let rendered = md_to_lines(&entry.body, Color::White, body_width);
+                let count = rendered.len().max(1);
+                (
+                    entry.body.clone(),
+                    // Placeholders — count matters, content does not.
+                    vec![String::new(); count],
+                )
+            } else {
+                let plain: Vec<String> = entry
+                    .body
+                    .split('\n')
+                    .flat_map(|body_line| split_at_width(body_line, body_width))
+                    .collect();
+                (String::new(), plain)
+            };
 
         let line_count = 1 + body_lines.len().max(1) + 1;
         total_lines += line_count;
@@ -1750,7 +1833,10 @@ fn format_approval_preview(action: &Value) -> String {
     }
 
     if let Some(primary_path) = action.paths.first() {
-        if action.action_type == "command" || action.action_type == "shell_exec" {
+        if action.action_type == "command"
+            || action.action_type == "shell_exec"
+            || action.action_type == "bash_exec"
+        {
             lines.push(format!("cwd       {primary_path}"));
         } else if action.paths.len() == 1 {
             lines.push(format!("path      {primary_path}"));
@@ -1772,7 +1858,10 @@ fn format_approval_preview(action: &Value) -> String {
 
     if lines.is_empty() {
         lines.push(format!("action    {}", action.action_type));
-    } else if action.action_type != "command" && action.action_type != "shell_exec" {
+    } else if action.action_type != "command"
+        && action.action_type != "shell_exec"
+        && action.action_type != "bash_exec"
+    {
         lines.insert(0, format!("action    {}", action.action_type));
     }
 

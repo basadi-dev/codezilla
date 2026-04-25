@@ -38,16 +38,55 @@ impl LlmClient for UnifiedClient {
     ) -> Result<LlmResponse> {
         match provider_id {
             "ollama" => {
-                ollama::complete(&self.http, &self.cfg, messages, tools, model, temperature, max_tokens, reasoning_effort).await
+                ollama::complete(
+                    &self.http,
+                    &self.cfg,
+                    messages,
+                    tools,
+                    model,
+                    temperature,
+                    max_tokens,
+                    reasoning_effort,
+                )
+                .await
             }
             "openai" | "openai-compat" => {
-                openai::complete(&self.http, &self.cfg, messages, tools, model, temperature, reasoning_effort, max_tokens).await
+                openai::complete(
+                    &self.http,
+                    &self.cfg,
+                    messages,
+                    tools,
+                    model,
+                    temperature,
+                    reasoning_effort,
+                    max_tokens,
+                )
+                .await
             }
             "anthropic" => {
-                anthropic::complete(&self.http, &self.cfg, messages, tools, model, temperature, reasoning_effort, max_tokens).await
+                anthropic::complete(
+                    &self.http,
+                    &self.cfg,
+                    messages,
+                    tools,
+                    model,
+                    temperature,
+                    reasoning_effort,
+                    max_tokens,
+                )
+                .await
             }
             "gemini" => {
-                gemini::complete(&self.http, &self.cfg, messages, tools, model, temperature, max_tokens).await
+                gemini::complete(
+                    &self.http,
+                    &self.cfg,
+                    messages,
+                    tools,
+                    model,
+                    temperature,
+                    max_tokens,
+                )
+                .await
             }
             p => bail!("unknown LLM provider: {p}"),
         }
@@ -65,16 +104,55 @@ impl LlmClient for UnifiedClient {
     ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
         match provider_id {
             "ollama" => {
-                ollama::stream(&self.http, &self.cfg, messages, tools, model, temperature, max_tokens, reasoning_effort).await
+                ollama::stream(
+                    &self.http,
+                    &self.cfg,
+                    messages,
+                    tools,
+                    model,
+                    temperature,
+                    max_tokens,
+                    reasoning_effort,
+                )
+                .await
             }
             "openai" | "openai-compat" => {
-                openai::stream(&self.http, &self.cfg, messages, tools, model, temperature, reasoning_effort, max_tokens).await
+                openai::stream(
+                    &self.http,
+                    &self.cfg,
+                    messages,
+                    tools,
+                    model,
+                    temperature,
+                    reasoning_effort,
+                    max_tokens,
+                )
+                .await
             }
             "anthropic" => {
-                anthropic::stream(&self.http, &self.cfg, messages, tools, model, temperature, reasoning_effort, max_tokens).await
+                anthropic::stream(
+                    &self.http,
+                    &self.cfg,
+                    messages,
+                    tools,
+                    model,
+                    temperature,
+                    reasoning_effort,
+                    max_tokens,
+                )
+                .await
             }
             "gemini" => {
-                gemini::stream(&self.http, &self.cfg, messages, tools, model, temperature, max_tokens).await
+                gemini::stream(
+                    &self.http,
+                    &self.cfg,
+                    messages,
+                    tools,
+                    model,
+                    temperature,
+                    max_tokens,
+                )
+                .await
             }
             p => bail!("unknown LLM provider: {p}"),
         }

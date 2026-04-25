@@ -23,6 +23,7 @@ pub use permission::PermissionManager;
 pub use sandbox::SandboxManager;
 #[allow(unused_imports)]
 pub use tools::{
-    FileToolProvider, ImageToolProvider, RequestUserInputToolProvider, SearchToolProvider,
-    ShellToolProvider, SpawnAgentToolProvider, ToolOrchestrator, ToolProvider, WebToolProvider,
+    BashToolProvider, FileToolProvider, ImageToolProvider, ListDirToolProvider,
+    RequestUserInputToolProvider, SearchToolProvider, ShellToolProvider, SpawnAgentToolProvider,
+    ToolOrchestrator, ToolProvider, WebToolProvider,
 };

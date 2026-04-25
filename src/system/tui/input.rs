@@ -221,11 +221,15 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         }
         // Ctrl+Left / Ctrl+Right or Alt+Left / Alt+Right  →  word jump
         // (covers terminals that send Alt+Arrow directly rather than Esc+b/f)
-        (KeyCode::Left, m) if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => {
+        (KeyCode::Left, m)
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) =>
+        {
             app.jump_transcript_to_bottom();
             app.composer.move_word_left();
         }
-        (KeyCode::Right, m) if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => {
+        (KeyCode::Right, m)
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) =>
+        {
             app.jump_transcript_to_bottom();
             app.composer.move_word_right();
         }

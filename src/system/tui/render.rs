@@ -37,12 +37,12 @@ pub fn draw(app: &mut InteractiveApp, frame: &mut Frame) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),       // header
-            Constraint::Length(1),       // separator
-            Constraint::Min(4),          // transcript
-            Constraint::Length(ac_h),    // autocomplete list (0 when hidden)
-            Constraint::Length(ch),      // composer
-            Constraint::Length(1),       // status bar
+            Constraint::Length(1),    // header
+            Constraint::Length(1),    // separator
+            Constraint::Min(4),       // transcript
+            Constraint::Length(ac_h), // autocomplete list (0 when hidden)
+            Constraint::Length(ch),   // composer
+            Constraint::Length(1),    // status bar
         ])
         .split(frame.area());
 
@@ -161,7 +161,10 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     let thread_display_width = thread_display.chars().count();
 
     left_spans.push(Span::styled("  ", Style::default()));
-    left_spans.push(Span::styled(thread_display, Style::default().fg(COLOR_USER)));
+    left_spans.push(Span::styled(
+        thread_display,
+        Style::default().fg(COLOR_USER),
+    ));
 
     // Padding between left+thread and right-aligned context
     let used = left_width + 2 + thread_display_width + right_width;
@@ -387,9 +390,7 @@ fn render_composer(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
         }
     }
 
-    let (row, col) = app
-        .composer
-        .visual_cursor_row_col(text_width, text_width);
+    let (row, col) = app.composer.visual_cursor_row_col(text_width, text_width);
     let visible_rows = input_area.height as usize;
     let composer_scroll = if row >= visible_rows {
         row + 1 - visible_rows
@@ -404,9 +405,8 @@ fn render_composer(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
     // starts at the same column.
     if app.pending_approval.is_none() {
         let visible_row = row.saturating_sub(composer_scroll);
-        let cursor_x = input_area.x
-            + prefix
-            + (col as u16).min(input_area.width.saturating_sub(prefix + 1));
+        let cursor_x =
+            input_area.x + prefix + (col as u16).min(input_area.width.saturating_sub(prefix + 1));
         let cursor_y = input_area.y + (visible_row as u16).min(input_area.height.saturating_sub(1));
         frame.set_cursor_position((cursor_x, cursor_y));
     }
@@ -447,7 +447,10 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     let padding = available.saturating_sub(used + keys_width);
     if padding > 0 {
         spans.push(Span::styled(" ".repeat(padding), Style::default()));
-        spans.push(Span::styled(essential_keys, Style::default().fg(COLOR_HINT)));
+        spans.push(Span::styled(
+            essential_keys,
+            Style::default().fg(COLOR_HINT),
+        ));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -591,7 +594,10 @@ fn render_autocomplete(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
             } else {
                 Line::from(vec![
                     Span::styled("     ", Style::default()),
-                    Span::styled(item.label.trim_end().to_owned(), Style::default().fg(COLOR_MUTED)),
+                    Span::styled(
+                        item.label.trim_end().to_owned(),
+                        Style::default().fg(COLOR_MUTED),
+                    ),
                 ])
             }
         })

@@ -73,10 +73,16 @@ pub struct AutocompleteItem {
 impl AutocompleteItem {
     pub fn simple(s: impl Into<String>) -> Self {
         let s = s.into();
-        Self { label: s.clone(), value: s }
+        Self {
+            label: s.clone(),
+            value: s,
+        }
     }
     pub fn labeled(value: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { value: value.into(), label: label.into() }
+        Self {
+            value: value.into(),
+            label: label.into(),
+        }
     }
 }
 
@@ -706,7 +712,9 @@ fn transcript_entry_line_count(entry: &TranscriptEntry, body_width: usize) -> us
         EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
     ) {
         // Use the actual rendered markdown line count for accurate scroll math.
-        md_to_lines(&entry.body, Color::White, body_width).len().max(1)
+        md_to_lines(&entry.body, Color::White, body_width)
+            .len()
+            .max(1)
     } else {
         entry
             .body
@@ -1066,12 +1074,20 @@ fn format_shell_result(output: &Value) -> Option<String> {
 
     if !stdout.is_empty() {
         lines.push(String::new());
-        lines.push(summarise_long_output(stdout, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS));
+        lines.push(summarise_long_output(
+            stdout,
+            TOOL_OUTPUT_MAX_LINES,
+            TOOL_OUTPUT_MAX_CHARS,
+        ));
     }
     if !stderr.is_empty() {
         lines.push(String::new());
         lines.push("stderr:".to_string());
-        lines.push(summarise_long_output(stderr, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS));
+        lines.push(summarise_long_output(
+            stderr,
+            TOOL_OUTPUT_MAX_LINES,
+            TOOL_OUTPUT_MAX_CHARS,
+        ));
     }
     if output
         .get("truncated")
@@ -1137,6 +1153,9 @@ pub fn summarise_long_output(text: &str, max_lines: usize, max_chars: usize) -> 
         }
     }
 
-    let notice = format!("▲ {} lines hidden", line_count.saturating_sub(tail.lines().count()));
+    let notice = format!(
+        "▲ {} lines hidden",
+        line_count.saturating_sub(tail.lines().count())
+    );
     format!("{notice}\n{tail}")
 }

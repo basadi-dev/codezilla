@@ -11,12 +11,13 @@ use crate::llm::client::UnifiedClient;
 use crate::llm::LlmClient;
 
 // Agent subsystem — types used only internally in this file
-use super::agent::{
-    ApprovalManager, EventBus, ExtensionManager, FileToolProvider, ImageToolProvider, ModelGateway,
-    PermissionManager, RequestUserInputToolProvider, SandboxManager, SearchToolProvider,
-    ShellToolProvider, SpawnAgentToolProvider, ToolOrchestrator, TurnExecutor, WebToolProvider,
-};
 use super::agent::model_gateway::build_compaction_messages;
+use super::agent::{
+    ApprovalManager, BashToolProvider, EventBus, ExtensionManager, FileToolProvider,
+    ImageToolProvider, ListDirToolProvider, ModelGateway, PermissionManager,
+    RequestUserInputToolProvider, SandboxManager, SearchToolProvider, ShellToolProvider,
+    SpawnAgentToolProvider, ToolOrchestrator, TurnExecutor, WebToolProvider,
+};
 // Agent types re-exported for callers outside runtime.rs
 #[allow(unused_imports)]
 pub use super::agent::{AutoReviewer, EventFilter, EventSubscription, ModelDescription};
@@ -269,6 +270,11 @@ impl ConversationRuntime {
             sandbox.clone(),
             permissions.clone(),
         )));
+        tool_orchestrator.register_provider(Arc::new(BashToolProvider::new(
+            sandbox.clone(),
+            permissions.clone(),
+        )));
+        tool_orchestrator.register_provider(Arc::new(ListDirToolProvider));
         tool_orchestrator.register_provider(Arc::new(FileToolProvider::new(
             sandbox.clone(),
             permissions.clone(),
@@ -603,7 +609,6 @@ impl ConversationRuntime {
     }
 
     pub async fn compact_thread(&self, params: ThreadCompactParams) -> Result<ThreadCompactResult> {
-
         // ── 1. Read the full thread from persistence ──────────────────────────
         let persisted = self
             .inner
@@ -626,12 +631,10 @@ impl ConversationRuntime {
             .clone()
             .unwrap_or_else(|| self.inner.effective_config.working_directory.clone());
         let skills = self.inner.extension_manager.list_skills(&cwd).await;
-        let mut system_instructions =
-            vec![self.inner.effective_config.system_prompt.clone()];
+        let mut system_instructions = vec![self.inner.effective_config.system_prompt.clone()];
         for skill in skills {
             if skill.enabled {
-                system_instructions
-                    .push(format!("Skill {}: {}", skill.name, skill.description));
+                system_instructions.push(format!("Skill {}: {}", skill.name, skill.description));
             }
         }
 
@@ -646,8 +649,7 @@ impl ConversationRuntime {
             web_search_enabled: false,
         };
 
-        let compaction_messages =
-            build_compaction_messages(&system_instructions, &persisted.items);
+        let compaction_messages = build_compaction_messages(&system_instructions, &persisted.items);
 
         let llm_response = self
             .inner

@@ -73,11 +73,7 @@ impl TurnExecutor {
                 for lt in &thread.turns {
                     items.extend(lt.items.clone());
                 }
-                (
-                    thread.metadata.clone(),
-                    items,
-                    turn.cancel_token.clone(),
-                )
+                (thread.metadata.clone(), items, turn.cancel_token.clone())
             };
 
             let cwd = params
@@ -107,23 +103,24 @@ impl TurnExecutor {
                 .inner
                 .tool_orchestrator
                 .list_available_tools(&listing);
-            let effective_model_settings = params
-                .model_settings
-                .clone()
-                .unwrap_or_else(|| ModelSettings {
-                    model_id: thread_metadata.model_id.clone(),
-                    provider_id: thread_metadata.provider_id.clone(),
-                    reasoning_effort: self
-                        .runtime
-                        .inner
-                        .effective_config
-                        .model_settings
-                        .reasoning_effort
-                        .clone(),
-                    summary_mode: None,
-                    service_tier: None,
-                    web_search_enabled: false,
-                });
+            let effective_model_settings =
+                params
+                    .model_settings
+                    .clone()
+                    .unwrap_or_else(|| ModelSettings {
+                        model_id: thread_metadata.model_id.clone(),
+                        provider_id: thread_metadata.provider_id.clone(),
+                        reasoning_effort: self
+                            .runtime
+                            .inner
+                            .effective_config
+                            .model_settings
+                            .reasoning_effort
+                            .clone(),
+                        summary_mode: None,
+                        service_tier: None,
+                        web_search_enabled: false,
+                    });
             let request = super::model_gateway::ModelRequest {
                 system_instructions: self
                     .system_instructions(&cwd, effective_model_settings.reasoning_effort.as_deref())
@@ -247,6 +244,10 @@ impl TurnExecutor {
             }
 
             for call in tool_calls {
+                // Safety net: if the model put shell operators (|, >, 2>&1, globs) inside
+                // a shell_exec argv, auto-rewrite to bash_exec so they work correctly.
+                let call = promote_to_bash_if_needed(call);
+
                 let call_item = ConversationItem {
                     item_id: format!("item_{}", Uuid::new_v4().simple()),
                     thread_id: params.thread_id.clone(),
@@ -265,9 +266,7 @@ impl TurnExecutor {
                     t.approval_policy_override.clone()
                 }
                 .or_else(|| params.approval_policy.clone())
-                .unwrap_or_else(|| {
-                    self.runtime.inner.effective_config.approval_policy.clone()
-                });
+                .unwrap_or_else(|| self.runtime.inner.effective_config.approval_policy.clone());
 
                 let action = action_for_tool_call(&call, &cwd);
                 if self.runtime.inner.permission_manager.requires_approval(
@@ -524,7 +523,12 @@ impl TurnExecutor {
         }
 
         // Estimate current token usage from persisted items.
-        let persisted = match self.runtime.inner.persistence_manager.read_thread(thread_id) {
+        let persisted = match self
+            .runtime
+            .inner
+            .persistence_manager
+            .read_thread(thread_id)
+        {
             Ok(p) => p,
             Err(_) => return,
         };
@@ -703,7 +707,11 @@ impl TurnExecutor {
         Ok(turn.cancel_token.is_cancelled())
     }
 
-    async fn system_instructions(&self, cwd: &str, reasoning_effort: Option<&str>) -> Result<Vec<String>> {
+    async fn system_instructions(
+        &self,
+        cwd: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Result<Vec<String>> {
         let mut instructions = vec![self.runtime.inner.effective_config.system_prompt.clone()];
         if let Some(instruction) = thinking_instruction(reasoning_effort) {
             instructions.push(instruction);
@@ -734,7 +742,9 @@ fn thinking_instruction(reasoning_effort: Option<&str>) -> Option<String> {
              cases, before providing your answer."
                 .into(),
         ),
-        Some(other) => Some(format!("Reasoning effort: {other}. Think carefully before responding.")),
+        Some(other) => Some(format!(
+            "Reasoning effort: {other}. Think carefully before responding."
+        )),
     }
 }
 
@@ -742,7 +752,7 @@ fn thinking_instruction(reasoning_effort: Option<&str>) -> Option<String> {
 
 fn action_for_tool_call(call: &ToolCall, cwd: &str) -> ActionDescriptor {
     let category = match call.tool_name.as_str() {
-        "shell_exec" => ApprovalCategory::SandboxEscalation,
+        "bash_exec" | "shell_exec" => ApprovalCategory::SandboxEscalation,
         "write_file" | "create_directory" | "remove_path" | "copy_path" => {
             ApprovalCategory::FileChange
         }
@@ -769,9 +779,13 @@ fn action_for_tool_call(call: &ToolCall, cwd: &str) -> ActionDescriptor {
         ],
         _ => vec![cwd.into()],
     };
-    ActionDescriptor {
-        action_type: call.tool_name.clone(),
-        command: call
+    let command = match call.tool_name.as_str() {
+        "bash_exec" => call
+            .arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .map(|command| vec!["bash".to_string(), "-c".to_string(), command.to_string()]),
+        "shell_exec" => call
             .arguments
             .get("argv")
             .and_then(Value::as_array)
@@ -781,7 +795,18 @@ fn action_for_tool_call(call: &ToolCall, cwd: &str) -> ActionDescriptor {
                     .filter_map(Value::as_str)
                     .map(ToOwned::to_owned)
                     .collect::<Vec<_>>()
+            })
+            .or_else(|| {
+                call.arguments
+                    .get("argv")
+                    .and_then(Value::as_str)
+                    .map(|argv| vec![argv.to_string()])
             }),
+        _ => None,
+    };
+    ActionDescriptor {
+        action_type: call.tool_name.clone(),
+        command,
         paths,
         domains: Vec::new(),
         category,
@@ -810,5 +835,99 @@ fn derive_thread_title(text: &str) -> String {
         line.to_string()
     } else {
         chars[..MAX].iter().collect::<String>() + "…"
+    }
+}
+
+// ─── Shell-operator safety net ────────────────────────────────────────────────
+
+/// Shell operators and patterns that only make sense inside a shell.
+/// Any of these appearing as a standalone argv token is a dead giveaway that
+/// the model intended shell semantics but called `shell_exec` by mistake.
+const SHELL_OPERATOR_TOKENS: &[&str] = &[
+    "|",
+    "||",
+    "&&",
+    ";",
+    "&",
+    ">",
+    ">>",
+    "<",
+    "<<",
+    "2>&1",
+    "2>/dev/null",
+    "1>/dev/null",
+    "1>&2",
+    "2>>",
+    "1>>",
+];
+
+/// Inspect a `shell_exec` ToolCall for shell operators in its argv.
+/// If any are found, rewrite the call as a `bash_exec` command string so that
+/// the operators are interpreted correctly by bash.
+///
+/// This is the runtime safety net — it catches model mistakes that slipped
+/// past the system prompt and schema guidance.
+pub(crate) fn promote_to_bash_if_needed(call: ToolCall) -> ToolCall {
+    if call.tool_name != "shell_exec" {
+        return call;
+    }
+
+    // Only inspect array argv; string argv goes through simple_tokenize in
+    // ShellToolProvider which also won't support shell operators, so promote
+    // string argv too if it looks like a shell command.
+    let needs_promotion = if let Some(arr) = call.arguments.get("argv").and_then(|v| v.as_array()) {
+        arr.iter().filter_map(|v| v.as_str()).any(|tok| {
+            SHELL_OPERATOR_TOKENS.contains(&tok)
+                || (tok.contains('*') && !tok.starts_with("--")) // glob (not a flag)
+                || tok.starts_with("2>")
+                || tok.starts_with("1>")
+                || tok == "?"
+        })
+    } else if let Some(s) = call.arguments.get("argv").and_then(|v| v.as_str()) {
+        // String argv — check if it looks like it has shell operators
+        SHELL_OPERATOR_TOKENS.iter().any(|op| {
+            // Match operator as a whole word, not a substring of a flag
+            s.split_whitespace().any(|tok| tok == *op)
+        }) || s.contains("2>&1")
+            || s.contains("| ")
+            || s.contains(" |")
+    } else {
+        false
+    };
+
+    if !needs_promotion {
+        return call;
+    }
+
+    // Build the shell command string by joining argv tokens
+    let shell_cmd = if let Some(arr) = call.arguments.get("argv").and_then(|v| v.as_array()) {
+        arr.iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else if let Some(s) = call.arguments.get("argv").and_then(|v| v.as_str()) {
+        s.to_string()
+    } else {
+        return call; // nothing to do
+    };
+
+    tracing::warn!(
+        tool_call_id = %call.tool_call_id,
+        shell_cmd = %shell_cmd,
+        "shell_exec contained shell operators — auto-promoting to bash_exec"
+    );
+
+    // Build a new arguments object: replace argv with command, keep cwd/env
+    let mut new_args = call.arguments.clone();
+    if let Some(obj) = new_args.as_object_mut() {
+        obj.remove("argv");
+        obj.insert("command".to_string(), serde_json::Value::String(shell_cmd));
+    }
+
+    ToolCall {
+        tool_name: "bash_exec".into(),
+        tool_call_id: call.tool_call_id,
+        provider_kind: call.provider_kind,
+        arguments: new_args,
     }
 }

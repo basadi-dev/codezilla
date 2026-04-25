@@ -53,7 +53,9 @@ pub fn md_to_lines_with_source_map(
     let last_src = source_map.last().copied().unwrap_or(0);
     let out = r.finish();
     // finish() may flush remaining inline content or strip trailing blank lines.
-    while source_map.len() < out.len() { source_map.push(last_src); }
+    while source_map.len() < out.len() {
+        source_map.push(last_src);
+    }
     source_map.truncate(out.len());
     (out, source_map)
 }
@@ -77,9 +79,15 @@ impl InlineStyle {
                 .add_modifier(Modifier::DIM);
         }
         let mut s = Style::default().fg(base_color);
-        if self.bold        { s = s.add_modifier(Modifier::BOLD); }
-        if self.italic      { s = s.add_modifier(Modifier::ITALIC); }
-        if self.strikethrough { s = s.add_modifier(Modifier::CROSSED_OUT); }
+        if self.bold {
+            s = s.add_modifier(Modifier::BOLD);
+        }
+        if self.italic {
+            s = s.add_modifier(Modifier::ITALIC);
+        }
+        if self.strikethrough {
+            s = s.add_modifier(Modifier::CROSSED_OUT);
+        }
         s
     }
 }
@@ -93,7 +101,9 @@ struct InlineBuffer {
 
 impl InlineBuffer {
     fn push(&mut self, text: String, style: Style) {
-        if text.is_empty() { return; }
+        if text.is_empty() {
+            return;
+        }
         if let Some(last) = self.spans.last_mut() {
             if last.style == style {
                 let mut s = last.content.to_string();
@@ -137,11 +147,13 @@ struct TableState {
 fn dispatch_md_event(r: &mut MdRenderer, event: Event) {
     match event {
         Event::Start(tag) => r.handle_start(tag),
-        Event::End(tag)   => r.handle_end(tag),
+        Event::End(tag) => r.handle_end(tag),
 
         Event::Text(text) => {
             if r.in_code_block {
-                for line in text.lines() { r.push_code_line(line.to_string()); }
+                for line in text.lines() {
+                    r.push_code_line(line.to_string());
+                }
             } else if let Some(tbl) = r.table.as_mut() {
                 tbl.current_cell.push_str(&text);
             } else {
@@ -154,8 +166,11 @@ fn dispatch_md_event(r: &mut MdRenderer, event: Event) {
             if let Some(tbl) = r.table.as_mut() {
                 tbl.current_cell.push_str(&text);
             } else {
-                let style = InlineStyle { code: true, ..Default::default() }
-                    .to_ratatui(r.body_color);
+                let style = InlineStyle {
+                    code: true,
+                    ..Default::default()
+                }
+                .to_ratatui(r.body_color);
                 r.inline.push(text.to_string(), style);
             }
         }
@@ -167,7 +182,9 @@ fn dispatch_md_event(r: &mut MdRenderer, event: Event) {
             }
         }
         Event::HardBreak => {
-            if r.table.is_none() { r.flush_inline(); }
+            if r.table.is_none() {
+                r.flush_inline();
+            }
         }
 
         Event::Rule => {
@@ -179,7 +196,11 @@ fn dispatch_md_event(r: &mut MdRenderer, event: Event) {
         }
 
         Event::TaskListMarker(checked) => {
-            let (mark, color) = if checked { ("✓ ", COLOR_ACCENT) } else { ("○ ", COLOR_MUTED) };
+            let (mark, color) = if checked {
+                ("✓ ", COLOR_ACCENT)
+            } else {
+                ("○ ", COLOR_MUTED)
+            };
             r.inline.push(mark.to_string(), Style::default().fg(color));
         }
 
@@ -208,7 +229,8 @@ struct MdRenderer {
 impl MdRenderer {
     fn new(body_color: Color, width: usize) -> Self {
         Self {
-            body_color, width,
+            body_color,
+            width,
             out: Vec::new(),
             inline: InlineBuffer::default(),
             style: InlineStyle::default(),
@@ -238,8 +260,7 @@ impl MdRenderer {
         let line_starts: Vec<usize> = std::iter::once(0)
             .chain(markdown.match_indices('\n').map(|(i, _)| i + 1))
             .collect();
-        let byte_to_line =
-            |b: usize| line_starts.partition_point(|&s| s <= b).saturating_sub(1);
+        let byte_to_line = |b: usize| line_starts.partition_point(|&s| s <= b).saturating_sub(1);
 
         let opts = Options::all();
         let mut source_map: Vec<usize> = Vec::new();
@@ -267,7 +288,9 @@ impl MdRenderer {
                     source_map.push(src);
                 }
             } else {
-                for _ in 0..added { source_map.push(cur_src); }
+                for _ in 0..added {
+                    source_map.push(cur_src);
+                }
             }
         }
         source_map
@@ -288,7 +311,7 @@ impl MdRenderer {
                 let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
                 // Store style as the pending inline style for the heading text
                 self.inline.push(String::new(), style); // prime the buffer style
-                // We'll apply color via the inline style override below
+                                                        // We'll apply color via the inline style override below
                 self.style.bold = true;
                 // We track which heading color to use via a stored span style.
                 // The simplest: push a zero-width span to set the dominant style.
@@ -297,8 +320,11 @@ impl MdRenderer {
                 // Actually, simplest approach: override body_color for this heading.
                 // We do this by pushing a placeholder that sets the color.
                 let _ = color; // used below in handle_end
-                // Store color in a pending span so heading text uses it.
-                self.inline.push("".to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD));
+                               // Store color in a pending span so heading text uses it.
+                self.inline.push(
+                    "".to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                );
             }
 
             Tag::Paragraph => {
@@ -341,27 +367,40 @@ impl MdRenderer {
                     *n += 1;
                     s
                 } else {
-                    let ch = match depth { 1 => "• ", 2 => "◦ ", _ => "▪ " };
+                    let ch = match depth {
+                        1 => "• ",
+                        2 => "◦ ",
+                        _ => "▪ ",
+                    };
                     format!("{indent}{ch}")
                 };
                 self.inline.push(bullet, Style::default().fg(COLOR_MUTED));
             }
 
-            Tag::Strong      => self.style.bold = true,
-            Tag::Emphasis    => self.style.italic = true,
+            Tag::Strong => self.style.bold = true,
+            Tag::Emphasis => self.style.italic = true,
             Tag::Strikethrough => self.style.strikethrough = true,
 
             Tag::Table(alignments) => {
                 self.flush_inline();
-                self.table = Some(TableState { alignments, ..Default::default() });
+                self.table = Some(TableState {
+                    alignments,
+                    ..Default::default()
+                });
                 self.in_table_head = false;
             }
-            Tag::TableHead => { self.in_table_head = true; }
-            Tag::TableRow  => {
-                if let Some(tbl) = self.table.as_mut() { tbl.current_row = Vec::new(); }
+            Tag::TableHead => {
+                self.in_table_head = true;
+            }
+            Tag::TableRow => {
+                if let Some(tbl) = self.table.as_mut() {
+                    tbl.current_row = Vec::new();
+                }
             }
             Tag::TableCell => {
-                if let Some(tbl) = self.table.as_mut() { tbl.current_cell = String::new(); }
+                if let Some(tbl) = self.table.as_mut() {
+                    tbl.current_cell = String::new();
+                }
             }
 
             _ => {}
@@ -408,10 +447,12 @@ impl MdRenderer {
                 }
             }
 
-            TagEnd::Item => { self.flush_word_wrapped(); }
+            TagEnd::Item => {
+                self.flush_word_wrapped();
+            }
 
-            TagEnd::Strong      => self.style.bold = false,
-            TagEnd::Emphasis    => self.style.italic = false,
+            TagEnd::Strong => self.style.bold = false,
+            TagEnd::Emphasis => self.style.italic = false,
             TagEnd::Strikethrough => self.style.strikethrough = false,
 
             TagEnd::TableHead => {
@@ -464,17 +505,26 @@ impl MdRenderer {
     }
 
     fn flush_inline(&mut self) {
-        if self.inline.is_empty() { self.inline.take(); return; }
+        if self.inline.is_empty() {
+            self.inline.take();
+            return;
+        }
         let spans = self.inline.take();
         let line = self.prefix_line(spans);
         self.out.push(line);
     }
 
     fn flush_word_wrapped(&mut self) {
-        if self.inline.is_empty() { self.inline.take(); return; }
+        if self.inline.is_empty() {
+            self.inline.take();
+            return;
+        }
 
         let full_text = self.inline.plain_text();
-        let dominant_style = self.inline.spans.first()
+        let dominant_style = self
+            .inline
+            .spans
+            .first()
             .map(|s| s.style)
             .unwrap_or_else(|| Style::default().fg(self.body_color));
         self.inline.take();
@@ -483,14 +533,24 @@ impl MdRenderer {
             let depth = self.list_depth.min(4);
             let ordered = *self.list_ordered.last().unwrap_or(&false);
             let base = 2 * (depth - 1);
-            if ordered { base + 3 } else { base + 2 }
-        } else { 0 };
+            if ordered {
+                base + 3
+            } else {
+                base + 2
+            }
+        } else {
+            0
+        };
 
         let available = self.width.saturating_sub(indent_width).max(8);
         let indent_str = " ".repeat(indent_width);
 
         for (i, chunk) in word_wrap(&full_text, available).into_iter().enumerate() {
-            let text = if i == 0 { chunk } else { format!("{indent_str}{chunk}") };
+            let text = if i == 0 {
+                chunk
+            } else {
+                format!("{indent_str}{chunk}")
+            };
             let line = self.prefix_line(vec![Span::styled(text, dominant_style)]);
             self.out.push(line);
         }
@@ -501,7 +561,9 @@ impl MdRenderer {
             let bar = "▎ ".repeat(self.quote_depth);
             let mut prefixed = vec![Span::styled(
                 bar,
-                Style::default().fg(COLOR_REASONING).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(COLOR_REASONING)
+                    .add_modifier(Modifier::ITALIC),
             )];
             prefixed.append(&mut spans);
             Line::from(prefixed)
@@ -513,9 +575,14 @@ impl MdRenderer {
     fn finish(mut self) -> Vec<Line<'static>> {
         self.flush_inline();
         // Strip trailing blank lines.
-        while self.out.last().map(|l: &Line| {
-            l.spans.is_empty() || l.spans.iter().all(|s| s.content.trim().is_empty())
-        }).unwrap_or(false) {
+        while self
+            .out
+            .last()
+            .map(|l: &Line| {
+                l.spans.is_empty() || l.spans.iter().all(|s| s.content.trim().is_empty())
+            })
+            .unwrap_or(false)
+        {
             self.out.pop();
         }
         self.out
@@ -529,10 +596,14 @@ impl MdRenderer {
 /// A thin `─` underline separates header from body.
 fn render_table(tbl: &TableState, max_width: usize) -> Vec<Line<'static>> {
     let rows = &tbl.rows;
-    if rows.is_empty() { return vec![]; }
+    if rows.is_empty() {
+        return vec![];
+    }
 
     let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    if col_count == 0 { return vec![]; }
+    if col_count == 0 {
+        return vec![];
+    }
 
     // Natural column widths from content.
     let mut col_widths: Vec<usize> = vec![1usize; col_count];
@@ -569,9 +640,11 @@ fn render_table(tbl: &TableState, max_width: usize) -> Vec<Line<'static>> {
         col_widths = new_widths;
     }
 
-    let sep_style   = Style::default().fg(COLOR_MUTED);
-    let header_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
-    let body_style   = Style::default().fg(Color::Rgb(200, 210, 225));
+    let sep_style = Style::default().fg(COLOR_MUTED);
+    let header_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(Color::Rgb(200, 210, 225));
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -596,7 +669,10 @@ fn render_table(tbl: &TableState, max_width: usize) -> Vec<Line<'static>> {
                 if ci > 0 {
                     spans.push(Span::styled("  ·  ".to_string(), sep_style));
                 }
-                let cell_line = wrapped[ci].get(display_line).map(String::as_str).unwrap_or("");
+                let cell_line = wrapped[ci]
+                    .get(display_line)
+                    .map(String::as_str)
+                    .unwrap_or("");
                 let align = tbl.alignments.get(ci).copied().unwrap_or(Alignment::None);
                 let padded = align_cell(cell_line, col_widths[ci], align);
                 spans.push(Span::styled(padded, cell_style));
@@ -606,8 +682,8 @@ fn render_table(tbl: &TableState, max_width: usize) -> Vec<Line<'static>> {
 
         // Thin underline after header row only.
         if is_header {
-            let underline_width: usize = col_widths.iter().sum::<usize>()
-                + sep_width * col_count.saturating_sub(1);
+            let underline_width: usize =
+                col_widths.iter().sum::<usize>() + sep_width * col_count.saturating_sub(1);
             lines.push(Line::from(Span::styled(
                 "─".repeat(underline_width),
                 Style::default().fg(COLOR_MUTED),
@@ -621,62 +697,184 @@ fn render_table(tbl: &TableState, max_width: usize) -> Vec<Line<'static>> {
 // ─── Syntax highlighter ───────────────────────────────────────────────────────
 
 // Token colour palette (One Dark-inspired)
-const C_KEYWORD  : Color = Color::Rgb(198, 120, 221); // purple
-const C_TYPE     : Color = Color::Rgb( 86, 182, 194); // cyan
-const C_STRING   : Color = Color::Rgb(152, 195, 121); // green
-const C_NUMBER   : Color = Color::Rgb(209, 154, 102); // orange
-const C_COMMENT  : Color = Color::Rgb( 92,  99, 112); // gray
-const C_OPERATOR : Color = Color::Rgb(171, 178, 191); // light (same as normal)
-const C_NORMAL   : Color = Color::Rgb(171, 178, 191); // light gray
+const C_KEYWORD: Color = Color::Rgb(198, 120, 221); // purple
+const C_TYPE: Color = Color::Rgb(86, 182, 194); // cyan
+const C_STRING: Color = Color::Rgb(152, 195, 121); // green
+const C_NUMBER: Color = Color::Rgb(209, 154, 102); // orange
+const C_COMMENT: Color = Color::Rgb(92, 99, 112); // gray
+const C_OPERATOR: Color = Color::Rgb(171, 178, 191); // light (same as normal)
+const C_NORMAL: Color = Color::Rgb(171, 178, 191); // light gray
 
 /// Tokenise and colour-code a single line of source code.
 fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
     let keywords: &[&str] = match lang {
         "python" | "py" => &[
-            "False","None","True","and","as","assert","async","await",
-            "break","class","continue","def","del","elif","else","except",
-            "finally","for","from","global","if","import","in","is",
-            "lambda","nonlocal","not","or","pass","raise","return","try",
-            "while","with","yield","self","cls",
+            "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+            "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+            "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+            "return", "try", "while", "with", "yield", "self", "cls",
         ],
         "javascript" | "js" | "typescript" | "ts" | "tsx" | "jsx" => &[
-            "break","case","catch","class","const","continue","debugger",
-            "default","delete","do","else","export","extends","finally",
-            "for","function","if","import","in","instanceof","let","new",
-            "return","static","super","switch","this","throw","try","typeof",
-            "var","void","while","with","yield","async","await","of",
-            "true","false","null","undefined","type","interface","enum",
-            "implements","abstract","readonly","override","declare",
+            "break",
+            "case",
+            "catch",
+            "class",
+            "const",
+            "continue",
+            "debugger",
+            "default",
+            "delete",
+            "do",
+            "else",
+            "export",
+            "extends",
+            "finally",
+            "for",
+            "function",
+            "if",
+            "import",
+            "in",
+            "instanceof",
+            "let",
+            "new",
+            "return",
+            "static",
+            "super",
+            "switch",
+            "this",
+            "throw",
+            "try",
+            "typeof",
+            "var",
+            "void",
+            "while",
+            "with",
+            "yield",
+            "async",
+            "await",
+            "of",
+            "true",
+            "false",
+            "null",
+            "undefined",
+            "type",
+            "interface",
+            "enum",
+            "implements",
+            "abstract",
+            "readonly",
+            "override",
+            "declare",
         ],
         "rust" | "rs" => &[
-            "as","async","await","break","const","continue","crate","dyn",
-            "else","enum","extern","false","fn","for","if","impl","in",
-            "let","loop","match","mod","move","mut","pub","ref","return",
-            "self","Self","static","struct","super","trait","true","type",
-            "unsafe","use","where","while","Box","Option","Result","Vec",
-            "String","Some","None","Ok","Err","println","format","panic",
+            "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+            "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
+            "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super",
+            "trait", "true", "type", "unsafe", "use", "where", "while", "Box", "Option", "Result",
+            "Vec", "String", "Some", "None", "Ok", "Err", "println", "format", "panic",
         ],
         "go" | "golang" => &[
-            "break","case","chan","const","continue","default","defer","else",
-            "fallthrough","for","func","go","goto","if","import","interface",
-            "map","package","range","return","select","struct","switch","type",
-            "var","nil","true","false","make","new","len","cap","append",
-            "copy","delete","close","panic","recover","error","string","int",
-            "int64","float64","bool","byte","rune",
+            "break",
+            "case",
+            "chan",
+            "const",
+            "continue",
+            "default",
+            "defer",
+            "else",
+            "fallthrough",
+            "for",
+            "func",
+            "go",
+            "goto",
+            "if",
+            "import",
+            "interface",
+            "map",
+            "package",
+            "range",
+            "return",
+            "select",
+            "struct",
+            "switch",
+            "type",
+            "var",
+            "nil",
+            "true",
+            "false",
+            "make",
+            "new",
+            "len",
+            "cap",
+            "append",
+            "copy",
+            "delete",
+            "close",
+            "panic",
+            "recover",
+            "error",
+            "string",
+            "int",
+            "int64",
+            "float64",
+            "bool",
+            "byte",
+            "rune",
         ],
         "bash" | "sh" | "shell" | "zsh" => &[
-            "if","then","else","elif","fi","for","do","done","while","until",
-            "case","esac","function","return","local","export","unset","echo",
-            "read","source","shift","exit","break","continue","true","false",
-            "in","select","set","unset","alias","cd","pwd","test","let",
+            "if", "then", "else", "elif", "fi", "for", "do", "done", "while", "until", "case",
+            "esac", "function", "return", "local", "export", "unset", "echo", "read", "source",
+            "shift", "exit", "break", "continue", "true", "false", "in", "select", "set", "unset",
+            "alias", "cd", "pwd", "test", "let",
         ],
         "sql" => &[
-            "SELECT","FROM","WHERE","JOIN","LEFT","RIGHT","INNER","OUTER",
-            "ON","GROUP","BY","ORDER","HAVING","INSERT","INTO","VALUES",
-            "UPDATE","SET","DELETE","CREATE","TABLE","INDEX","VIEW",
-            "DROP","ALTER","ADD","COLUMN","PRIMARY","KEY","FOREIGN",
-            "REFERENCES","NULL","NOT","AND","OR","IN","IS","LIKE","AS",
-            "DISTINCT","COUNT","SUM","AVG","MAX","MIN","LIMIT","OFFSET",
+            "SELECT",
+            "FROM",
+            "WHERE",
+            "JOIN",
+            "LEFT",
+            "RIGHT",
+            "INNER",
+            "OUTER",
+            "ON",
+            "GROUP",
+            "BY",
+            "ORDER",
+            "HAVING",
+            "INSERT",
+            "INTO",
+            "VALUES",
+            "UPDATE",
+            "SET",
+            "DELETE",
+            "CREATE",
+            "TABLE",
+            "INDEX",
+            "VIEW",
+            "DROP",
+            "ALTER",
+            "ADD",
+            "COLUMN",
+            "PRIMARY",
+            "KEY",
+            "FOREIGN",
+            "REFERENCES",
+            "NULL",
+            "NOT",
+            "AND",
+            "OR",
+            "IN",
+            "IS",
+            "LIKE",
+            "AS",
+            "DISTINCT",
+            "COUNT",
+            "SUM",
+            "AVG",
+            "MAX",
+            "MIN",
+            "LIMIT",
+            "OFFSET",
         ],
         _ => &[],
     };
@@ -692,7 +890,10 @@ fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
     let trimmed = line.trim_start();
     for cs in comment_starts {
         if trimmed.starts_with(cs) {
-            return vec![Span::styled(line.to_string(), Style::default().fg(C_COMMENT))];
+            return vec![Span::styled(
+                line.to_string(),
+                Style::default().fg(C_COMMENT),
+            )];
         }
     }
 
@@ -702,7 +903,9 @@ fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
 
     let push = |spans: &mut Vec<Span<'static>>, text: String, color: Color| {
-        if text.is_empty() { return; }
+        if text.is_empty() {
+            return;
+        }
         if let Some(last) = spans.last_mut() {
             if last.style.fg == Some(color) {
                 let mut s = last.content.to_string();
@@ -721,8 +924,14 @@ fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
             let start = pos;
             pos += 1;
             while pos < len {
-                if chars[pos] == '\\' { pos += 2; continue; }
-                if chars[pos] == q { pos += 1; break; }
+                if chars[pos] == '\\' {
+                    pos += 2;
+                    continue;
+                }
+                if chars[pos] == q {
+                    pos += 1;
+                    break;
+                }
                 pos += 1;
             }
             let s: String = chars[start..pos].iter().collect();
@@ -743,8 +952,16 @@ fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
             || (chars[pos] == '-' && pos + 1 < len && chars[pos + 1].is_ascii_digit())
         {
             let start = pos;
-            if chars[pos] == '-' { pos += 1; }
-            while pos < len && (chars[pos].is_ascii_digit() || chars[pos] == '.' || chars[pos] == '_' || chars[pos] == 'x' || chars[pos] == 'b') {
+            if chars[pos] == '-' {
+                pos += 1;
+            }
+            while pos < len
+                && (chars[pos].is_ascii_digit()
+                    || chars[pos] == '.'
+                    || chars[pos] == '_'
+                    || chars[pos] == 'x'
+                    || chars[pos] == 'b')
+            {
                 pos += 1;
             }
             let s: String = chars[start..pos].iter().collect();
@@ -761,8 +978,13 @@ fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
             let word: String = chars[start..pos].iter().collect();
             let color = if keywords.contains(&word.as_str()) {
                 C_KEYWORD
-            } else if word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                C_TYPE  // PascalCase → likely a type
+            } else if word
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
+            {
+                C_TYPE // PascalCase → likely a type
             } else {
                 C_NORMAL
             };
@@ -772,29 +994,41 @@ fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
 
         // Operator / punctuation
         let ch = chars[pos].to_string();
-        let color = if "=<>!&|+-*/%^~".contains(chars[pos]) { C_OPERATOR } else { C_NORMAL };
+        let color = if "=<>!&|+-*/%^~".contains(chars[pos]) {
+            C_OPERATOR
+        } else {
+            C_NORMAL
+        };
         push(&mut spans, ch, color);
         pos += 1;
     }
 
     if spans.is_empty() {
-        spans.push(Span::styled(line.to_string(), Style::default().fg(C_NORMAL)));
+        spans.push(Span::styled(
+            line.to_string(),
+            Style::default().fg(C_NORMAL),
+        ));
     }
     spans
 }
 
-
-
 fn align_cell(text: &str, width: usize, align: Alignment) -> String {
     let display: String = text.chars().take(width).collect();
     let len = display.chars().count();
-    if len >= width { return display; }
+    if len >= width {
+        return display;
+    }
     let padding = width - len;
     match align {
-        Alignment::Right  => format!("{}{}", " ".repeat(padding), display),
+        Alignment::Right => format!("{}{}", " ".repeat(padding), display),
         Alignment::Center => {
             let left = padding / 2;
-            format!("{}{}{}", " ".repeat(left), display, " ".repeat(padding - left))
+            format!(
+                "{}{}{}",
+                " ".repeat(left),
+                display,
+                " ".repeat(padding - left)
+            )
         }
         _ => format!("{}{}", display, " ".repeat(padding)),
     }
@@ -812,7 +1046,9 @@ fn heading_color(level: HeadingLevel) -> Color {
 }
 
 fn word_wrap(text: &str, width: usize) -> Vec<String> {
-    if width == 0 { return vec![text.to_string()]; }
+    if width == 0 {
+        return vec![text.to_string()];
+    }
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_len = 0usize;
@@ -832,7 +1068,11 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
             current_len = word_len;
         }
     }
-    if !current.is_empty() { lines.push(current); }
-    if lines.is_empty() { lines.push(String::new()); }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
     lines
 }

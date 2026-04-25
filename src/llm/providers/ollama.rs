@@ -178,7 +178,15 @@ pub async fn complete(
     reasoning_effort: Option<&str>,
 ) -> Result<LlmResponse> {
     let url = chat_url(cfg);
-    let body = build_chat_body(messages, tools, model, temperature, max_tokens, false, reasoning_effort);
+    let body = build_chat_body(
+        messages,
+        tools,
+        model,
+        temperature,
+        max_tokens,
+        false,
+        reasoning_effort,
+    );
 
     let mut req = http.post(&url).json(&body);
     for (k, v) in auth_headers(cfg) {
@@ -212,7 +220,15 @@ pub async fn stream(
     reasoning_effort: Option<&str>,
 ) -> Result<mpsc::Receiver<StreamChunk>> {
     let url = chat_url(cfg);
-    let body = build_chat_body(messages, tools, model, temperature, max_tokens, true, reasoning_effort);
+    let body = build_chat_body(
+        messages,
+        tools,
+        model,
+        temperature,
+        max_tokens,
+        true,
+        reasoning_effort,
+    );
 
     let mut req = http.post(&url).json(&body);
     for (k, v) in auth_headers(cfg) {
@@ -235,6 +251,7 @@ pub async fn stream(
 
     tokio::spawn(async move {
         let mut buf = String::new();
+        let mut inline_tool_buffer = String::new();
         while let Some(chunk) = byte_stream.next().await {
             let Ok(bytes) = chunk else { break };
             buf.push_str(&String::from_utf8_lossy(&bytes));
@@ -248,10 +265,15 @@ pub async fn stream(
                     continue;
                 }
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                    for chunk in parse_chat_chunk(&v) {
+                    for chunk in parse_chat_chunk_streaming(&v, &mut inline_tool_buffer) {
                         let _ = tx.send(chunk).await;
                     }
                     if v.get("done").and_then(Value::as_bool) == Some(true) {
+                        if !inline_tool_buffer.is_empty() {
+                            let _ = tx
+                                .send(StreamChunk::Text(std::mem::take(&mut inline_tool_buffer)))
+                                .await;
+                        }
                         let _ = tx.send(StreamChunk::Done).await;
                         return;
                     }
@@ -261,10 +283,13 @@ pub async fn stream(
         }
         if !buf.trim().is_empty() {
             if let Ok(v) = serde_json::from_str::<Value>(buf.trim()) {
-                for chunk in parse_chat_chunk(&v) {
+                for chunk in parse_chat_chunk_streaming(&v, &mut inline_tool_buffer) {
                     let _ = tx.send(chunk).await;
                 }
             }
+        }
+        if !inline_tool_buffer.is_empty() {
+            let _ = tx.send(StreamChunk::Text(inline_tool_buffer)).await;
         }
         let _ = tx.send(StreamChunk::Done).await;
     });
@@ -293,8 +318,9 @@ fn parse_chat_response(resp: &Value) -> Result<LlmResponse> {
     })
 }
 
-fn parse_chat_chunk(v: &Value) -> Vec<StreamChunk> {
+fn parse_chat_chunk_streaming(v: &Value, inline_tool_buffer: &mut String) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
+
     if let Some(thinking) = v
         .get("message")
         .and_then(|m| m.get("thinking"))
@@ -304,13 +330,34 @@ fn parse_chat_chunk(v: &Value) -> Vec<StreamChunk> {
             chunks.push(StreamChunk::Thinking(thinking.to_string()));
         }
     }
+
     if let Some(text) = v
         .get("message")
         .and_then(|message| message.get("content"))
         .and_then(Value::as_str)
     {
         if !text.is_empty() {
-            chunks.push(StreamChunk::Text(text.to_string()));
+            let should_buffer =
+                !inline_tool_buffer.is_empty() || looks_like_inline_tool_prefix(text);
+            if should_buffer {
+                inline_tool_buffer.push_str(text);
+                let inline = extract_inline_tool_calls(inline_tool_buffer);
+                if !inline.is_empty() {
+                    for (index, (name, arguments)) in inline.into_iter().enumerate() {
+                        chunks.push(StreamChunk::ToolCallDelta {
+                            index,
+                            id: None,
+                            name: Some(name),
+                            arguments_delta: Some(arguments),
+                        });
+                    }
+                    inline_tool_buffer.clear();
+                } else if inline_tool_buffer.len() > 8192 {
+                    chunks.push(StreamChunk::Text(std::mem::take(inline_tool_buffer)));
+                }
+            } else {
+                chunks.push(StreamChunk::Text(text.to_string()));
+            }
         }
     }
 
@@ -343,6 +390,169 @@ fn parse_chat_chunk(v: &Value) -> Vec<StreamChunk> {
     }
 
     chunks
+}
+
+fn looks_like_inline_tool_prefix(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("<|tool")
+        || trimmed.starts_with("<tool_call>")
+        // Only treat bare JSON as a potential tool call if it contains a "name"
+        // key — avoids false positives on code examples, JSON in prose, etc.
+        || (trimmed.starts_with('{') && trimmed.contains("\"name\""))
+        || (trimmed.starts_with('[') && trimmed.contains("\"name\""))
+}
+
+/// Detect and parse inline tool-call blocks that some models emit as plain text
+/// when the server-side function-calling path is unavailable.
+///
+/// Supported formats (in priority order):
+///
+/// 1. GLM / Qwen style (special tokens):
+///    ```
+///    <|tool_calls_section_begin|><|tool_call_begin|>functions.TOOL_NAME:N<|tool_call_argument_begin|>JSON<|tool_call_end|><|tool_calls_section_end|>
+///    ```
+///
+/// 2. Hermes / NousResearch style (XML tags):
+///    ```
+///    <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+///    ```
+///
+/// 3. Plain JSON tool-call block (some fine-tunes):
+///    ```
+///    [{"name": "...", "arguments": {...}}]
+///    ```
+///
+/// Returns a list of (tool_name, arguments_json_string) pairs.
+fn extract_inline_tool_calls(text: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+
+    // ── Format 1: GLM/Qwen special-token style ────────────────────────────────
+    // Marker that unambiguously identifies this format.
+    if text.contains("<|tool_calls_section_begin|>") || text.contains("<|tool_call_begin|>") {
+        // Each call is bracketed by <|tool_call_begin|>...<|tool_call_end|>
+        let mut search = text;
+        while let Some(start) = search.find("<|tool_call_begin|>") {
+            search = &search[start + "<|tool_call_begin|>".len()..];
+            let end = search.find("<|tool_call_end|>").unwrap_or(search.len());
+            let block = &search[..end];
+
+            // Block format: `functions.TOOL_NAME:INDEX<|tool_call_argument_begin|>JSON`
+            if let Some(arg_sep) = block.find("<|tool_call_argument_begin|>") {
+                let header = block[..arg_sep].trim();
+                let json_str = block[arg_sep + "<|tool_call_argument_begin|>".len()..].trim();
+
+                // Header is `functions.TOOL_NAME:INDEX` — extract the tool name.
+                // Strip the `functions.` prefix if present, then the `:N` suffix.
+                let name_part = header.strip_prefix("functions.").unwrap_or(header);
+                let name = if let Some(colon) = name_part.rfind(':') {
+                    name_part[..colon].trim()
+                } else {
+                    name_part.trim()
+                };
+
+                if !name.is_empty() && !json_str.is_empty() {
+                    // Validate it's parseable JSON before accepting.
+                    if serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
+                        results.push((name.to_string(), json_str.to_string()));
+                    }
+                }
+            }
+
+            if end < search.len() {
+                search = &search[end + "<|tool_call_end|>".len()..];
+            } else {
+                break;
+            }
+        }
+        if !results.is_empty() {
+            return results;
+        }
+    }
+
+    // ── Format 2: Hermes XML style ────────────────────────────────────────────
+    if text.contains("<tool_call>") {
+        let mut search = text;
+        while let Some(start) = search.find("<tool_call>") {
+            search = &search[start + "<tool_call>".len()..];
+            let end = search.find("</tool_call>").unwrap_or(search.len());
+            let block = search[..end].trim();
+
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(block) {
+                let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let args = v
+                    .get("arguments")
+                    .or_else(|| v.get("parameters"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                if !name.is_empty() {
+                    results.push((name.to_string(), args.to_string()));
+                }
+            }
+
+            if end < search.len() {
+                search = &search[end + "</tool_call>".len()..];
+            } else {
+                break;
+            }
+        }
+        if !results.is_empty() {
+            return results;
+        }
+    }
+
+    // ── Format 3: plain JSON tool-call object/array ───────────────────────────
+    // Some small/local models emit raw JSON in the assistant content instead of
+    // provider-native tool_calls. Accept only unambiguous tool-call shapes.
+    let trimmed = text.trim();
+    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            collect_json_tool_calls(&value, &mut results);
+        }
+        if !results.is_empty() {
+            return results;
+        }
+    }
+
+    results
+}
+
+fn collect_json_tool_calls(value: &serde_json::Value, results: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_json_tool_calls(value, results);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let function = map
+                .get("function")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or(map);
+            let name = function
+                .get("name")
+                .or_else(|| function.get("tool_name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if name.is_empty() {
+                return;
+            }
+            let args = function
+                .get("arguments")
+                .or_else(|| function.get("args"))
+                .or_else(|| function.get("parameters"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let arguments = if let Some(text) = args.as_str() {
+                text.to_string()
+            } else {
+                args.to_string()
+            };
+            results.push((name.to_string(), arguments));
+        }
+        _ => {}
+    }
 }
 
 /// Parse an OpenAI-format SSE delta object into StreamChunks.

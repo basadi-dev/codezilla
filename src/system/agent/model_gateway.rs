@@ -150,19 +150,26 @@ impl ModelGateway {
                         }
                     }
                     if !partial_tools.is_empty() {
-                        let calls = partial_tools
-                            .into_iter()
-                            .map(|(_, (id, name, args))| ToolCall {
+                        let mut calls = Vec::new();
+                        for (_, (id, name, args)) in partial_tools {
+                            let tool_name = name.unwrap_or_default();
+                            if tool_name.is_empty() {
+                                tracing::warn!("model_gateway: discarding tool call with empty name (args: {args:?})");
+                                continue;
+                            }
+                            let arguments = parse_tool_arguments_lenient(&tool_name, &args);
+                            calls.push(ToolCall {
                                 tool_call_id: id.unwrap_or_else(|| {
                                     format!("call_{}", uuid::Uuid::new_v4().simple())
                                 }),
                                 provider_kind: ToolProviderKind::Builtin,
-                                tool_name: name.unwrap_or_default(),
-                                arguments: serde_json::from_str(&args)
-                                    .unwrap_or_else(|_| serde_json::json!({})),
-                            })
-                            .collect::<Vec<_>>();
-                        let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
+                                tool_name,
+                                arguments,
+                            });
+                        }
+                        if !calls.is_empty() {
+                            let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
+                        }
                     }
                     let _ = tx.send(ModelStreamEvent::Completed(usage)).await;
                 }
@@ -196,18 +203,26 @@ impl ModelGateway {
                                     .await;
                             }
                             if !response.tool_calls.is_empty() {
-                                let calls = response
-                                    .tool_calls
-                                    .into_iter()
-                                    .map(|c| ToolCall {
+                                let mut calls = Vec::new();
+                                for c in response.tool_calls {
+                                    if c.function.name.is_empty() {
+                                        tracing::warn!("model_gateway: discarding tool call with empty name in complete() fallback");
+                                        continue;
+                                    }
+                                    let arguments = parse_tool_arguments_lenient(
+                                        &c.function.name,
+                                        &c.function.arguments,
+                                    );
+                                    calls.push(ToolCall {
                                         tool_call_id: c.id,
                                         provider_kind: ToolProviderKind::Builtin,
                                         tool_name: c.function.name,
-                                        arguments: serde_json::from_str(&c.function.arguments)
-                                            .unwrap_or_else(|_| serde_json::json!({})),
-                                    })
-                                    .collect::<Vec<_>>();
-                                let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
+                                        arguments,
+                                    });
+                                }
+                                if !calls.is_empty() {
+                                    let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
+                                }
                             }
                             let usage = response.usage.unwrap_or_default();
                             let _ = tx
@@ -435,6 +450,54 @@ fn item_to_llm_message(item: &ConversationItem) -> Option<llm::Message> {
     }
 }
 
+fn parse_tool_arguments_lenient(tool_name: &str, raw_args: &str) -> Value {
+    let trimmed = raw_args.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(
+            tool_name = %tool_name,
+            "model_gateway: tool call had empty arguments; using empty object"
+        );
+        return serde_json::json!({});
+    }
+
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(v) if v.is_object() => v,
+        Ok(v) => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                parsed_args = %v,
+                "model_gateway: tool arguments were valid JSON but not an object; coercing"
+            );
+            coerce_non_object_tool_arguments(tool_name, v)
+        }
+        Err(e) => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                raw_args = %trimmed,
+                error = %e,
+                "model_gateway: tool arguments were not valid JSON; preserving as best-effort arguments"
+            );
+            coerce_raw_tool_arguments(tool_name, trimmed)
+        }
+    }
+}
+
+fn coerce_non_object_tool_arguments(tool_name: &str, value: Value) -> Value {
+    match (tool_name, value) {
+        ("bash_exec", Value::String(command)) => serde_json::json!({ "command": command }),
+        ("shell_exec", Value::String(argv)) => serde_json::json!({ "argv": argv }),
+        (_, value) => serde_json::json!({ "_raw_arguments": value }),
+    }
+}
+
+fn coerce_raw_tool_arguments(tool_name: &str, raw_args: &str) -> Value {
+    match tool_name {
+        "bash_exec" => serde_json::json!({ "command": raw_args }),
+        "shell_exec" => serde_json::json!({ "argv": raw_args }),
+        _ => serde_json::json!({ "_raw_arguments": raw_args }),
+    }
+}
+
 /// Build a summarization prompt for `compact_thread`. Returns the messages that
 /// should be sent to the model to produce a structured coding-session summary.
 ///
@@ -487,18 +550,37 @@ pub fn build_compaction_messages(
                 }
             }
             ItemKind::ToolCall => {
-                let name =
-                    item.payload.get("toolName").and_then(Value::as_str).unwrap_or("unknown");
+                let name = item
+                    .payload
+                    .get("toolName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
                 last_tool_name = name;
-                let args = item.payload.get("arguments").map(|v| v.to_string()).unwrap_or_default();
+                let args = item
+                    .payload
+                    .get("arguments")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
                 // Extract just the key identifying info from arguments (file_path, command, etc.)
                 let args_snippet = extract_key_tool_args(name, &args);
                 transcript.push_str(&format!("[TOOL: {name}] {args_snippet}\n"));
             }
             ItemKind::ToolResult => {
-                let ok = item.payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
-                let out = item.payload.get("output").map(|v| v.to_string()).unwrap_or_default();
-                let err = item.payload.get("errorMessage").and_then(Value::as_str).unwrap_or("");
+                let ok = item
+                    .payload
+                    .get("ok")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let out = item
+                    .payload
+                    .get("output")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                let err = item
+                    .payload
+                    .get("errorMessage")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
 
                 if ok {
                     // For successful reads/edits/writes, record just a one-liner; skip verbose output
@@ -511,8 +593,11 @@ pub fn build_compaction_messages(
                         transcript.push_str("[OK]\n\n");
                     }
                 } else {
-                    let combined =
-                        if err.is_empty() { out.clone() } else { format!("{err}\n{out}") };
+                    let combined = if err.is_empty() {
+                        out.clone()
+                    } else {
+                        format!("{err}\n{out}")
+                    };
                     let snippet: String = combined.chars().take(1600).collect();
                     transcript.push_str(&format!("[ERROR]\n{snippet}\n\n"));
                 }

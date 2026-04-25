@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
+use glob::Pattern as GlobPattern;
 use regex::Regex;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -52,12 +53,24 @@ impl ToolProvider for ShellToolProvider {
         vec![ToolDefinition {
             name: "shell_exec".into(),
             provider_kind: ToolProviderKind::Builtin,
-            description: "Run a local command with explicit argv.".into(),
+            description: concat!(
+                "Spawn a local process directly (NO shell — advanced use only). ",
+                "`argv` is a JSON array of separate string tokens, NOT a shell string. ",
+                "Shell operators (|, >, 2>&1, &&) and globs (*) are NOT interpreted — ",
+                "they will be passed as literal arguments and will cause errors. ",
+                "Use `bash_exec` instead for any command that needs shell features. ",
+                "Example: {\"argv\": [\"cargo\", \"build\", \"--release\"], \"cwd\": \"/path\"}"
+            )
+            .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "argv": { "type": "array", "items": { "type": "string" } },
-                    "cwd": { "type": "string" },
+                    "argv": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Process argv as a JSON array of tokens. MUST be an array. Example: [\"git\", \"status\"]"
+                    },
+                    "cwd": { "type": "string", "description": "Working directory (absolute path)" },
                     "env": { "type": "object", "additionalProperties": { "type": "string" } }
                 },
                 "required": ["argv"]
@@ -68,15 +81,32 @@ impl ToolProvider for ShellToolProvider {
     }
 
     async fn execute(&self, call: &ToolCall, context: &ToolExecutionContext) -> Result<ToolResult> {
-        let argv = call
+        // Accept both array and string argv for maximum model compatibility.
+        // String argv is tokenized (no shell semantics — use bash_exec for shell features).
+        let argv_value = call
             .arguments
             .get("argv")
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("tool_invalid_arguments: argv must be an array"))?
-            .iter()
-            .filter_map(Value::as_str)
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
+            .ok_or_else(|| anyhow!("tool_invalid_arguments: argv is required"))?;
+
+        let argv: Vec<String> = if let Some(arr) = argv_value.as_array() {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        } else if let Some(s) = argv_value.as_str() {
+            tracing::warn!(
+                tool_call_id = %call.tool_call_id,
+                "shell_exec: argv was a string, not an array — tokenizing (no shell semantics; use bash_exec for pipes/redirects)"
+            );
+            simple_tokenize(s)
+        } else {
+            bail!("tool_invalid_arguments: argv must be a JSON array of strings")
+        };
+
+        if argv.is_empty() {
+            bail!("tool_invalid_arguments: argv must not be empty");
+        }
+
         let cwd = call
             .arguments
             .get("cwd")
@@ -111,6 +141,318 @@ impl ToolProvider for ShellToolProvider {
             tool_call_id: call.tool_call_id.clone(),
             ok: exec.exit_code.unwrap_or(-1) == 0,
             output: serde_json::to_value(exec)?,
+            error_message: None,
+        })
+    }
+}
+
+// ─── BashToolProvider ─────────────────────────────────────────────────────────
+
+/// Runs commands via `bash -c "..."` — full shell semantics including pipes,
+/// redirects, globs, &&, ||, subshells, etc. This is the primary tool for
+/// agent shell interaction. `shell_exec` is kept for low-level argv use.
+pub struct BashToolProvider {
+    sandbox: Arc<SandboxManager>,
+    permissions: Arc<PermissionManager>,
+}
+
+impl BashToolProvider {
+    pub fn new(sandbox: Arc<SandboxManager>, permissions: Arc<PermissionManager>) -> Self {
+        Self {
+            sandbox,
+            permissions,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolProvider for BashToolProvider {
+    fn get_kind(&self) -> ToolProviderKind {
+        ToolProviderKind::Builtin
+    }
+
+    fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "bash_exec".into(),
+            provider_kind: ToolProviderKind::Builtin,
+            description: concat!(
+                "Run a shell command via bash. ",
+                "Supports pipes (|), redirects (>, >>, 2>&1), logical operators (&&, ||), ",
+                "semicolons (;), globs (*, **), subshells ($(...)), and all other bash features. ",
+                "The `command` field must be a plain shell string — the literal text you would type in a terminal. ",
+                "For example, command=\"cargo build 2>&1\" or command=\"find . -name '*.rs' | wc -l\". ",
+                "Do NOT put JSON inside the command field — write the shell command directly as a string."
+            )
+            .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "A bash shell command string. Supports |, >, 2>&1, &&, globs, etc. Write it exactly as you would type in a terminal."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory for the command (absolute path). Defaults to project root."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Maximum seconds to wait (default 60, max 300)."
+                    },
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "Extra environment variables to set for this command."
+                    }
+                },
+                "required": ["command"]
+            }),
+            requires_approval: true,
+            supports_parallel_calls: false,
+        }]
+    }
+
+    async fn execute(&self, call: &ToolCall, context: &ToolExecutionContext) -> Result<ToolResult> {
+        // Primary: `command` is a plain shell string.
+        // Fallback 1: model may have confused bash_exec with shell_exec and passed `argv` — join it.
+        // Fallback 2: model double-encoded and put JSON inside the command string, e.g.
+        //   {"command": "{\"command\":\"git status\"}{\"command\":\"git diff\"}"}
+        //   Extract all "command" values from embedded JSON objects and join with " && ".
+        let command_str;
+        let raw: &str = if let Some(s) = call.arguments.get("command").and_then(Value::as_str) {
+            s
+        } else if let Some(arr) = call.arguments.get("argv").and_then(Value::as_array) {
+            tracing::warn!(
+                tool_call_id = %call.tool_call_id,
+                "bash_exec: received `argv` instead of `command` — joining as shell string"
+            );
+            command_str = arr
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            &command_str
+        } else {
+            bail!(
+                "tool_invalid_arguments: bash_exec requires a `command` string field. \
+                 Example: command=\"git diff --stat\""
+            )
+        };
+
+        // Detect double-encoded commands: model wrapped the shell string in JSON objects.
+        // This happens when the model mistakes the tool-call JSON format for the command value.
+        let command_str2;
+        let command: &str = if raw.trim_start().starts_with('{') {
+            let extracted = extract_commands_from_embedded_json(raw);
+            if !extracted.is_empty() {
+                tracing::warn!(
+                    tool_call_id = %call.tool_call_id,
+                    raw = %raw,
+                    recovered = %extracted,
+                    "bash_exec: command field contained JSON instead of a shell string — extracted and recovered"
+                );
+                command_str2 = extracted;
+                &command_str2
+            } else {
+                raw
+            }
+        } else {
+            raw
+        };
+        let cwd = call
+            .arguments
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or(&context.cwd)
+            .to_string();
+        let timeout_secs = call
+            .arguments
+            .get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(60)
+            .min(300);
+        let env = call
+            .arguments
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+
+        // Wrap in bash so all shell operators work
+        let argv = vec!["bash".to_string(), "-c".to_string(), command.to_string()];
+
+        let action = ActionDescriptor {
+            action_type: "command".into(),
+            command: Some(argv.clone()),
+            paths: vec![cwd.clone()],
+            domains: Vec::new(),
+            category: ApprovalCategory::SandboxEscalation,
+        };
+        let sandbox = self
+            .permissions
+            .build_sandbox_request(&action, &context.permission_profile);
+
+        let exec_future = self.sandbox.run_command(&argv, &cwd, &env, &sandbox);
+        let exec = tokio::time::timeout(Duration::from_secs(timeout_secs), exec_future)
+            .await
+            .map_err(|_| anyhow!("tool_execution_timeout: command exceeded {timeout_secs}s"))??;
+        Ok(ToolResult {
+            tool_call_id: call.tool_call_id.clone(),
+            ok: exec.exit_code.unwrap_or(-1) == 0,
+            output: serde_json::to_value(exec)?,
+            error_message: None,
+        })
+    }
+}
+
+// ─── ListDirToolProvider ──────────────────────────────────────────────────────
+
+/// Native Rust directory listing — no shell, no globs, no failures.
+/// Use this instead of `find`, `ls`, or `tree` for directory exploration.
+pub struct ListDirToolProvider;
+
+#[async_trait]
+impl ToolProvider for ListDirToolProvider {
+    fn get_kind(&self) -> ToolProviderKind {
+        ToolProviderKind::Builtin
+    }
+
+    fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "list_dir".into(),
+            provider_kind: ToolProviderKind::Builtin,
+            description: concat!(
+                "List the files and directories in a path. ",
+                "Supports recursive listing with depth control and pattern filtering. ",
+                "Use this instead of shell `find` or `ls` commands — it never fails on globs."
+            )
+            .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to list (absolute path or relative to cwd). Defaults to cwd."
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Max recursion depth: 1 = immediate children only, 0 = unlimited. Default: 1."
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "Include hidden entries (starting with '.'). Default: false."
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Optional glob pattern to filter by filename, e.g. '*.rs' or '*.{rs,toml}'."
+                    },
+                    "max_entries": {
+                        "type": "integer",
+                        "description": "Maximum number of entries to return. Default: 300."
+                    }
+                },
+                "required": []
+            }),
+            requires_approval: false,
+            supports_parallel_calls: true,
+        }]
+    }
+
+    async fn execute(&self, call: &ToolCall, context: &ToolExecutionContext) -> Result<ToolResult> {
+        let root = call
+            .arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or(&context.cwd)
+            .to_string();
+        let depth = call
+            .arguments
+            .get("depth")
+            .and_then(Value::as_u64)
+            .unwrap_or(1) as usize;
+        let include_hidden = call
+            .arguments
+            .get("include_hidden")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let pattern: Option<GlobPattern> = call
+            .arguments
+            .get("pattern")
+            .and_then(Value::as_str)
+            .and_then(|s| GlobPattern::new(s).ok());
+        let max_entries = call
+            .arguments
+            .get("max_entries")
+            .and_then(Value::as_u64)
+            .unwrap_or(300) as usize;
+
+        let max_depth = if depth == 0 { usize::MAX } else { depth };
+        let mut entries: Vec<Value> = Vec::new();
+
+        let walker = WalkDir::new(&root)
+            .max_depth(max_depth)
+            .follow_links(false)
+            .sort_by_file_name();
+
+        for entry in walker.into_iter().filter_map(|e| e.ok()) {
+            if entries.len() >= max_entries {
+                break;
+            }
+            let path = entry.path();
+
+            // Compute the relative path string used for hidden-file checks
+            let relative = path
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.to_string_lossy().to_string());
+
+            if relative.is_empty() {
+                continue; // skip the root itself
+            }
+
+            // Skip hidden entries unless explicitly requested
+            if !include_hidden {
+                let is_hidden = relative
+                    .split(std::path::MAIN_SEPARATOR)
+                    .any(|seg| seg.starts_with('.'));
+                if is_hidden {
+                    continue;
+                }
+            }
+
+            // Apply glob pattern filter against the file name only
+            if let Some(ref pat) = pattern {
+                if let Some(name) = path.file_name() {
+                    if !pat.matches(&name.to_string_lossy()) {
+                        continue;
+                    }
+                }
+            }
+
+            let is_dir = entry.file_type().is_dir();
+            let size = entry.metadata().ok().map(|m| m.len());
+
+            entries.push(json!({
+                "path": relative,
+                "type": if is_dir { "dir" } else { "file" },
+                "size_bytes": size,
+            }));
+        }
+
+        let truncated = entries.len() >= max_entries;
+        Ok(ToolResult {
+            tool_call_id: call.tool_call_id.clone(),
+            ok: true,
+            output: json!({
+                "root": root,
+                "entries": entries,
+                "count": entries.len(),
+                "truncated": truncated,
+            }),
             error_message: None,
         })
     }
@@ -649,4 +991,78 @@ impl ToolOrchestrator {
             .remove(&call.tool_call_id);
         bail!("tool_not_found: {}", call.tool_name)
     }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Recover shell commands from a double-encoded command string.
+///
+/// Some models write the entire tool-call JSON object as the value of the `command` field, e.g.:
+///   `{"command":"git status"}{"command":"git diff --stat"}`
+/// This function extracts all `"command"` string values from any embedded JSON objects and joins
+/// them with ` && ` so the recovered string can be run as a single bash command.
+fn extract_commands_from_embedded_json(s: &str) -> String {
+    let mut result = Vec::new();
+    let mut rest = s.trim();
+    while !rest.is_empty() {
+        // Find the next '{' and try to parse a JSON object from that position
+        let start = match rest.find('{') {
+            Some(i) => i,
+            None => break,
+        };
+        rest = &rest[start..];
+        // Try increasingly long slices until we get a valid JSON object
+        let mut parsed = false;
+        for end in (1..=rest.len()).rev() {
+            if let Ok(v) = serde_json::from_str::<Value>(&rest[..end]) {
+                if let Some(cmd) = v.get("command").and_then(Value::as_str) {
+                    if !cmd.is_empty() {
+                        result.push(cmd.to_string());
+                    }
+                }
+                rest = &rest[end..];
+                parsed = true;
+                break;
+            }
+        }
+        if !parsed {
+            break;
+        }
+        rest = rest.trim_start();
+    }
+    result.join(" && ")
+}
+
+/// Minimal shell-lite tokenizer for the `shell_exec` string-argv fallback.
+/// Splits on whitespace while respecting single and double quotes.
+/// Does NOT perform any shell expansion — no globs, no variables, no redirects.
+fn simple_tokenize(s: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_double => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ' ' | '\t' | '\n' if !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
