@@ -8,6 +8,7 @@ use crate::system::domain::{
     ConversationItem, ItemKind, ModelSettings, RuntimeEventKind, ThreadStatus, TokenUsage,
     ToolCall, ToolExecutionContext, ToolListingContext, ToolResult, TurnStatus, UserInput,
 };
+use crate::system::error as cod_error;
 
 // ─── TurnExecutor ─────────────────────────────────────────────────────────────
 
@@ -221,8 +222,16 @@ impl TurnExecutor {
                     continue; // retry the outer agent loop
                 }
 
-                // Second overflow or a different error — fail the turn.
-                return self.fail_turn(&params.thread_id, &turn_id, error).await;
+            // Second overflow or a different error — humanize and fail the turn.
+                let err_display = cod_error::from_raw(error);
+                return self
+                    .fail_turn(
+                        &params.thread_id,
+                        &turn_id,
+                        err_display.kind.label(),
+                        &err_display.message,
+                    )
+                    .await;
             }
 
             if let Some(item_id) = assistant_item_id {
@@ -594,7 +603,25 @@ impl TurnExecutor {
         });
     }
 
-    pub async fn fail_turn(&self, thread_id: &str, turn_id: &str, reason: &str) -> Result<()> {
+    pub async fn fail_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        kind_label: &str,
+        message: &str,
+    ) -> Result<()> {
+        // Persist a visible Error item so the failure reason appears in the
+        // transcript and survives thread reloads.
+        let error_item = ConversationItem {
+            item_id: format!("item_{}", Uuid::new_v4().simple()),
+            thread_id: thread_id.into(),
+            turn_id: turn_id.into(),
+            created_at: now_seconds(),
+            kind: ItemKind::Error,
+            payload: json!({ "kind": kind_label, "message": message }),
+        };
+        self.persist_turn_item(error_item).await?;
+
         let thread = self
             .runtime
             .load_thread(thread_id)
@@ -628,11 +655,12 @@ impl TurnExecutor {
                 crate::system::domain::RuntimeEventKind::TurnFailed,
                 Some(thread_id.into()),
                 Some(turn_id.into()),
-                json!({ "reason": reason }),
+                json!({ "kind": kind_label, "reason": message }),
             )
             .await?;
         Ok(())
     }
+
 
     async fn complete_interrupted(&self, thread_id: &str, turn_id: &str) -> Result<()> {
         let thread = self

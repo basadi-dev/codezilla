@@ -16,6 +16,7 @@ use super::super::domain::{
     ConversationItem, ItemKind, PendingApproval, RuntimeEvent, RuntimeEventKind, ThreadMetadata,
     ToolResult, TurnStatus, UserInput,
 };
+use super::super::error as cod_error;
 use super::super::runtime::{
     ConversationRuntime, ThreadCompactParams, ThreadCompactResult, ThreadForkParams,
     ThreadListParams, ThreadReadParams, ThreadResumeParams, ThreadStartParams, TurnInterruptParams,
@@ -1291,16 +1292,22 @@ impl InteractiveApp {
             RuntimeEventKind::TurnFailed => {
                 self.active_turn_id = None;
                 self.pending_approval = None;
+                // Prefer "kind" (the structured label) as the title; fall back to "reason".
+                let kind_label = event
+                    .payload
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Error");
                 let reason = event
                     .payload
                     .get("reason")
                     .and_then(|v| v.as_str())
                     .unwrap_or("turn failed");
-                self.error_message = Some(reason.to_string());
+                self.error_message = Some(format!("{kind_label}: {reason}"));
                 self.push_status_entry(
                     event.event_id,
                     EntryKind::Error,
-                    "Error",
+                    kind_label,
                     reason,
                     Some(event.emitted_at / 1000),
                 );
@@ -1308,13 +1315,25 @@ impl InteractiveApp {
                     thread.status = super::super::domain::ThreadStatus::Idle;
                 }
             }
-            RuntimeEventKind::Warning | RuntimeEventKind::Disconnected => {
-                let text = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".into());
+            RuntimeEventKind::Warning => {
+                // Warnings are informational — render as Status, not Error,
+                // and do NOT override the error_message field.
+                let msg = cod_error::humanize_warning(&event.payload);
+                self.push_status_entry(
+                    event.event_id,
+                    EntryKind::Status,
+                    "Warning",
+                    &msg,
+                    Some(event.emitted_at / 1000),
+                );
+            }
+            RuntimeEventKind::Disconnected => {
+                let msg = cod_error::humanize_warning(&event.payload);
                 self.push_status_entry(
                     event.event_id,
                     EntryKind::Error,
-                    "Runtime",
-                    &text,
+                    "Disconnected",
+                    &msg,
                     Some(event.emitted_at / 1000),
                 );
             }

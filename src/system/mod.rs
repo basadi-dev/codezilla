@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod config;
 pub mod domain;
+pub mod error;
 pub mod mcp;
 pub mod persistence;
 pub mod runtime;

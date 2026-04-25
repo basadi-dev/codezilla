@@ -11,6 +11,7 @@ use crate::system::domain::{
     ConversationItem, ItemKind, ModelId, ModelSettings, TokenUsage, ToolCall, ToolDefinition,
     ToolProviderKind,
 };
+use crate::system::error as cod_error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,15 +176,28 @@ impl ModelGateway {
                 }
                 Err(stream_err) => {
                     let stream_err_text = stream_err.to_string();
-                    if is_non_retryable_stream_error(&stream_err_text) {
-                        let _ = tx
-                            .send(ModelStreamEvent::Failed(humanize_stream_error(
-                                &stream_err_text,
-                            )))
-                            .await;
+                    let stream_kind = cod_error::classify(&stream_err_text);
+
+                    // Non-retryable errors (4xx, context overflow, auth) skip the
+                    // non-streaming fallback and surface directly to the executor.
+                    if stream_kind.is_fatal()
+                        || matches!(
+                            stream_kind,
+                            cod_error::ErrorKind::ContextOverflow
+                                | cod_error::ErrorKind::AuthError
+                                | cod_error::ErrorKind::ApiError
+                        )
+                    {
+                        let msg = cod_error::humanize(&stream_err_text, stream_kind);
+                        let _ = tx.send(ModelStreamEvent::Failed(msg)).await;
                         return;
                     }
 
+                    // Retryable stream errors: fall back to non-streaming complete().
+                    tracing::warn!(
+                        error = %stream_err_text,
+                        "model_gateway: stream failed — attempting non-streaming fallback"
+                    );
                     match client
                         .complete(
                             &model_settings.provider_id,
@@ -234,11 +248,14 @@ impl ModelGateway {
                                 .await;
                         }
                         Err(complete_err) => {
+                            let complete_err_text = complete_err.to_string();
+                            let complete_kind = cod_error::classify(&complete_err_text);
+                            let stream_msg = cod_error::humanize(&stream_err_text, stream_kind);
+                            let fallback_msg =
+                                cod_error::humanize(&complete_err_text, complete_kind);
                             let _ = tx
                                 .send(ModelStreamEvent::Failed(format!(
-                                    "{}; fallback complete failed: {}",
-                                    humanize_stream_error(&stream_err_text),
-                                    humanize_stream_error(&complete_err.to_string())
+                                    "{stream_msg} (fallback also failed: {fallback_msg})"
                                 )))
                                 .await;
                         }
@@ -251,36 +268,9 @@ impl ModelGateway {
     }
 }
 
+/// Re-export for callers (e.g. executor.rs) that check context overflow.
 pub fn is_context_overflow_error(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    lower.contains("context exceeded")
-        || lower.contains("maximum context length")
-        || lower.contains("context window")
-        || lower.contains("prompt is too long")
-        || lower.contains("prompt too long")
-        || (lower.contains("api error 400") && lower.contains("context"))
-}
-
-fn is_non_retryable_stream_error(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    lower.contains("api error 400")
-        || lower.contains("api error 401")
-        || lower.contains("api error 403")
-        || lower.contains("api error 404")
-        || lower.contains("api error 413")
-        || lower.contains("api error 422")
-        || is_context_overflow_error(err)
-}
-
-fn humanize_stream_error(err: &str) -> String {
-    if is_context_overflow_error(err) {
-        format!(
-            "{err}. The conversation exceeded the model context window. \
-             Start a new thread, compact this one with /compact, or use a model with a larger context."
-        )
-    } else {
-        err.to_string()
-    }
+    cod_error::is_context_overflow(err)
 }
 
 // ─── Token budget constants ───────────────────────────────────────────────────

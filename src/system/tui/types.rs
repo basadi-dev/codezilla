@@ -27,6 +27,8 @@ pub const COLOR_TOOL: Color = Color::Rgb(220, 140, 255); // soft violet
 pub const COLOR_TOOL_RESULT: Color = Color::Rgb(120, 220, 160); // soft green
 /// Error sigil + text
 pub const COLOR_ERROR: Color = Color::Rgb(255, 100, 100); // soft red
+/// Warning sigil + text (informational, not a hard failure)
+pub const COLOR_WARNING: Color = Color::Rgb(255, 200, 80); // warm amber-yellow
 /// Reasoning sigil
 pub const COLOR_REASONING: Color = Color::Rgb(180, 160, 255); // lavender
 /// Approval modal border
@@ -94,6 +96,8 @@ pub enum EntryKind {
     ToolResult,
     Summary,
     Status,
+    #[allow(dead_code)]
+    Warning,
     Error,
     Attachment,
     Reasoning,
@@ -477,6 +481,7 @@ pub fn entry_style(kind: EntryKind) -> (&'static str, Color, Color) {
         EntryKind::ToolResult => ("✓", COLOR_TOOL_RESULT, Color::Rgb(210, 240, 220)),
         EntryKind::Summary => ("◈", COLOR_SUMMARY, Color::Rgb(230, 222, 255)),
         EntryKind::Status => ("·", COLOR_STATUS, Color::Rgb(200, 225, 200)),
+        EntryKind::Warning => ("⚠", COLOR_WARNING, Color::Rgb(255, 240, 200)),
         EntryKind::Error => ("✗", COLOR_ERROR, Color::Rgb(255, 210, 210)),
         EntryKind::Attachment => ("⊞", COLOR_MUTED, Color::Rgb(200, 210, 225)),
         EntryKind::Reasoning => ("⋯", COLOR_REASONING, Color::Rgb(220, 215, 255)),
@@ -583,14 +588,31 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             timestamp: Some(item.created_at),
             pending: false,
         },
-        ItemKind::Error => TranscriptEntry {
-            item_id: item.item_id.clone(),
-            kind: EntryKind::Error,
-            title: "error".into(),
-            body: pretty_json_or_text(Some(&item.payload), None),
-            timestamp: Some(item.created_at),
-            pending: false,
-        },
+        ItemKind::Error => {
+            // Prefer structured { kind, message } payload produced by the new error pipeline.
+            let kind_label = item
+                .payload
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Error")
+                .to_string();
+            let fallback_body = pretty_json_or_text(Some(&item.payload), None);
+            let message = item
+                .payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.payload.get("reason").and_then(|v| v.as_str()))
+                .map(|s| s.to_string())
+                .unwrap_or(fallback_body);
+            TranscriptEntry {
+                item_id: item.item_id.clone(),
+                kind: EntryKind::Error,
+                title: kind_label,
+                body: message,
+                timestamp: Some(item.created_at),
+                pending: false,
+            }
+        }
         _ => TranscriptEntry {
             item_id: item.item_id.clone(),
             kind: EntryKind::Status,

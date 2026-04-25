@@ -531,8 +531,15 @@ impl ConversationRuntime {
         tokio::spawn(async move {
             let executor = TurnExecutor { runtime };
             if let Err(error) = executor.run_turn(params_clone, turn_id.clone()).await {
+                let error_text = error.to_string();
+                let err = crate::system::error::from_raw(&error_text);
                 let _ = executor
-                    .fail_turn(&thread_id_for_task, &turn_id, &error.to_string())
+                    .fail_turn(
+                        &thread_id_for_task,
+                        &turn_id,
+                        err.kind.label(),
+                        &err.message,
+                    )
                     .await;
             }
         });
