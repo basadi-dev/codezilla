@@ -182,6 +182,13 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
             app.jump_transcript_to_bottom();
             app.composer.delete_word_left();
         }
+        // Ctrl+W  →  delete word left  (emacs/readline C-w)
+        (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+            app.jump_transcript_to_bottom();
+            app.reset_composer_history_navigation();
+            app.composer.delete_word_left();
+            app.update_autocomplete();
+        }
 
         // Generic printable character — exclude CONTROL and ALT so modifier
         // combos don't fall through and type raw letters.
