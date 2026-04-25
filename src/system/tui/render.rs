@@ -13,6 +13,9 @@ use super::types::{
     COLOR_PROMPT, COLOR_USER,
 };
 
+/// Dim colour used for right-aligned status-bar key hints.
+const COLOR_HINT: Color = Color::Rgb(60, 65, 75);
+
 // ─── Spinner tick (bumped each frame by the caller side; we read it from app) ─
 
 /// Draw the complete TUI frame using a stream-style layout:
@@ -53,7 +56,15 @@ pub fn draw(app: &mut InteractiveApp, frame: &mut Frame) {
     render_status_bar(app, frame, outer[5]);
 }
 
-// ─── Header ───────────────────────────────────────────────────────────────────
+// ─── Header ────────────────────────────────────────────────────────────────────
+//
+// Layout:
+//   Left:  ◈ codezilla  ⠋ Streaming…  thread-title
+//   Right: cwd │ model │ reasoning │ 🔓
+//
+// - `reasoning` is only shown when explicitly set (not "off").
+// - Approval mode shown as a compact icon (🔓 auto / 🔒 ask).
+// - Thread title is truncated with ellipsis if it would overflow.
 
 fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     let meta = app.current_thread_meta.as_ref();
@@ -68,7 +79,11 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         let reasoning = ms.reasoning_effort.unwrap_or_default();
         (model, reasoning)
     };
-    let approval_mode = app.approval_mode_label();
+    let approval_icon = if app.auto_approve_tools_enabled() {
+        "🔓"
+    } else {
+        "🔒"
+    };
     let state = current_state_label(app.active_turn_id.is_some(), app.pending_approval.is_some());
 
     let state_color = if app.error_message.is_some() {
@@ -88,45 +103,73 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         "●"
     };
 
-    let line = Line::from(vec![
+    // ── Left side: brand + live state ────────────────────────────────────────
+    let mut left_spans: Vec<Span<'static>> = vec![
         Span::styled(
-            "  codezilla",
+            " ◈ ",
             Style::default()
                 .fg(COLOR_ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
-        Span::styled(cwd, Style::default().fg(Color::White)),
-        Span::styled("  /  ", Style::default().fg(COLOR_MUTED)),
-        Span::styled(thread, Style::default().fg(COLOR_USER)),
-        Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
-        Span::styled(model, Style::default().fg(COLOR_MUTED)),
-        Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
         Span::styled(
-            if reasoning.is_empty() {
-                "reasoning:off".into()
-            } else {
-                format!("reasoning:{reasoning}")
-            },
-            Style::default().fg(COLOR_MUTED),
+            "codezilla",
+            Style::default()
+                .fg(COLOR_ACCENT)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
-        Span::styled(
-            format!("approve:{approval_mode}"),
-            Style::default().fg(COLOR_MUTED),
-        ),
-        Span::styled("  ", Style::default()),
+        Span::raw("  "),
         Span::styled(
             state_sigil.to_string(),
             Style::default()
                 .fg(state_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" ", Style::default()),
-        Span::styled(state.to_string(), Style::default().fg(state_color)),
-    ]);
+        Span::styled(format!(" {state}"), Style::default().fg(state_color)),
+    ];
 
-    frame.render_widget(Paragraph::new(line), area);
+    // ── Right side: context info ─────────────────────────────────────────────
+    let mut right_spans: Vec<Span<'static>> = vec![];
+    right_spans.push(Span::styled(cwd.clone(), Style::default().fg(Color::White)));
+    right_spans.push(Span::styled(" │ ", Style::default().fg(COLOR_BORDER)));
+    right_spans.push(Span::styled(model, Style::default().fg(COLOR_MUTED)));
+    if !reasoning.is_empty() {
+        right_spans.push(Span::styled(" │ ", Style::default().fg(COLOR_BORDER)));
+        right_spans.push(Span::styled(
+            format!("reasoning:{reasoning}"),
+            Style::default().fg(COLOR_MUTED),
+        ));
+    }
+    right_spans.push(Span::styled(" │ ", Style::default().fg(COLOR_BORDER)));
+    right_spans.push(Span::styled(
+        approval_icon.to_string(),
+        Style::default().fg(COLOR_MUTED),
+    ));
+
+    // ── Calculate widths and fit thread title in between ─────────────────────
+    let left_width: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
+    let right_width: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
+    let available = area.width as usize;
+    // 2 chars for "  " gap between left and thread
+    let max_thread = available.saturating_sub(left_width + right_width + 2);
+    let thread_display = if thread.chars().count() > max_thread && max_thread > 3 {
+        // Truncate with ellipsis
+        let chars: Vec<char> = thread.chars().take(max_thread.saturating_sub(1)).collect();
+        format!("{}…", chars.iter().collect::<String>())
+    } else {
+        thread
+    };
+    let thread_display_width = thread_display.chars().count();
+
+    left_spans.push(Span::styled("  ", Style::default()));
+    left_spans.push(Span::styled(thread_display, Style::default().fg(COLOR_USER)));
+
+    // Padding between left+thread and right-aligned context
+    let used = left_width + 2 + thread_display_width + right_width;
+    let padding = available.saturating_sub(used);
+    left_spans.push(Span::styled(" ".repeat(padding), Style::default()));
+    left_spans.extend(right_spans);
+
+    frame.render_widget(Paragraph::new(Line::from(left_spans)), area);
 }
 
 // ─── Separator ────────────────────────────────────────────────────────────────
@@ -317,7 +360,7 @@ fn render_composer(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
             rendered_lines.push(Line::from(vec![
                 Span::styled(first_glyph, glyph_style),
                 Span::styled(
-                    "Message codezilla… (4 lines max · Shift+Enter newline · Ctrl+U kill line · Ctrl/Alt+←/→ word jump · ↑/↓ move line)",
+                    "Message codezilla… (Shift+Enter for newline)",
                     Style::default().fg(COLOR_MUTED),
                 ),
             ]));
@@ -370,6 +413,12 @@ fn render_composer(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
 }
 
 // ─── Status bar ───────────────────────────────────────────────────────────────
+//
+// Layout:
+//   Left:  status message (or error)
+//   Right: essential key hints (dimmed, right-aligned)
+//
+// Only 3 essential shortcuts are shown permanently. Full list available via /help.
 
 fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     let message = app
@@ -378,27 +427,30 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         .unwrap_or_else(|| app.status_message.clone());
 
     let (msg_style, prefix) = if app.error_message.is_some() {
-        (Style::default().fg(COLOR_ERROR), "✗  ")
+        (Style::default().fg(COLOR_ERROR), "✗ ")
     } else {
-        (Style::default().fg(COLOR_MUTED), "   ")
+        (Style::default().fg(COLOR_MUTED), "  ")
     };
 
-    let mouse_mode = if app.mouse_capture_enabled {
-        "scroll"
-    } else {
-        "select"
-    };
-    let hints = format!(
-        "^A·approve:{}  ^M·mouse:{mouse_mode}  scroll: wheel·PgUp/Dn·^U/D  ^N·new  ^F·fork  ^C·interrupt  ^Q·quit",
-        app.approval_mode_label()
-    );
+    // Essential keys only — right-aligned, always dim
+    let essential_keys = "^N new  ^C stop  ^Q quit";
+    let keys_width = essential_keys.chars().count();
+    let msg_width = prefix.chars().count() + message.chars().count();
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(prefix.to_string(), msg_style),
         Span::styled(message, msg_style),
-        Span::styled(format!("  ·  {hints}"), Style::default().fg(COLOR_MUTED)),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ];
+
+    let available = area.width as usize;
+    let used = msg_width;
+    let padding = available.saturating_sub(used + keys_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), Style::default()));
+        spans.push(Span::styled(essential_keys, Style::default().fg(COLOR_HINT)));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ─── Approval panel ───────────────────────────────────────────────────────────
