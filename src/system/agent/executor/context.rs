@@ -5,8 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::system::agent::model_gateway::ModelRequest;
 use crate::system::domain::{
-    ConversationItem, ModelSettings, PermissionProfile, ToolDefinition, ToolListingContext,
-    TurnId,
+    ConversationItem, ModelSettings, PermissionProfile, ToolDefinition, ToolListingContext, TurnId,
 };
 use crate::system::runtime::{ThreadSession, TurnStartParams};
 

@@ -13,8 +13,8 @@ use self::utils::{
     should_retry_no_tool_completion, thinking_instruction,
 };
 use crate::system::domain::{
-    now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus, TokenUsage,
-    ToolCall, ToolResult, TurnStatus, UserInput,
+    now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus, TokenUsage, ToolCall,
+    ToolResult, TurnStatus, UserInput,
 };
 use crate::system::error as cod_error;
 
@@ -86,6 +86,11 @@ impl TurnExecutor {
         loop {
             agent_iterations += 1;
             if agent_iterations > MAX_AGENT_ITERATIONS {
+                tracing::error!(
+                    turn_id = %turn_id,
+                    agent_iterations,
+                    "executor: backstop limit reached — terminating turn"
+                );
                 return self
                     .fail_turn(
                         &params.thread_id,
@@ -98,6 +103,14 @@ impl TurnExecutor {
                     )
                     .await;
             }
+            tracing::debug!(
+                turn_id = %turn_id,
+                agent_iterations,
+                consecutive_failures,
+                no_tool_nudges,
+                completed_tool_rounds,
+                "executor: loop iteration"
+            );
             if let Some(thread) = self.runtime.load_thread(&params.thread_id).await? {
                 let thread = thread.lock().await;
                 let turn = thread
@@ -288,6 +301,15 @@ impl TurnExecutor {
             }
 
             if tool_calls.is_empty() {
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    agent_iterations,
+                    completed_tool_rounds,
+                    no_tool_nudges,
+                    assistant_text_len = assistant_text.len(),
+                    assistant_text_preview = %assistant_text.chars().take(200).collect::<String>(),
+                    "executor: no tool calls in model response"
+                );
                 if no_tool_nudges < MAX_NO_TOOL_NUDGES
                     && should_retry_no_tool_completion(
                         &assistant_text,
@@ -296,6 +318,12 @@ impl TurnExecutor {
                     )
                 {
                     no_tool_nudges += 1;
+                    tracing::warn!(
+                        turn_id = %turn_id,
+                        no_tool_nudges,
+                        MAX_NO_TOOL_NUDGES,
+                        "executor: nudging model to emit tool call (described intent but no call)"
+                    );
                     no_tool_nudge_instruction = Some(format!(
                         "The previous assistant response described using a tool but emitted no \
                          tool call, so no action ran. Do not continue narrating. If the task is \
@@ -314,15 +342,19 @@ impl TurnExecutor {
                         .await?;
                     continue;
                 }
+                tracing::info!(
+                    turn_id = %turn_id,
+                    agent_iterations,
+                    completed_tool_rounds,
+                    "executor: turn completing — no tool calls, no nudge required"
+                );
                 return self
                     .complete_turn(&params.thread_id, &turn_id, final_usage)
                     .await;
             }
             no_tool_nudges = 0;
 
-            let had_any_success = self
-                .execute_tool_round(&turn_ctx, tool_calls)
-                .await?;
+            let had_any_success = self.execute_tool_round(&turn_ctx, tool_calls).await?;
             completed_tool_rounds += 1;
 
             // ── Consecutive-failure guard ─────────────────────────────────────
@@ -334,7 +366,19 @@ impl TurnExecutor {
                 consecutive_failures = 0;
             } else {
                 consecutive_failures += 1;
+                tracing::warn!(
+                    turn_id = %turn_id,
+                    consecutive_failures,
+                    MAX_CONSECUTIVE_FAILURES,
+                    completed_tool_rounds,
+                    "executor: all tools in this round FAILED (consecutive_failures={consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})"
+                );
                 if consecutive_failures > MAX_CONSECUTIVE_FAILURES {
+                    tracing::error!(
+                        turn_id = %turn_id,
+                        consecutive_failures,
+                        "executor: consecutive-failure limit reached — terminating turn"
+                    );
                     return self
                         .fail_turn(
                             &params.thread_id,
@@ -728,5 +772,4 @@ impl TurnExecutor {
         }
         Ok(instructions)
     }
-
 }

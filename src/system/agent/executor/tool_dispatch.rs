@@ -56,10 +56,22 @@ impl TurnExecutor {
                 .is_parallel_safe(name, &ctx.listing)
         });
 
+        let call_summary: Vec<String> = calls
+            .iter()
+            .map(|c| {
+                let args_preview = serde_json::to_string(&c.arguments)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(120)
+                    .collect::<String>();
+                format!("{}({})", c.tool_name, args_preview)
+            })
+            .collect();
         tracing::debug!(
             turn_id = %ctx.turn_id,
             total_calls = calls.len(),
             batch_count = batches.len(),
+            calls = %call_summary.join(" | "),
             "tool_round: dispatching"
         );
 
@@ -73,6 +85,19 @@ impl TurnExecutor {
             for result in results {
                 if result.ok {
                     had_any_success = true;
+                    tracing::debug!(
+                        turn_id = %ctx.turn_id,
+                        tool_call_id = %result.tool_call_id,
+                        "tool_result: ok"
+                    );
+                } else {
+                    tracing::warn!(
+                        turn_id = %ctx.turn_id,
+                        tool_call_id = %result.tool_call_id,
+                        error = result.error_message.as_deref().unwrap_or("<none>"),
+                        output = %result.output,
+                        "tool_result: FAILED"
+                    );
                 }
                 self.persist_tool_result(&ctx.params.thread_id, &ctx.turn_id, &result)
                     .await?;

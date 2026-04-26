@@ -17,7 +17,10 @@ use crate::system::domain::{
 ///   [read, write, read]         → [(read), (write), (read)]
 ///   [read, read, write, read]   → [(read, read), (write), (read)]
 ///   [bash, bash]                → [(bash), (bash)]
-pub(crate) fn partition_into_batches<F>(calls: &[ToolCall], is_parallel: F) -> Vec<Vec<(usize, ToolCall)>>
+pub(crate) fn partition_into_batches<F>(
+    calls: &[ToolCall],
+    is_parallel: F,
+) -> Vec<Vec<(usize, ToolCall)>>
 where
     F: Fn(&str) -> bool,
 {
@@ -383,8 +386,7 @@ fn looks_like_unexecuted_tool_intent(text: &str) -> bool {
 }
 
 fn normalize_for_detection(text: &str) -> String {
-    text
-        .trim()
+    text.trim()
         .to_ascii_lowercase()
         .replace(['’', '‘'], "'")
         .split_whitespace()
