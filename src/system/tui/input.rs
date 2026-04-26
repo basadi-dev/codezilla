@@ -24,6 +24,36 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
+    // ── Composer clear confirmation: second ^C clears composer, anything else cancels ──
+    if app.composer_clear_requested {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                app.composer = super::types::ComposerState::default();
+                app.autocomplete_suggestions.clear();
+                app.autocomplete_selected = 0;
+                app.reset_composer_history_navigation();
+                app.composer_clear_requested = false;
+                app.status_message = "Composer cleared".into();
+                app.error_message = None;
+            }
+            _ => {
+                app.composer_clear_requested = false;
+                // Fall through to normal handling — don't return early.
+            }
+        }
+        // If we just cleared the composer, we're done. Otherwise fall through.
+        if !app.composer_clear_requested && app.composer.is_empty() {
+            return Ok(());
+        }
+        // If composer_clear_requested was cancelled (any other key), fall through
+        // to normal handling below — but only if we didn't already handle the key.
+        if !app.composer_clear_requested {
+            // Fall through to the main match below.
+        } else {
+            return Ok(());
+        }
+    }
+
     if app.pending_approval.is_some() {
         return handle_approval_key(app, key).await;
     }
@@ -47,6 +77,10 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
             if app.drag_start.is_some() {
                 app.copy_selection_to_clipboard();
                 app.clear_selection();
+            } else if app.focus == FocusPane::Composer && !app.composer.is_empty() {
+                app.composer_clear_requested = true;
+                app.status_message = "Press Ctrl+C again to clear composer".into();
+                app.error_message = None;
             } else {
                 app.interrupt_active_turn().await?;
             }

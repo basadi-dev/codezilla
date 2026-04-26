@@ -27,7 +27,7 @@ clap = { version = "4", features = ["derive"] }
 
 # TUI
 ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
 arboard = "3"
 
 # Logging / tracing

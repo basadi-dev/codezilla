@@ -85,6 +85,9 @@ pub struct InteractiveApp {
     /// Whether the user has pressed Ctrl+Q and is awaiting confirmation.
     pub quit_requested: bool,
     // ── drag-to-select ────────────────────────────────────────────────────────
+    /// Whether the user has pressed Ctrl+C once while composer is focused and
+    /// is awaiting a second Ctrl+C to clear the composer prompt.
+    pub composer_clear_requested: bool,
     /// Fixed transcript positions where the left button started and ended.
     pub drag_start: Option<SelectionPoint>,
     /// Fixed transcript position of the current/final drag point.
@@ -137,6 +140,7 @@ impl InteractiveApp {
             should_quit: false,
             spinner_tick: 0,
             quit_requested: false,
+            composer_clear_requested: false,
             mouse_capture_enabled: true,
             drag_start: None,
             drag_end: None,
@@ -901,7 +905,7 @@ impl InteractiveApp {
         } else if matches!(command, "/help") {
             self.status_message =
                 "Keys: Tab/↑↓ autocomplete, Ctrl+A approvals, Ctrl+N new, Ctrl+F fork, \
-                 Ctrl+C interrupt, Ctrl+Q quit  ·  \
+                 Ctrl+C interrupt (double-tap clears composer), Ctrl+Q quit  ·  \
                  Commands: /model [provider/model]  /reasoning [low|medium|high|off]  \
                  /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads (autocomplete)  ·  \
                  CLI: codezilla -r (resume last thread)".into();
@@ -1933,8 +1937,10 @@ fn append_cached_transcript_entry_lines(
 
     if use_markdown && !entry.raw_body.is_empty() {
         // Re-render from the raw Markdown source so all spans carry proper styles.
-        // We hard-cap at 120 cols; ratatui will clip to the actual terminal width.
-        let md_rendered = md_to_lines(&entry.raw_body, body_color, 120);
+        // Use body_width (same value used in build_transcript_render_cache) so the
+        // rendered line count exactly matches the cached line_count used for scroll
+        // arithmetic — a mismatch was causing the bottom of long responses to be clipped.
+        let md_rendered = md_to_lines(&entry.raw_body, body_color, body_width);
         for md_line in md_rendered {
             if current_line >= start_line && current_line < end_line {
                 let mut spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];

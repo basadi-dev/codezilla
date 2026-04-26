@@ -934,7 +934,7 @@ pub fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
                 }
                 pos += 1;
             }
-            let s: String = chars[start..pos].iter().collect();
+            let s: String = chars[start..pos.min(len)].iter().collect();
             push(&mut spans, s, C_STRING);
             continue;
         }

@@ -7,7 +7,10 @@ pub mod types;
 use anyhow::Result;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -34,7 +37,13 @@ impl TerminalSession {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste,
+            Hide
+        )?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
@@ -48,6 +57,7 @@ impl Drop for TerminalSession {
         let _ = execute!(
             self.terminal.backend_mut(),
             DisableMouseCapture,
+            DisableBracketedPaste,
             Show,
             LeaveAlternateScreen
         );
@@ -182,6 +192,12 @@ pub async fn run_interactive_tui(
                 Event::Paste(text) => {
                     if app.pending_approval.is_none() && app.focus == FocusPane::Composer {
                         app.jump_transcript_to_bottom();
+                        // Normalize line endings: convert \r\n and \r to \n so the
+                        // composer counts and renders lines consistently.
+                        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                        // Strip trailing newlines to prevent accidental submission
+                        // when copying from code blocks or terminal output.
+                        let text = text.trim_end_matches('\n');
                         app.composer.insert_str(&text);
                         dirty = true;
                     }
