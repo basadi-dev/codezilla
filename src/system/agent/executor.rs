@@ -10,7 +10,7 @@ mod utils;
 use self::context::TurnContext;
 use self::utils::{
     derive_thread_title, find_repetition_start, is_degenerate_repetition, is_read_only_tool,
-    should_retry_no_tool_completion, thinking_instruction,
+    recently_read_paths, should_retry_no_tool_completion, thinking_instruction,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus, TokenUsage, ToolCall,
@@ -474,11 +474,21 @@ impl TurnExecutor {
                         MAX_NO_TOOL_NUDGES,
                         "executor: nudging model to emit tool call (described intent but no call)"
                     );
+                    let recent_files = recently_read_paths(&turn_ctx.items);
+                    let file_hint = if recent_files.is_empty() {
+                        String::new()
+                    } else {
+                        let paths = recent_files.join(", ");
+                        format!(
+                            " You recently read: {paths}. \
+                             Use `patch_file` with start_line, end_line, and content to \
+                             edit the lines you need to change."
+                        )
+                    };
                     no_tool_nudge_instruction = Some(format!(
-                        "The previous assistant response described using a tool but emitted no \
-                         tool call, so no action ran. Do not continue narrating. If the task is \
-                         not complete, your next response must contain exactly one tool call and \
-                         only the minimal text needed before it. Retry {no_tool_nudges}/{MAX_NO_TOOL_NUDGES}."
+                        "You described a plan but emitted no tool call — nothing ran. \
+                         Do not narrate. Emit exactly one tool call now.{file_hint} \
+                         Retry {no_tool_nudges}/{MAX_NO_TOOL_NUDGES}."
                     ));
                     self.runtime
                         .publish_event(
@@ -547,12 +557,23 @@ impl TurnExecutor {
                             )
                             .await;
                     }
+                    let recent_files = recently_read_paths(&turn_ctx.items);
+                    let file_hint = if recent_files.is_empty() {
+                        String::new()
+                    } else {
+                        let paths = recent_files.join(", ");
+                        format!(
+                            " You recently read: {paths}. \
+                             If you need to edit any of these files, use `patch_file` with \
+                             start_line/end_line/content to surgically replace the lines you \
+                             want to change. This is much easier than rewriting the entire file."
+                        )
+                    };
                     let msg = format!(
                         "You have spent {effective_read_only_limit} consecutive rounds \
-                         reading files or exploring without taking any action. If you have \
-                         gathered enough context, you must now either write a file, run a \
-                         command, or give a final answer. Do not read more files unless \
-                         absolutely necessary."
+                         reading files without taking any action. Stop reading and act now. \
+                         Either use `patch_file` to edit code, `bash_exec` to run a command, \
+                         or give a final answer.{file_hint}"
                     );
                     tracing::warn!(
                         turn_id = %turn_id,

@@ -502,16 +502,38 @@ impl ToolProvider for FileToolProvider {
             ToolDefinition {
                 name: "read_file".into(),
                 provider_kind: ToolProviderKind::Builtin,
-                description: "Read a UTF-8 file.".into(),
-                input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+                description: "Read a UTF-8 file. Use `patch_file` to edit specific lines instead of rewriting with `write_file`.".into(),
+                input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"1-based start line (default: 1)"},"limit":{"type":"integer","description":"Max lines to return (default: all)"}},"required":["path"]}),
                 requires_approval: false,
                 supports_parallel_calls: true,
             },
             ToolDefinition {
                 name: "write_file".into(),
                 provider_kind: ToolProviderKind::Builtin,
-                description: "Write a UTF-8 file.".into(),
+                description: "Write or create a UTF-8 file (replaces entire content). For editing specific lines in an existing file, prefer `patch_file`.".into(),
                 input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}),
+                requires_approval: true,
+                supports_parallel_calls: false,
+            },
+            ToolDefinition {
+                name: "patch_file".into(),
+                provider_kind: ToolProviderKind::Builtin,
+                description: concat!(
+                    "Replace a range of lines in an existing file. ",
+                    "Much lighter than write_file — you only provide the replacement lines, not the whole file. ",
+                    "Use after read_file to surgically edit specific lines. ",
+                    "Lines are 1-based. The range [start_line, end_line] is inclusive and replaced by `content`."
+                ).into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File to patch (absolute or relative to cwd)" },
+                        "start_line": { "type": "integer", "description": "First line to replace (1-based, inclusive)" },
+                        "end_line": { "type": "integer", "description": "Last line to replace (1-based, inclusive)" },
+                        "content": { "type": "string", "description": "Replacement text for the specified line range" }
+                    },
+                    "required": ["path", "start_line", "end_line", "content"]
+                }),
                 requires_approval: true,
                 supports_parallel_calls: false,
             },
@@ -551,7 +573,7 @@ impl ToolProvider for FileToolProvider {
         };
         let write_action = matches!(
             call.tool_name.as_str(),
-            "write_file" | "create_directory" | "remove_path" | "copy_path"
+            "write_file" | "patch_file" | "create_directory" | "remove_path" | "copy_path"
         );
         let action = ActionDescriptor {
             action_type: call.tool_name.clone(),
@@ -572,8 +594,38 @@ impl ToolProvider for FileToolProvider {
             .build_sandbox_request(&action, &context.permission_profile);
         let output = match call.tool_name.as_str() {
             "read_file" => {
-                let content = self.sandbox.read_file(path("path")?, &sandbox).await?;
-                json!({ "path": path("path")?, "content": String::from_utf8_lossy(&content) })
+                let file_path = path("path")?;
+                let raw = self.sandbox.read_file(file_path, &sandbox).await?;
+                let full = String::from_utf8_lossy(&raw).into_owned();
+                let lines: Vec<&str> = full.lines().collect();
+                let total_lines = lines.len();
+                let offset = call
+                    .arguments
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .map(|v| (v as usize).max(1))
+                    .unwrap_or(1);
+                let limit = call
+                    .arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize);
+                let start = (offset - 1).min(total_lines);
+                let end = limit
+                    .map(|l| (start + l).min(total_lines))
+                    .unwrap_or(total_lines);
+                let selected: String = lines[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| format!("{}:{}", start + i + 1, line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                json!({
+                    "path": file_path,
+                    "total_lines": total_lines,
+                    "showing": { "from": start + 1, "to": end },
+                    "content": selected,
+                })
             }
             "write_file" => {
                 let file_path = path("path")?;
@@ -603,6 +655,90 @@ impl ToolProvider for FileToolProvider {
                     "ok": true,
                     "path": file_path,
                     "is_new_file": is_new_file,
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                    "diff": diff_text,
+                })
+            }
+            "patch_file" => {
+                let file_path = path("path")?;
+                let start_line = call
+                    .arguments
+                    .get("start_line")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| anyhow!("tool_invalid_arguments: missing start_line"))?
+                    as usize;
+                let end_line = call
+                    .arguments
+                    .get("end_line")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| anyhow!("tool_invalid_arguments: missing end_line"))?
+                    as usize;
+                let replacement = call
+                    .arguments
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("tool_invalid_arguments: missing content"))?;
+
+                if start_line == 0 || end_line == 0 || start_line > end_line {
+                    return Ok(ToolResult {
+                        tool_call_id: call.tool_call_id.clone(),
+                        ok: false,
+                        output: json!({ "error": format!(
+                            "invalid line range: start_line={start_line}, end_line={end_line}. \
+                             Lines are 1-based and start_line must be <= end_line."
+                        )}),
+                        error_message: Some("invalid line range".into()),
+                    });
+                }
+
+                let old_bytes = self.sandbox.read_file(file_path, &sandbox).await?;
+                let old_content = String::from_utf8_lossy(&old_bytes).into_owned();
+                let lines: Vec<&str> = old_content.lines().collect();
+
+                if start_line > lines.len() {
+                    return Ok(ToolResult {
+                        tool_call_id: call.tool_call_id.clone(),
+                        ok: false,
+                        output: json!({ "error": format!(
+                            "start_line {start_line} exceeds file length ({} lines)",
+                            lines.len()
+                        )}),
+                        error_message: Some("start_line out of range".into()),
+                    });
+                }
+                let clamped_end = end_line.min(lines.len());
+
+                // Build the new content: prefix + replacement + suffix
+                let mut new_content = String::new();
+                for line in &lines[..start_line - 1] {
+                    new_content.push_str(line);
+                    new_content.push('\n');
+                }
+                new_content.push_str(replacement);
+                if !replacement.ends_with('\n') {
+                    new_content.push('\n');
+                }
+                for line in &lines[clamped_end..] {
+                    new_content.push_str(line);
+                    new_content.push('\n');
+                }
+                // Trim trailing newline if original didn't end with one
+                if !old_content.ends_with('\n') && new_content.ends_with('\n') {
+                    new_content.pop();
+                }
+
+                self.sandbox
+                    .write_file(file_path, new_content.as_bytes(), &sandbox)
+                    .await?;
+
+                let (diff_text, lines_added, lines_removed) =
+                    make_unified_diff(file_path, Some(&old_content), &new_content);
+
+                json!({
+                    "ok": true,
+                    "path": file_path,
+                    "patched_range": { "start_line": start_line, "end_line": clamped_end },
                     "lines_added": lines_added,
                     "lines_removed": lines_removed,
                     "diff": diff_text,

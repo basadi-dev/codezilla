@@ -91,13 +91,13 @@ pub(crate) fn thinking_instruction(reasoning_effort: Option<&str>) -> Option<Str
 pub(crate) fn action_for_tool_call(call: &ToolCall, cwd: &str) -> ActionDescriptor {
     let category = match call.tool_name.as_str() {
         "bash_exec" | "shell_exec" => ApprovalCategory::SandboxEscalation,
-        "write_file" | "create_directory" | "remove_path" | "copy_path" => {
+        "write_file" | "patch_file" | "create_directory" | "remove_path" | "copy_path" => {
             ApprovalCategory::FileChange
         }
         _ => ApprovalCategory::Other,
     };
     let paths = match call.tool_name.as_str() {
-        "write_file" | "create_directory" | "remove_path" => call
+        "write_file" | "patch_file" | "create_directory" | "remove_path" => call
             .arguments
             .get("path")
             .and_then(Value::as_str)
@@ -413,6 +413,43 @@ fn normalize_for_detection(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+// ─── Smart nudge context extraction ──────────────────────────────────────────
+
+/// Extract the file paths that the model has recently read, by scanning
+/// the most recent ToolCall items for read_file invocations.
+/// Returns deduplicated paths in most-recent-first order.
+pub(crate) fn recently_read_paths(items: &[ConversationItem]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in items.iter().rev() {
+        if item.kind != ItemKind::ToolCall {
+            continue;
+        }
+        let name = item
+            .payload
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if name != "read_file" {
+            continue;
+        }
+        if let Some(path) = item
+            .payload
+            .get("arguments")
+            .and_then(|a| a.get("path"))
+            .and_then(serde_json::Value::as_str)
+        {
+            if seen.insert(path.to_string()) {
+                paths.push(path.to_string());
+            }
+        }
+        if paths.len() >= 3 {
+            break;
+        }
+    }
+    paths
 }
 
 // ─── Degenerate-output detection ──────────────────────────────────────────────
