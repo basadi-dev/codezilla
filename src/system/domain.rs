@@ -61,6 +61,7 @@ pub enum ItemKind {
     UserMessage,
     UserAttachment,
     AgentMessage,
+    SystemMessage,
     ReasoningText,
     ReasoningSummary,
     ToolCall,

@@ -350,7 +350,7 @@ pub fn build_llm_messages(
     for item in items {
         let is_boundary = matches!(
             item.kind,
-            ItemKind::UserMessage | ItemKind::ReasoningSummary
+            ItemKind::UserMessage | ItemKind::SystemMessage | ItemKind::ReasoningSummary
         );
         if is_boundary && !current.is_empty() {
             turns.push(std::mem::take(&mut current));
@@ -412,6 +412,10 @@ fn item_to_llm_message(item: &ConversationItem) -> Option<llm::Message> {
         ItemKind::UserMessage => {
             let text = item.payload.get("text").and_then(Value::as_str)?;
             Some(llm::Message::user(text.to_string()))
+        }
+        ItemKind::SystemMessage => {
+            let text = item.payload.get("text").and_then(Value::as_str)?;
+            Some(llm::Message::user(format!("[SYSTEM] {text}")))
         }
         ItemKind::UserAttachment => {
             let path = item.payload.get("path").and_then(Value::as_str)?;
@@ -573,6 +577,12 @@ pub fn build_compaction_messages(
                 if let Some(text) = item.payload.get("text").and_then(Value::as_str) {
                     let snippet: String = text.chars().take(1200).collect();
                     transcript.push_str(&format!("[USER]\n{snippet}\n\n"));
+                }
+            }
+            ItemKind::SystemMessage => {
+                if let Some(text) = item.payload.get("text").and_then(Value::as_str) {
+                    let snippet: String = text.chars().take(1200).collect();
+                    transcript.push_str(&format!("[SYSTEM]\n{snippet}\n\n"));
                 }
             }
             ItemKind::AgentMessage => {

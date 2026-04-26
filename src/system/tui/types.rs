@@ -36,7 +36,8 @@ pub const COLOR_ERROR: Color = Color::Rgb(255, 100, 100); // soft red
 pub const COLOR_WARNING: Color = Color::Rgb(255, 200, 80); // warm amber-yellow
 /// Reasoning sigil
 pub const COLOR_REASONING: Color = Color::Rgb(180, 160, 255); // lavender
-/// Approval modal border
+/// System message sigil + text
+pub const COLOR_SYSTEM: Color = Color::Rgb(160, 180, 200); // cool slate
 pub const COLOR_APPROVAL: Color = Color::Rgb(255, 210, 80);
 /// Summary sigil
 pub const COLOR_SUMMARY: Color = Color::Rgb(200, 180, 255);
@@ -96,6 +97,7 @@ impl AutocompleteItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     User,
+    System,
     Assistant,
     ToolCall,
     ToolResult,
@@ -600,6 +602,7 @@ fn line_col_for_wrapped_position(
 pub fn entry_style(kind: EntryKind) -> (&'static str, Color, Color) {
     match kind {
         EntryKind::User => ("▶", COLOR_USER, Color::White),
+        EntryKind::System => ("◈", COLOR_SYSTEM, COLOR_SYSTEM),
         EntryKind::Assistant => ("◆", COLOR_ASSISTANT, Color::White),
         EntryKind::ToolCall => ("⚙", COLOR_TOOL, Color::Rgb(240, 218, 255)),
         EntryKind::ToolResult => ("✓", COLOR_TOOL_RESULT, Color::Rgb(210, 240, 220)),
@@ -629,6 +632,20 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             tool_call_id: None,
             kind: EntryKind::User,
             title: "You".into(),
+            body: item
+                .payload
+                .get("text")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            timestamp: Some(item.created_at),
+            pending: false,
+        },
+        ItemKind::SystemMessage => TranscriptEntry {
+            item_id: item.item_id.clone(),
+            tool_call_id: None,
+            kind: EntryKind::System,
+            title: "System".into(),
             body: item
                 .payload
                 .get("text")

@@ -159,8 +159,8 @@ impl TurnExecutor {
                     thread_id: params.thread_id.clone(),
                     turn_id: turn_id.clone(),
                     created_at: now_seconds(),
-                    kind: ItemKind::UserMessage,
-                    payload: json!({ "text": format!("[SYSTEM] {instruction}") }),
+                    kind: ItemKind::SystemMessage,
+                    payload: json!({ "text": instruction }),
                 };
                 self.persist_turn_item(nudge_item).await?;
             }

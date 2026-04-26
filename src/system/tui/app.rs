@@ -2042,7 +2042,7 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
     for entry in entries {
         let use_markdown = matches!(
             entry.kind,
-            EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
+            EntryKind::User | EntryKind::System | EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
         );
         let use_read_file = entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.body);
 
