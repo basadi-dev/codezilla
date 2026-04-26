@@ -632,6 +632,17 @@ impl TurnExecutor {
                 .persistence_manager
                 .update_thread(&thread.metadata)?;
         }
+        // Evict the hot-cache entry so the next turn cold-reloads from
+        // persistence. This ensures prefix_items (e.g. compaction summaries)
+        // are correctly reconstructed even when a prior turn failed mid-stream
+        // without triggering a normal cache eviction.
+        self.runtime
+            .inner
+            .loaded_threads
+            .write()
+            .await
+            .remove(thread_id);
+
         self.runtime
             .publish_event(
                 crate::system::domain::RuntimeEventKind::TurnFailed,
