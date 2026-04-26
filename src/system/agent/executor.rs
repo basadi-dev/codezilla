@@ -9,7 +9,7 @@ mod utils;
 
 use self::context::TurnContext;
 use self::utils::{
-    derive_thread_title, find_repetition_start, is_degenerate_repetition,
+    derive_thread_title, find_repetition_start, is_degenerate_repetition, is_read_only_tool,
     should_retry_no_tool_completion, thinking_instruction,
 };
 use crate::system::domain::{
@@ -83,6 +83,14 @@ impl TurnExecutor {
         let mut no_tool_nudge_instruction: Option<String> = None;
         let mut completed_tool_rounds: usize = 0;
 
+        // Guard 3 — read-only exploration saturation: counts consecutive rounds
+        // where *every* tool call was a pure read (read_file, list_dir, grep …).
+        // If the model keeps exploring without ever writing or executing, it gets
+        // a single nudge telling it to act. Resets to 0 as soon as one action
+        // tool (write_file, bash_exec, …) appears in any round.
+        const MAX_CONSECUTIVE_READ_ONLY_ROUNDS: usize = 15;
+        let mut consecutive_read_only_rounds: usize = 0;
+
         loop {
             agent_iterations += 1;
             if agent_iterations > MAX_AGENT_ITERATIONS {
@@ -155,6 +163,7 @@ impl TurnExecutor {
 
             let mut assistant_item_id: Option<String> = None;
             let mut assistant_text = String::new();
+            let mut reasoning_text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut final_usage = TokenUsage::default();
             // Set to Some(error) when the model returns Failed so we can
@@ -224,6 +233,9 @@ impl TurnExecutor {
                         ).await?;
                     }
                     ModelStreamEvent::ReasoningDelta(delta) => {
+                        // Accumulate for persistence (same pattern as assistant_text).
+                        reasoning_text.push_str(&delta);
+                        // Also publish to the event bus so the TUI live-renders it.
                         self.runtime.publish_event(
                             RuntimeEventKind::ItemUpdated,
                             Some(params.thread_id.clone()), Some(turn_id.clone()),
@@ -300,6 +312,22 @@ impl TurnExecutor {
                 self.persist_turn_item(item).await?;
             }
 
+            // Persist reasoning/thinking text if the model produced any.
+            // ItemKind::ReasoningText is defined in the domain but was previously
+            // never written — this wires it up so the full turn is reconstructable.
+            if !reasoning_text.is_empty() {
+                let reasoning_item = ConversationItem {
+                    item_id: format!("item_{}", Uuid::new_v4().simple()),
+                    thread_id: params.thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    created_at: now_seconds(),
+                    kind: ItemKind::ReasoningText,
+                    payload: json!({ "text": reasoning_text }),
+                };
+                self.persist_turn_item(reasoning_item).await?;
+                reasoning_text = String::new();
+            }
+
             if tool_calls.is_empty() {
                 tracing::debug!(
                     turn_id = %turn_id,
@@ -354,8 +382,62 @@ impl TurnExecutor {
             }
             no_tool_nudges = 0;
 
+            // Snapshot whether this round is pure read-only *before* tool_calls is moved.
+            let round_is_read_only = tool_calls.iter().all(|c| is_read_only_tool(&c.tool_name));
+
             let had_any_success = self.execute_tool_round(&turn_ctx, tool_calls).await?;
             completed_tool_rounds += 1;
+
+            // ── Read-only exploration guard ───────────────────────────────────
+            // Reset when any action tool ran this round; bump when every call
+            // was read-only. On hitting the threshold inject a single nudge and
+            // reset so a follow-up nudge fires again if the model ignores it.
+            if round_is_read_only {
+                consecutive_read_only_rounds += 1;
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    consecutive_read_only_rounds,
+                    MAX_CONSECUTIVE_READ_ONLY_ROUNDS,
+                    "executor: read-only round ({consecutive_read_only_rounds}/{MAX_CONSECUTIVE_READ_ONLY_ROUNDS})"
+                );
+                if consecutive_read_only_rounds >= MAX_CONSECUTIVE_READ_ONLY_ROUNDS {
+                    consecutive_read_only_rounds = 0;
+                    let msg = format!(
+                        "You have spent {MAX_CONSECUTIVE_READ_ONLY_ROUNDS} consecutive rounds \
+                         reading files or exploring without taking any action. If you have \
+                         gathered enough context, you must now either write a file, run a \
+                         command, or give a final answer. Do not read more files unless \
+                         absolutely necessary."
+                    );
+                    tracing::warn!(
+                        turn_id = %turn_id,
+                        "executor: read-only saturation nudge fired"
+                    );
+                    self.runtime
+                        .publish_event(
+                            RuntimeEventKind::Warning,
+                            Some(params.thread_id.clone()),
+                            Some(turn_id.clone()),
+                            json!({
+                                "message": format!(
+                                    "Agent has been exploring for {MAX_CONSECUTIVE_READ_ONLY_ROUNDS} rounds \
+                                     — nudging it to take an action."
+                                )
+                            }),
+                        )
+                        .await?;
+                    no_tool_nudge_instruction = Some(msg);
+                }
+            } else {
+                if consecutive_read_only_rounds > 0 {
+                    tracing::debug!(
+                        turn_id = %turn_id,
+                        consecutive_read_only_rounds,
+                        "executor: action tool executed — resetting read-only counter"
+                    );
+                }
+                consecutive_read_only_rounds = 0;
+            }
 
             // ── Consecutive-failure guard ─────────────────────────────────────
             // Reset counter if any tool succeeded this round; bump it if every

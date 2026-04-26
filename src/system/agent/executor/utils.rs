@@ -4,6 +4,27 @@ use crate::system::domain::{
     ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ToolCall,
 };
 
+// ─── is_read_only_tool ────────────────────────────────────────────────────────
+
+/// Returns `true` for tools that only read or explore without side-effects.
+///
+/// Used by the read-only exploration guard in the executor loop to detect when
+/// the model is stuck reading files indefinitely without taking any action.
+/// Any tool *not* listed here is considered an "action" tool that resets the
+/// consecutive-read-only counter (write, bash, directory mutation, sub-agents).
+pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file"
+            | "list_dir"
+            | "grep_search"
+            | "search_web"
+            | "read_url"
+            | "read_browser_page"
+            | "view_file"
+    )
+}
+
 // ─── partition_into_batches ───────────────────────────────────────────────────
 
 /// Split an ordered slice of `ToolCall`s into sequential execution batches.
