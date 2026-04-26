@@ -552,7 +552,10 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     let has_tokens = usage.input_tokens > 0 || usage.output_tokens > 0;
 
     // Context remaining percentage (always compute)
-    let context_window = app.effective_model_settings().context_window.unwrap_or(100_000);
+    let context_window = app
+        .effective_model_settings()
+        .context_window
+        .unwrap_or(100_000);
     let prompt_budget = context_window.saturating_sub(8_192);
     let used_pct = (usage.input_tokens as f64 / prompt_budget as f64) * 100.0;
     let remaining_pct = (100.0 - used_pct).max(0.0);
@@ -592,10 +595,7 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(" ".repeat(padding), Style::default()));
     }
     if has_tokens {
-        spans.push(Span::styled(
-            token_part,
-            Style::default().fg(COLOR_HINT),
-        ));
+        spans.push(Span::styled(token_part, Style::default().fg(COLOR_HINT)));
     }
     // Always show context remaining percentage
     let pct_color = if remaining_pct > 50.0 {
@@ -605,10 +605,7 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     } else {
         COLOR_ERROR // red — critical
     };
-    spans.push(Span::styled(
-        pct_str,
-        Style::default().fg(pct_color),
-    ));
+    spans.push(Span::styled(pct_str, Style::default().fg(pct_color)));
     spans.push(Span::styled("  ", Style::default()));
     // Only show key hints if there's room
     if available.saturating_sub(used + context_width) >= keys_width {

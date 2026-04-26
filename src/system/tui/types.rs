@@ -1234,10 +1234,7 @@ pub fn is_diff_body(body: &str) -> bool {
     // to distinguish a real unified diff from, e.g., a search-result table.
     let mut seen = 0;
     for line in body.lines().filter(|l| !l.trim().is_empty()).take(5) {
-        if line.starts_with("--- ")
-            || line.starts_with("+++ ")
-            || line.starts_with("@@ ")
-        {
+        if line.starts_with("--- ") || line.starts_with("+++ ") || line.starts_with("@@ ") {
             return true;
         }
         // Hunk content: a line that begins with exactly one + or - followed by

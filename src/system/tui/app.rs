@@ -1602,7 +1602,9 @@ impl InteractiveApp {
                     thread.status = super::super::domain::ThreadStatus::Idle;
                 }
                 // Accumulate token usage from the completed turn.
-                if let Ok(meta) = serde_json::from_value::<super::super::domain::TurnMetadata>(event.payload.clone()) {
+                if let Ok(meta) = serde_json::from_value::<super::super::domain::TurnMetadata>(
+                    event.payload.clone(),
+                ) {
                     self.token_usage.input_tokens += meta.token_usage.input_tokens;
                     self.token_usage.output_tokens += meta.token_usage.output_tokens;
                     self.token_usage.cached_tokens += meta.token_usage.cached_tokens;
