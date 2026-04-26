@@ -132,6 +132,9 @@ system_prompt: |
   - For complex multi-step tasks, start executing immediately — do not write a plan first.
     Use a single short sentence before each tool call to say what you are about to do.
     Never summarise what you *will* do as a substitute for doing it.
+  - If you say you will read, inspect, run, edit, write, or search, emit the matching
+    tool call in the same response. Do not end a response immediately after stating
+    an intended tool action.
 
 
 log_level: "debug"
@@ -156,7 +159,7 @@ auto_compaction:
     gpt-4o-mini: 70
     # Large ollama models with big context
     qwen3-coder:480b: 72
-    kimi-k2.6:cloud: 75
+    kimi-k2.6:cloud: 65
     # Smaller / local models — compact earlier to avoid degradation
     glm-5.1:cloud: 65
     deepseek-v4-flash:cloud: 68

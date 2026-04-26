@@ -681,7 +681,7 @@ impl InteractiveApp {
                 item_id: THINKING_PLACEHOLDER_ID.to_string(),
                 tool_call_id: None,
                 kind: EntryKind::Assistant,
-                title: "Codezilla".into(),
+                title: "Thinking…".into(),
                 body: String::new(),
                 timestamp: Some(ts),
                 pending: true,
@@ -1803,7 +1803,16 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
 
         let (raw_body, body_lines): (String, Vec<String>) =
             if entry.body.is_empty() && entry.pending {
-                (String::new(), vec!["…".to_string()])
+                // Build an animated working indicator that matches the visual render
+                let spinner = super::types::spinner_frame(0);
+                let working_text = match entry.kind {
+                    EntryKind::Assistant => "thinking",
+                    EntryKind::ToolCall => "calling tool",
+                    EntryKind::ToolResult => "waiting",
+                    EntryKind::Reasoning => "reasoning",
+                    _ => "working",
+                };
+                (String::new(), vec![format!("{spinner}  {working_text}…")])
             } else if use_markdown || use_read_file {
                 // Render now to get the correct line count for scroll arithmetic.
                 // The rendered Lines themselves are discarded; raw_body is kept so
@@ -1968,9 +1977,27 @@ fn append_cached_transcript_entry_lines(
     } else {
         for body_line in &entry.body_lines {
             if current_line >= start_line && current_line < end_line {
+                // Detect working-indicator lines and style them prominently
+                let is_working_indicator = entry.pending
+                    && body_line.contains("  ")
+                    && (body_line.contains("thinking")
+                        || body_line.contains("calling tool")
+                        || body_line.contains("waiting")
+                        || body_line.contains("reasoning")
+                        || body_line.contains("working"));
+                let body_span = if is_working_indicator {
+                    Span::styled(
+                        body_line.clone(),
+                        Style::default()
+                            .fg(COLOR_ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled(body_line.clone(), Style::default().fg(body_color))
+                };
                 out.push(Line::from(vec![
                     Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
-                    Span::styled(body_line.clone(), Style::default().fg(body_color)),
+                    body_span,
                 ]));
             }
             current_line += 1;

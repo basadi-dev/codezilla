@@ -72,6 +72,10 @@ impl TurnExecutor {
         // agentic tasks rarely need more than ~100 rounds.
         const MAX_AGENT_ITERATIONS: usize = 150;
         let mut agent_iterations: usize = 0;
+        const MAX_NO_TOOL_NUDGES: usize = 2;
+        let mut no_tool_nudges: usize = 0;
+        let mut no_tool_nudge_instruction: Option<String> = None;
+        let mut completed_tool_rounds: usize = 0;
 
         loop {
             agent_iterations += 1;
@@ -162,10 +166,14 @@ impl TurnExecutor {
                             .model_settings
                             .context_window,
                     });
+            let mut system_instructions = self
+                .system_instructions(&cwd, effective_model_settings.reasoning_effort.as_deref())
+                .await?;
+            if let Some(instruction) = no_tool_nudge_instruction.take() {
+                system_instructions.push(instruction);
+            }
             let request = super::model_gateway::ModelRequest {
-                system_instructions: self
-                    .system_instructions(&cwd, effective_model_settings.reasoning_effort.as_deref())
-                    .await?,
+                system_instructions,
                 model_settings: effective_model_settings,
                 conversation_items: items.clone(),
                 tool_definitions: tools,
@@ -327,10 +335,37 @@ impl TurnExecutor {
             }
 
             if tool_calls.is_empty() {
+                if no_tool_nudges < MAX_NO_TOOL_NUDGES
+                    && should_retry_no_tool_completion(
+                        &assistant_text,
+                        &items,
+                        completed_tool_rounds,
+                    )
+                {
+                    no_tool_nudges += 1;
+                    no_tool_nudge_instruction = Some(format!(
+                        "The previous assistant response described using a tool but emitted no \
+                         tool call, so no action ran. Do not continue narrating. If the task is \
+                         not complete, your next response must contain exactly one tool call and \
+                         only the minimal text needed before it. Retry {no_tool_nudges}/{MAX_NO_TOOL_NUDGES}."
+                    ));
+                    self.runtime
+                        .publish_event(
+                            RuntimeEventKind::Warning,
+                            Some(params.thread_id.clone()),
+                            Some(turn_id.clone()),
+                            json!({
+                                "message": "Model described an action but emitted no tool call — retrying with a tool-use nudge."
+                            }),
+                        )
+                        .await?;
+                    continue;
+                }
                 return self
                     .complete_turn(&params.thread_id, &turn_id, final_usage)
                     .await;
             }
+            no_tool_nudges = 0;
 
             let had_any_success = self
                 .execute_tool_round(
@@ -343,6 +378,7 @@ impl TurnExecutor {
                     &listing,
                 )
                 .await?;
+            completed_tool_rounds += 1;
 
             // ── Consecutive-failure guard ─────────────────────────────────────
             // Reset counter if any tool succeeded this round; bump it if every
@@ -1232,6 +1268,209 @@ pub(crate) fn promote_to_bash_if_needed(call: ToolCall) -> ToolCall {
         tool_call_id: call.tool_call_id,
         provider_kind: call.provider_kind,
         arguments: new_args,
+    }
+}
+
+fn should_retry_no_tool_completion(
+    assistant_text: &str,
+    items: &[ConversationItem],
+    completed_tool_rounds: usize,
+) -> bool {
+    if looks_like_unexecuted_tool_intent(assistant_text) {
+        return true;
+    }
+
+    // After at least one actual tool round, a no-tool model response is normally
+    // the final answer. Only the explicit intent check above should override it.
+    if completed_tool_rounds > 0 {
+        return false;
+    }
+
+    latest_user_text(items)
+        .map(is_agentic_user_request)
+        .unwrap_or(false)
+}
+
+fn latest_user_text(items: &[ConversationItem]) -> Option<&str> {
+    items
+        .iter()
+        .rev()
+        .find(|item| item.kind == ItemKind::UserMessage)
+        .and_then(|item| item.payload.get("text"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn is_agentic_user_request(text: &str) -> bool {
+    let normalized = normalize_for_detection(text);
+
+    if normalized.is_empty() {
+        return false;
+    }
+
+    const NON_AGENTIC_PATTERNS: &[&str] = &[
+        "how can i ",
+        "how do i ",
+        "what is ",
+        "what's ",
+        "why ",
+        "explain ",
+        "describe ",
+        "is the following correct",
+        "what would ",
+        "should i ",
+        "which approach",
+    ];
+    if NON_AGENTIC_PATTERNS
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+    {
+        return false;
+    }
+
+    const AGENTIC_PATTERNS: &[&str] = &[
+        "go ahead",
+        "implement",
+        "fix",
+        "change",
+        "update",
+        "modify",
+        "edit",
+        "patch",
+        "refactor",
+        "add ",
+        "remove ",
+        "delete ",
+        "create ",
+        "write ",
+        "run ",
+        "test ",
+        "debug",
+        "inspect",
+        "check the code",
+        "look at",
+        "open ",
+        "read ",
+        "commit",
+        "push",
+        "make it",
+    ];
+
+    AGENTIC_PATTERNS
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+}
+
+fn looks_like_unexecuted_tool_intent(text: &str) -> bool {
+    let normalized = normalize_for_detection(text);
+
+    if normalized.is_empty() {
+        return false;
+    }
+
+    const INTENT_PATTERNS: &[&str] = &[
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i'm going to ",
+        "i am going to ",
+        "i need to inspect",
+        "i need to read",
+        "i need to check",
+        "i need to run",
+        "i need to update",
+        "i need to modify",
+        "i need to edit",
+        "i need to open",
+        "i need to search",
+        "i'll start",
+        "let's inspect",
+        "let's read",
+        "let's check",
+        "let's run",
+        "let's update",
+        "let's modify",
+        "let's edit",
+        "let's open",
+        "let's search",
+    ];
+    const TOOL_WORDS: &[&str] = &[
+        "read", "inspect", "check", "run", "execute", "open", "search", "grep", "list", "write",
+        "edit", "update", "modify", "patch", "test", "build", "file", ".rs", ".ts", ".tsx", ".js",
+        ".json", ".toml", ".yaml", ".yml",
+    ];
+
+    let has_intent = INTENT_PATTERNS
+        .iter()
+        .any(|pattern| normalized.contains(pattern));
+    let has_tool_word = TOOL_WORDS.iter().any(|word| normalized.contains(word));
+
+    has_intent && has_tool_word
+}
+
+fn normalize_for_detection(text: &str) -> String {
+    let normalized = text
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['’', '‘'], "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user_item(text: &str) -> ConversationItem {
+        ConversationItem {
+            item_id: "item_test".into(),
+            thread_id: "thread_test".into(),
+            turn_id: "turn_test".into(),
+            created_at: 0,
+            kind: ItemKind::UserMessage,
+            payload: json!({ "text": text }),
+        }
+    }
+
+    #[test]
+    fn retries_agentic_user_request_with_no_tool_call() {
+        let items = vec![user_item("go ahead and implement the ideal solution")];
+
+        assert!(should_retry_no_tool_completion("", &items, 0));
+    }
+
+    #[test]
+    fn allows_non_agentic_question_to_finish_without_tools() {
+        let items = vec![user_item("what's the ideal and most suitable solution")];
+
+        assert!(!should_retry_no_tool_completion(
+            "Use a bounded executor retry.",
+            &items,
+            0
+        ));
+    }
+
+    #[test]
+    fn retries_explicit_tool_intent_even_after_tool_round() {
+        let items = vec![user_item("fix the failing build")];
+
+        assert!(should_retry_no_tool_completion(
+            "I'll run cargo check now.",
+            &items,
+            1
+        ));
+    }
+
+    #[test]
+    fn allows_final_answer_after_tool_round() {
+        let items = vec![user_item("fix the failing build")];
+
+        assert!(!should_retry_no_tool_completion(
+            "Implemented the fix and cargo check passes.",
+            &items,
+            1
+        ));
     }
 }
 

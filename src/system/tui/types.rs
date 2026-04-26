@@ -998,9 +998,23 @@ fn append_transcript_entry_lines(
 
     if entry.body.is_empty() && entry.pending {
         if current_line >= start_line && current_line < end_line {
+            // Show a clear animated "working" indicator in the transcript body
+            let spinner = spinner_frame(spinner_tick);
+            let working_text = match entry.kind {
+                EntryKind::Assistant => "thinking",
+                EntryKind::ToolCall => "calling tool",
+                EntryKind::ToolResult => "waiting",
+                EntryKind::Reasoning => "reasoning",
+                _ => "working",
+            };
             out.push(Line::from(vec![
                 Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
-                Span::styled("…".to_string(), Style::default().fg(COLOR_MUTED)),
+                Span::styled(
+                    format!("{spinner}  {working_text}…"),
+                    Style::default()
+                        .fg(COLOR_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
         current_line += 1;
