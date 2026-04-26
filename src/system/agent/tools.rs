@@ -866,10 +866,24 @@ impl ToolProvider for SearchToolProvider {
 
         if let Some(out) = rg_result.filter(|o| o.status.success() || o.status.code() == Some(1)) {
             let stdout = String::from_utf8_lossy(&out.stdout);
+            // rg -n --no-heading emits: "<file>:<lineno>:<content>"
+            // Parse into structured objects so callers get file/line/content
+            // as separate fields — avoids embedding line numbers in the match
+            // string which makes TUI copy/paste awkward.
             let matches: Vec<Value> = stdout
                 .lines()
                 .take(max_results)
-                .map(|line| json!(line))
+                .map(|raw| {
+                    // Split on the first two ':' separators
+                    let mut parts = raw.splitn(3, ':');
+                    match (parts.next(), parts.next(), parts.next()) {
+                        (Some(file), Some(lineno), Some(content)) => {
+                            let line_num: Option<u64> = lineno.parse().ok();
+                            json!({ "file": file, "line": line_num, "content": content })
+                        }
+                        _ => json!({ "file": "", "line": null, "content": raw }),
+                    }
+                })
                 .collect();
             return Ok(ToolResult {
                 tool_call_id: call.tool_call_id.clone(),
@@ -895,12 +909,11 @@ impl ToolProvider for SearchToolProvider {
             if let Ok(content) = std::fs::read_to_string(entry.path()) {
                 for (lineno, line) in content.lines().enumerate() {
                     if re.is_match(line) {
-                        matches.push(json!(format!(
-                            "{}:{}: {}",
-                            entry.path().display(),
-                            lineno + 1,
-                            line
-                        )));
+                        matches.push(json!({
+                            "file": entry.path().display().to_string(),
+                            "line": lineno + 1,
+                            "content": line,
+                        }));
                         if matches.len() >= max_results {
                             break 'walk;
                         }

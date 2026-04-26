@@ -1929,19 +1929,31 @@ fn format_grep_result(output: &Value) -> Option<String> {
     let hidden = matches.len().saturating_sub(shown);
 
     for m in &matches[..shown] {
-        let owned;
-        let line = if let Some(s) = m.as_str() {
-            s
+        let formatted = if let (Some(file), Some(content)) = (
+            m.get("file").and_then(Value::as_str),
+            m.get("content").and_then(Value::as_str),
+        ) {
+            // Structured match: { file, line, content }
+            let file = file.trim_start_matches("./");
+            let content = content.trim();
+            if let Some(line_num) = m.get("line").and_then(Value::as_u64) {
+                format!("{file}:{line_num}  {content}")
+            } else {
+                format!("{file}  {content}")
+            }
+        } else if let Some(s) = m.as_str() {
+            // Legacy flat string fallback
+            s.to_string()
         } else {
-            owned = m.to_string();
-            owned.as_str()
+            continue; // unknown shape — skip
         };
-        // Trim very long lines inline
-        let trimmed = if line.chars().count() > 120 {
-            let s: String = line.chars().take(120).collect();
+
+        // Trim very long lines
+        let trimmed = if formatted.chars().count() > 120 {
+            let s: String = formatted.chars().take(120).collect();
             format!("{s}…")
         } else {
-            line.to_string()
+            formatted
         };
         lines.push(trimmed);
     }
