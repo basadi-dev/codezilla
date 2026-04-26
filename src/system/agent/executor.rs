@@ -102,6 +102,12 @@ impl TurnExecutor {
         const MAX_EMPTY_RESPONSES: usize = 2;
         let mut consecutive_empty_responses: usize = 0;
 
+        // Guard 5 — cumulative nudge escalation: counts ALL nudges (intent,
+        // read-only, empty-response). If the model keeps needing correction
+        // it won't self-correct. Fail fast rather than burning tokens.
+        const MAX_TOTAL_NUDGES: usize = 4;
+        let mut total_nudges: usize = 0;
+
         loop {
             agent_iterations += 1;
             if agent_iterations > MAX_AGENT_ITERATIONS {
@@ -144,9 +150,24 @@ impl TurnExecutor {
 
             self.drain_steering(&params.thread_id, &turn_id).await?;
 
+            // Inject nudge as a conversation item at the recency boundary
+            // instead of burying it in the system prompt where attention
+            // degradation causes the model to ignore it.
+            if let Some(instruction) = no_tool_nudge_instruction.take() {
+                let nudge_item = ConversationItem {
+                    item_id: format!("nudge_{}", Uuid::new_v4().simple()),
+                    thread_id: params.thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    created_at: now_seconds(),
+                    kind: ItemKind::UserMessage,
+                    payload: json!({ "text": format!("[SYSTEM] {instruction}") }),
+                };
+                self.persist_turn_item(nudge_item).await?;
+            }
+
             let turn_ctx = TurnContext::build(self, &params, &turn_id, thread.clone()).await?;
 
-            let mut system_instructions = self
+            let system_instructions = self
                 .system_instructions(
                     &turn_ctx.cwd,
                     turn_ctx
@@ -155,9 +176,6 @@ impl TurnExecutor {
                         .as_deref(),
                 )
                 .await?;
-            if let Some(instruction) = no_tool_nudge_instruction.take() {
-                system_instructions.push(instruction);
-            }
             let tools = self
                 .runtime
                 .inner
@@ -311,16 +329,35 @@ impl TurnExecutor {
                     .await;
             }
 
+            // Pre-compute whether an intent nudge will fire so we can skip
+            // persisting the narration. Persisted narration poisons the context
+            // by reinforcing the model's plan-without-acting pattern.
+            let will_nudge_intent = tool_calls.is_empty()
+                && !assistant_text.is_empty()
+                && no_tool_nudges < MAX_NO_TOOL_NUDGES
+                && should_retry_no_tool_completion(
+                    &assistant_text,
+                    &turn_ctx.items,
+                    completed_tool_rounds,
+                );
+
             if let Some(item_id) = assistant_item_id {
-                let item = ConversationItem {
-                    item_id,
-                    thread_id: params.thread_id.clone(),
-                    turn_id: turn_id.clone(),
-                    created_at: now_seconds(),
-                    kind: ItemKind::AgentMessage,
-                    payload: json!({ "text": assistant_text }),
-                };
-                self.persist_turn_item(item).await?;
+                if !will_nudge_intent {
+                    let item = ConversationItem {
+                        item_id,
+                        thread_id: params.thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        created_at: now_seconds(),
+                        kind: ItemKind::AgentMessage,
+                        payload: json!({ "text": assistant_text }),
+                    };
+                    self.persist_turn_item(item).await?;
+                } else {
+                    tracing::debug!(
+                        turn_id = %turn_id,
+                        "executor: suppressing narration persistence — intent nudge will fire"
+                    );
+                }
             }
 
             // Persist reasoning/thinking text if the model produced any.
@@ -359,6 +396,7 @@ impl TurnExecutor {
                 // prompt; on the second consecutive blank, fail the turn.
                 if assistant_text.is_empty() {
                     consecutive_empty_responses += 1;
+                    total_nudges += 1;
                     tracing::warn!(
                         turn_id = %turn_id,
                         consecutive_empty_responses,
@@ -411,6 +449,25 @@ impl TurnExecutor {
                     )
                 {
                     no_tool_nudges += 1;
+                    total_nudges += 1;
+                    if total_nudges >= MAX_TOTAL_NUDGES {
+                        tracing::error!(
+                            turn_id = %turn_id,
+                            total_nudges,
+                            "executor: cumulative nudge limit reached — terminating turn"
+                        );
+                        return self
+                            .fail_turn(
+                                &params.thread_id,
+                                &turn_id,
+                                "nudge_limit",
+                                &format!(
+                                    "Agent required {total_nudges} corrections without making \
+                                     progress. The turn has been stopped."
+                                ),
+                            )
+                            .await;
+                    }
                     tracing::warn!(
                         turn_id = %turn_id,
                         no_tool_nudges,
@@ -460,16 +517,38 @@ impl TurnExecutor {
             // reset so a follow-up nudge fires again if the model ignores it.
             if round_is_read_only {
                 consecutive_read_only_rounds += 1;
+                // Effective threshold shrinks with each nudge: 8 → 4 → 2 → 1
+                let effective_read_only_limit =
+                    (MAX_CONSECUTIVE_READ_ONLY_ROUNDS >> total_nudges).max(1);
                 tracing::debug!(
                     turn_id = %turn_id,
                     consecutive_read_only_rounds,
-                    MAX_CONSECUTIVE_READ_ONLY_ROUNDS,
-                    "executor: read-only round ({consecutive_read_only_rounds}/{MAX_CONSECUTIVE_READ_ONLY_ROUNDS})"
+                    effective_read_only_limit,
+                    "executor: read-only round ({consecutive_read_only_rounds}/{effective_read_only_limit})"
                 );
-                if consecutive_read_only_rounds >= MAX_CONSECUTIVE_READ_ONLY_ROUNDS {
+                if consecutive_read_only_rounds >= effective_read_only_limit {
                     consecutive_read_only_rounds = 0;
+                    total_nudges += 1;
+                    if total_nudges >= MAX_TOTAL_NUDGES {
+                        tracing::error!(
+                            turn_id = %turn_id,
+                            total_nudges,
+                            "executor: cumulative nudge limit reached — terminating turn"
+                        );
+                        return self
+                            .fail_turn(
+                                &params.thread_id,
+                                &turn_id,
+                                "nudge_limit",
+                                &format!(
+                                    "Agent required {total_nudges} corrections without making \
+                                     progress. The turn has been stopped."
+                                ),
+                            )
+                            .await;
+                    }
                     let msg = format!(
-                        "You have spent {MAX_CONSECUTIVE_READ_ONLY_ROUNDS} consecutive rounds \
+                        "You have spent {effective_read_only_limit} consecutive rounds \
                          reading files or exploring without taking any action. If you have \
                          gathered enough context, you must now either write a file, run a \
                          command, or give a final answer. Do not read more files unless \
@@ -486,7 +565,7 @@ impl TurnExecutor {
                             Some(turn_id.clone()),
                             json!({
                                 "message": format!(
-                                    "Agent has been exploring for {MAX_CONSECUTIVE_READ_ONLY_ROUNDS} rounds \
+                                    "Agent has been exploring for {effective_read_only_limit} rounds \
                                      — nudging it to take an action."
                                 )
                             }),
