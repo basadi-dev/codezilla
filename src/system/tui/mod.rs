@@ -161,6 +161,17 @@ pub async fn run_interactive_tui(
                     dirty = true;
                 }
                 Event::Mouse(mouse) if mouse_capture_active => {
+                    // Helper: is the mouse inside the composer area?
+                    let in_composer = {
+                        let a = app.composer_area;
+                        a.width > 0
+                            && a.height > 0
+                            && mouse.column >= a.x
+                            && mouse.row >= a.y
+                            && mouse.column < a.x + a.width
+                            && mouse.row < a.y + a.height
+                    };
+
                     match mouse.kind {
                         // ── Wheel scroll ─────────────────────────────────────
                         MouseEventKind::ScrollUp => {
@@ -173,15 +184,27 @@ pub async fn run_interactive_tui(
                         }
                         // ── Drag-to-select (left button) ─────────────────────
                         MouseEventKind::Down(MouseButton::Left) => {
-                            app.begin_transcript_drag(mouse.column, mouse.row);
+                            if in_composer {
+                                app.begin_composer_drag(mouse.column, mouse.row);
+                            } else {
+                                app.begin_transcript_drag(mouse.column, mouse.row);
+                            }
                             dirty = true;
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
-                            app.update_transcript_drag(mouse.column, mouse.row);
+                            if app.composer_drag_start.is_some() {
+                                app.update_composer_drag(mouse.column, mouse.row);
+                            } else {
+                                app.update_transcript_drag(mouse.column, mouse.row);
+                            }
                             dirty = true;
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
-                            app.finish_transcript_drag(mouse.column, mouse.row);
+                            if app.composer_drag_start.is_some() {
+                                app.finish_composer_drag(mouse.column, mouse.row);
+                            } else {
+                                app.finish_transcript_drag(mouse.column, mouse.row);
+                            }
                             dirty = true;
                         }
                         _ => {}

@@ -13,6 +13,11 @@ use crate::system::domain::{ConversationItem, ItemKind, ThreadMetadata};
 
 // ─── Colour palette ── (Claude Code / Codex CLI inspired) ────────────────────
 
+/// Diff added-line background (subtle green tint)
+pub const BG_DIFF_ADD: Color = Color::Rgb(20, 60, 30);
+/// Diff removed-line background (subtle red tint)
+pub const BG_DIFF_REMOVE: Color = Color::Rgb(60, 20, 20);
+
 /// Background of focused input border / streaming accent
 pub const COLOR_ACCENT: Color = Color::Rgb(100, 200, 163); // soft mint-green
 /// Dimmed muted text, timestamps, hints
@@ -297,6 +302,27 @@ impl ComposerState {
         }
     }
 
+    /// Return the character index of the start of the line containing `pos`.
+    pub fn line_start(&self, pos: usize) -> usize {
+        let pos = pos.min(self.chars.len());
+        let mut i = pos;
+        while i > 0 && self.chars[i - 1] != '\n' {
+            i -= 1;
+        }
+        i
+    }
+
+    /// Return the character index just past the end of the line containing `pos`
+    /// (excludes the trailing newline, if any).
+    pub fn line_end(&self, pos: usize) -> usize {
+        let pos = pos.min(self.chars.len());
+        let mut i = pos;
+        while i < self.chars.len() && self.chars[i] != '\n' {
+            i += 1;
+        }
+        i
+    }
+
     pub fn delete_to_line_start(&mut self) {
         let start = self.current_line_start();
         if start >= self.cursor {
@@ -443,6 +469,51 @@ impl ComposerState {
             absolute_offset += line_len;
             if index + 1 < logical_lines.len() {
                 absolute_offset += 1;
+            }
+        }
+        self.chars.len()
+    }
+
+    /// Convert a visual (row, col) position back to a character index in
+    /// `self.chars`. This is the inverse of `visual_cursor_row_col` and is
+    /// used for mouse hit-testing in the composer.
+    pub fn index_for_visual_position(
+        &self,
+        target_row: usize,
+        desired_col: usize,
+        first_width: usize,
+        continuation_width: usize,
+    ) -> usize {
+        let widths = normalized_composer_widths(first_width, continuation_width);
+        let text = self.text();
+        let logical_lines: Vec<&str> = if text.is_empty() {
+            vec![""]
+        } else {
+            text.split('\n').collect()
+        };
+
+        let mut visual_row = 0usize;
+        let mut absolute_offset = 0usize;
+
+        for (index, line) in logical_lines.iter().enumerate() {
+            let line_len = line.chars().count();
+            let rows = wrapped_rows_for_line(line_len, index == 0, widths);
+            if target_row < visual_row + rows {
+                let local_row = target_row - visual_row;
+                let line_col = line_col_for_wrapped_position(
+                    line_len,
+                    local_row,
+                    desired_col,
+                    index == 0,
+                    widths,
+                );
+                return absolute_offset + line_col.min(line_len);
+            }
+
+            visual_row += rows;
+            absolute_offset += line_len;
+            if index + 1 < logical_lines.len() {
+                absolute_offset += 1; // the '\n'
             }
         }
 
@@ -1289,10 +1360,26 @@ fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
         )];
     }
 
+    // Helper: apply a background colour to every span in a list.
+    fn with_bg(spans: Vec<Span<'static>>, bg: Color) -> Vec<Span<'static>> {
+        spans
+            .into_iter()
+            .map(|s| Span::styled(s.content, s.style.bg(bg)))
+            .collect()
+    }
+
     if lang.is_empty() {
+        let color = diff_line_color(chunk);
+        let bg = if chunk.starts_with('+') && !chunk.starts_with("++") {
+            BG_DIFF_ADD
+        } else if chunk.starts_with('-') && !chunk.starts_with("--") {
+            BG_DIFF_REMOVE
+        } else {
+            Color::Reset
+        };
         return vec![Span::styled(
             chunk.to_string(),
-            Style::default().fg(diff_line_color(chunk)),
+            Style::default().fg(color).bg(bg),
         )];
     }
 
@@ -1300,9 +1387,9 @@ fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
         if !chunk.starts_with("++") {
             let mut spans = vec![Span::styled(
                 "+".to_string(),
-                Style::default().fg(Color::Rgb(100, 220, 120)),
+                Style::default().fg(Color::Rgb(100, 220, 120)).bg(BG_DIFF_ADD),
             )];
-            spans.extend(highlight_code_line(rest, lang));
+            spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_ADD));
             return spans;
         }
     }
@@ -1311,9 +1398,9 @@ fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
         if !chunk.starts_with("--") {
             let mut spans = vec![Span::styled(
                 "-".to_string(),
-                Style::default().fg(Color::Rgb(255, 100, 100)),
+                Style::default().fg(Color::Rgb(255, 100, 100)).bg(BG_DIFF_REMOVE),
             )];
-            spans.extend(highlight_code_line(rest, lang));
+            spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_REMOVE));
             return spans;
         }
     }

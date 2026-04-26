@@ -92,6 +92,28 @@ pub struct InteractiveApp {
     pub drag_start: Option<SelectionPoint>,
     /// Fixed transcript position of the current/final drag point.
     pub drag_end: Option<SelectionPoint>,
+    /// When true, the transcript selection is "locked" (e.g. from a double-click)
+    /// and should not be updated by drag/mouse-up events.
+    pub transcript_selection_locked: bool,
+    /// Timestamp (Instant) of the last mouse-down in the transcript, for double-click detection.
+    pub transcript_last_click: Option<std::time::Instant>,
+    /// Column of the last mouse-down in the transcript, for double-click detection.
+    pub transcript_last_click_col: u16,
+    /// Row of the last mouse-down in the transcript, for double-click detection.
+    pub transcript_last_click_row: u16,
+    /// Composer drag selection: character index where the drag started.
+    pub composer_drag_start: Option<usize>,
+    /// Composer drag selection: character index where the drag currently ends.
+    pub composer_drag_end: Option<usize>,
+    /// When true, the composer selection is "locked" (e.g. from a double-click)
+    /// and should not be updated by drag/mouse-up events.
+    pub composer_selection_locked: bool,
+    /// Timestamp (Instant) of the last mouse-down in the composer, for double-click detection.
+    pub composer_last_click: Option<std::time::Instant>,
+    /// Column of the last mouse-down in the composer, for double-click detection.
+    pub composer_last_click_col: u16,
+    /// Row of the last mouse-down in the composer, for double-click detection.
+    pub composer_last_click_row: u16,
     /// Transcript area rect — written by the renderer each frame.
     pub transcript_area: Rect,
     /// Composer input area rect — written by the renderer each frame.
@@ -144,6 +166,16 @@ impl InteractiveApp {
             mouse_capture_enabled: true,
             drag_start: None,
             drag_end: None,
+            transcript_selection_locked: false,
+            transcript_last_click: None,
+            transcript_last_click_col: 0,
+            transcript_last_click_row: 0,
+            composer_drag_start: None,
+            composer_drag_end: None,
+            composer_selection_locked: false,
+            composer_last_click: None,
+            composer_last_click_col: 0,
+            composer_last_click_row: 0,
             transcript_area: Rect::default(),
             composer_area: Rect::default(),
             transcript_render_cache: TranscriptRenderCache {
@@ -352,17 +384,54 @@ impl InteractiveApp {
     // ── Drag-to-select helpers ────────────────────────────────────────────────
 
     pub fn begin_transcript_drag(&mut self, col: u16, row: u16) {
-        let Some(point) = self.mouse_to_selection_point(col, row, false) else {
-            self.clear_selection();
-            return;
-        };
-        self.drag_start = Some(point);
-        self.drag_end = Some(point);
-        self.auto_scroll = false;
+        // Clear any composer selection when starting a transcript drag
+        self.clear_composer_selection();
+        // Also reset composer double-click tracking to avoid false double-clicks
+        // when switching between panes.
+        self.composer_last_click = None;
+
+        let now = std::time::Instant::now();
+        let is_double_click = self.transcript_last_click.map_or(false, |t| {
+            now.duration_since(t).as_millis() < 400
+                && col == self.transcript_last_click_col
+                && row == self.transcript_last_click_row
+        });
+
+        if is_double_click {
+            // Double-click: select the entire line under the cursor
+            let Some(point) = self.mouse_to_selection_point(col, row, false) else {
+                self.clear_selection();
+                return;
+            };
+            self.drag_start = Some(SelectionPoint {
+                line: point.line,
+                col: 0,
+            });
+            self.drag_end = Some(SelectionPoint {
+                line: point.line,
+                col: usize::MAX / 2,
+            });
+            self.transcript_selection_locked = true;
+            self.auto_scroll = false;
+            // Reset so triple-click doesn't extend
+            self.transcript_last_click = None;
+        } else {
+            let Some(point) = self.mouse_to_selection_point(col, row, false) else {
+                self.clear_selection();
+                return;
+            };
+            self.drag_start = Some(point);
+            self.drag_end = Some(point);
+            self.transcript_selection_locked = false;
+            self.auto_scroll = false;
+            self.transcript_last_click = Some(now);
+            self.transcript_last_click_col = col;
+            self.transcript_last_click_row = row;
+        }
     }
 
     pub fn update_transcript_drag(&mut self, col: u16, row: u16) {
-        if self.drag_start.is_none() {
+        if self.drag_start.is_none() || self.transcript_selection_locked {
             return;
         }
         if let Some(point) = self.mouse_to_selection_point(col, row, true) {
@@ -371,7 +440,9 @@ impl InteractiveApp {
     }
 
     pub fn finish_transcript_drag(&mut self, col: u16, row: u16) {
-        self.update_transcript_drag(col, row);
+        if !self.transcript_selection_locked {
+            self.update_transcript_drag(col, row);
+        }
         let moved = self.drag_start != self.drag_end;
         if moved {
             self.copy_selection_to_clipboard();
@@ -429,8 +500,182 @@ impl InteractiveApp {
     pub fn clear_selection(&mut self) {
         self.drag_start = None;
         self.drag_end = None;
+        self.transcript_selection_locked = false;
+        // Don't reset transcript_last_click here — it's needed for double-click detection.
+        // It will be reset naturally when a new drag begins or on the next click.
     }
 
+    /// Clear the composer drag selection.
+    pub fn clear_composer_selection(&mut self) {
+        self.composer_drag_start = None;
+        self.composer_drag_end = None;
+        self.composer_selection_locked = false;
+        // Don't reset composer_last_click here — it's needed for double-click detection.
+    }
+
+    // ── Composer drag-to-select ──────────────────────────────────────────────
+
+    /// Convert a mouse (col, row) inside the composer area to a character index
+    /// in `composer.chars`. Returns `None` if the point is outside the composer.
+    fn mouse_to_composer_index(&self, col: u16, row: u16) -> Option<usize> {
+        let area = self.composer_area;
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        // The composer input area starts after a 1-row separator and 1-row
+        // top margin (see render_composer). The actual text starts at
+        // `comp_layout[2]` which is stored in `self.composer_area`.
+        if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height {
+            return None;
+        }
+
+        let prefix: usize = 5; // "  ❯  " or "     "
+        let text_width = area.width.saturating_sub(prefix as u16) as usize;
+        let text_width = text_width.max(1);
+
+        let local_row = (row - area.y) as usize;
+        let local_col = (col - area.x) as usize;
+
+        // Account for composer scroll
+        let composer_scroll = self.composer_scroll_offset(text_width);
+
+        let visual_row = local_row + composer_scroll;
+        let visual_col = local_col.saturating_sub(prefix).min(text_width.saturating_sub(1));
+
+        // Convert visual (row, col) back to a char index in composer.chars
+        Some(self.composer.index_for_visual_position(visual_row, visual_col, text_width, text_width))
+    }
+
+    /// Compute the composer scroll offset (how many visual rows are scrolled out of view).
+    fn composer_scroll_offset(&self, text_width: usize) -> usize {
+        let (row, _col) = self.composer.visual_cursor_row_col(text_width, text_width);
+        let visible_rows = self.composer_area.height as usize;
+        if row >= visible_rows {
+            row + 1 - visible_rows
+        } else {
+            0
+        }
+    }
+
+    /// Begin a drag-to-select in the composer.
+    /// Detects double-click (click within 400ms at the same position) and
+    /// selects the entire line under the cursor.
+    pub fn begin_composer_drag(&mut self, col: u16, row: u16) {
+        // Clear any transcript selection when starting a composer drag
+        self.clear_selection();
+        // Also reset transcript double-click tracking to avoid false double-clicks
+        // when switching between panes.
+        self.transcript_last_click = None;
+        if let Some(idx) = self.mouse_to_composer_index(col, row) {
+            let now = std::time::Instant::now();
+            let is_double_click = self.composer_last_click.map_or(false, |t| {
+                now.duration_since(t).as_millis() < 400
+                    && col == self.composer_last_click_col
+                    && row == self.composer_last_click_row
+            });
+
+            if is_double_click {
+                // Select the entire line containing the click position
+                let lo = self.composer.line_start(idx);
+                let hi = self.composer.line_end(idx);
+                self.composer_drag_start = Some(lo);
+                self.composer_drag_end = Some(hi);
+                self.composer_selection_locked = true;
+                self.composer.cursor = hi;
+                // Reset click tracking so triple-click doesn't extend further
+                self.composer_last_click = None;
+            } else {
+                self.composer_drag_start = Some(idx);
+                self.composer_drag_end = Some(idx);
+                self.composer_selection_locked = false;
+                self.composer_last_click = Some(now);
+                self.composer_last_click_col = col;
+                self.composer_last_click_row = row;
+            }
+            self.focus = FocusPane::Composer;
+        }
+    }
+
+    /// Update a drag-to-select in the composer.
+    pub fn update_composer_drag(&mut self, col: u16, row: u16) {
+        if self.composer_drag_start.is_none() || self.composer_selection_locked {
+            return;
+        }
+        if let Some(idx) = self.mouse_to_composer_index(col, row) {
+            self.composer_drag_end = Some(idx);
+        }
+    }
+
+    /// Finish a drag-to-select in the composer. If the selection is non-empty,
+    /// copy it to the clipboard.
+    pub fn finish_composer_drag(&mut self, col: u16, row: u16) {
+        if !self.composer_selection_locked {
+            self.update_composer_drag(col, row);
+        }
+        let start = self.composer_drag_start;
+        let end = self.composer_drag_end;
+        if let (Some(s), Some(e)) = (start, end) {
+            if s != e {
+                let (lo, hi) = if s < e { (s, e) } else { (e, s) };
+                let text: String = self.composer.chars[lo..hi].iter().collect();
+                let char_count = text.chars().count();
+                match arboard::Clipboard::new() {
+                    Ok(mut cb) => match cb.set_text(&text) {
+                        Ok(_) => {
+                            self.status_message = format!("✓ Copied {char_count} chars");
+                            self.error_message = None;
+                        }
+                        Err(e) => {
+                            self.error_message = Some(format!("Clipboard write failed: {e}"));
+                        }
+                    },
+                    Err(e) => {
+                        self.error_message = Some(format!("Clipboard unavailable: {e}"));
+                    }
+                }
+                // Keep the selection visible (consistent with transcript drag-to-select).
+                // It will be cleared by: next drag, key press, or Ctrl+C.
+            } else {
+                // Single click (no drag) — move cursor to click position, clear selection
+                self.composer.cursor = e;
+                self.composer_drag_start = None;
+                self.composer_drag_end = None;
+            }
+        }
+    }
+
+    /// Return the selected range (lo, hi) as char indices, if any.
+    pub fn composer_selection_range(&self) -> Option<(usize, usize)> {
+        let s = self.composer_drag_start?;
+        let e = self.composer_drag_end?;
+        if s == e {
+            return None;
+        }
+        Some(if s < e { (s, e) } else { (e, s) })
+    }
+
+    /// Copy the selected composer text to the system clipboard.
+    pub fn copy_composer_selection_to_clipboard(&mut self) {
+        let Some((lo, hi)) = self.composer_selection_range() else {
+            return;
+        };
+        let text: String = self.composer.chars[lo..hi].iter().collect();
+        let char_count = text.chars().count();
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => match cb.set_text(&text) {
+                Ok(_) => {
+                    self.status_message = format!("✓ Copied {char_count} chars");
+                    self.error_message = None;
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Clipboard write failed: {e}"));
+                }
+            },
+            Err(e) => {
+                self.error_message = Some(format!("Clipboard unavailable: {e}"));
+            }
+        }
+    }
     pub fn scroll_transcript(&mut self, delta: i32) {
         if delta < 0 {
             // Scrolling up — detach from the bottom.

@@ -351,6 +351,13 @@ fn render_composer(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
         text_str.lines().collect()
     };
 
+    // Selection range in char indices, if any
+    let sel_range = app.composer_selection_range();
+
+    // Track absolute char offset as we walk through logical lines,
+    // so we can map selection ranges onto visual chunks.
+    let mut char_offset = 0usize;
+
     let mut rendered_lines: Vec<Line<'static>> = Vec::new();
     for (i, raw_line) in raw_lines.iter().enumerate() {
         // Determine prompt glyph for the very first chunk only.
@@ -386,17 +393,85 @@ fn render_composer(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
         }
 
         for (chunk_index, chunk) in chunks.into_iter().enumerate() {
-            if i == 0 && chunk_index == 0 {
-                rendered_lines.push(Line::from(vec![
-                    Span::styled(first_glyph.clone(), glyph_style),
-                    Span::raw(chunk),
-                ]));
+            let chunk_char_count = chunk.chars().count();
+            let abs_start = char_offset;
+            let abs_end = char_offset + chunk_char_count;
+
+            // Determine if this chunk's text is fully or partially selected
+            let (prefix_spans, text_spans) = if let Some((sel_lo, sel_hi)) = sel_range {
+                let rel_lo = sel_lo.saturating_sub(abs_start);
+                let rel_hi = sel_hi.min(abs_end).saturating_sub(abs_start);
+                let chunk_chars: Vec<char> = chunk.chars().collect();
+                let chunk_len = chunk_chars.len();
+
+                if rel_hi == 0 || rel_lo >= chunk_len {
+                    // No selection in this chunk
+                    let prefix = if i == 0 && chunk_index == 0 {
+                        vec![Span::styled(first_glyph.clone(), glyph_style)]
+                    } else {
+                        vec![Span::styled(cont_prefix.clone(), Style::default())]
+                    };
+                    (prefix, vec![Span::raw(chunk)])
+                } else if rel_lo == 0 && rel_hi >= chunk_len {
+                    // Entire chunk is selected — also highlight the prefix
+                    let sel_style = Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Rgb(100, 160, 220));
+                    let prefix = if i == 0 && chunk_index == 0 {
+                        vec![Span::styled(first_glyph.clone(), sel_style)]
+                    } else {
+                        vec![Span::styled(cont_prefix.clone(), sel_style)]
+                    };
+                    let text: String = chunk_chars.iter().collect();
+                    (prefix, vec![Span::styled(text, sel_style)])
+                } else {
+                    // Partial selection
+                    let lo = rel_lo.min(chunk_len);
+                    let hi = rel_hi.min(chunk_len);
+                    let prefix = if i == 0 && chunk_index == 0 {
+                        vec![Span::styled(first_glyph.clone(), glyph_style)]
+                    } else {
+                        vec![Span::styled(cont_prefix.clone(), Style::default())]
+                    };
+                    let mut spans = Vec::new();
+                    if lo > 0 {
+                        let before: String = chunk_chars[..lo].iter().collect();
+                        spans.push(Span::raw(before));
+                    }
+                    let sel_text: String = chunk_chars[lo..hi].iter().collect();
+                    spans.push(Span::styled(
+                        sel_text,
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Rgb(100, 160, 220)),
+                    ));
+                    if hi < chunk_len {
+                        let after: String = chunk_chars[hi..].iter().collect();
+                        spans.push(Span::raw(after));
+                    }
+                    (prefix, spans)
+                }
             } else {
-                rendered_lines.push(Line::from(vec![
-                    Span::styled(cont_prefix.clone(), Style::default()),
-                    Span::raw(chunk),
-                ]));
-            }
+                let prefix = if i == 0 && chunk_index == 0 {
+                    vec![Span::styled(first_glyph.clone(), glyph_style)]
+                } else {
+                    vec![Span::styled(cont_prefix.clone(), Style::default())]
+                };
+                (prefix, vec![Span::raw(chunk)])
+            };
+
+            rendered_lines.push(Line::from(
+                prefix_spans
+                    .into_iter()
+                    .chain(text_spans.into_iter())
+                    .collect::<Vec<_>>(),
+            ));
+            char_offset = abs_end;
+        }
+
+        // Account for the '\n' between logical lines (except the last)
+        if i + 1 < raw_lines.len() {
+            char_offset += 1; // the newline char
         }
     }
 

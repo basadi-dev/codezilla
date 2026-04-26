@@ -77,6 +77,9 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
             if app.drag_start.is_some() {
                 app.copy_selection_to_clipboard();
                 app.clear_selection();
+            } else if app.composer_drag_start.is_some() {
+                app.copy_composer_selection_to_clipboard();
+                app.clear_composer_selection();
             } else if app.focus == FocusPane::Composer && !app.composer.is_empty() {
                 app.composer_clear_requested = true;
                 app.status_message = "Press Ctrl+C again to clear composer".into();
@@ -201,6 +204,9 @@ fn handle_transcript_key(app: &mut InteractiveApp, key: KeyEvent) {
 }
 
 async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
+    // Any key press in the composer clears an active drag selection.
+    app.clear_composer_selection();
+
     match (key.code, key.modifiers) {
         (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
             app.jump_transcript_to_bottom();
