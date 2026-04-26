@@ -33,7 +33,7 @@ use super::types::{
 /// Sentinel item-id for the "thinking" placeholder injected immediately after
 /// the user submits a message.  Removed when the first real agent content arrives.
 const THINKING_PLACEHOLDER_ID: &str = "__codezilla_thinking__";
-
+const USER_PENDING_PLACEHOLDER_ID: &str = "__codezilla_user_pending__";
 #[derive(Debug, Clone)]
 struct CachedTranscriptEntry {
     kind: EntryKind,
@@ -919,9 +919,10 @@ impl InteractiveApp {
         self.error_message = None;
 
         // ── Immediate visual feedback ─────────────────────────────────────────
-        // Push a pending "thinking" placeholder into the transcript right now so
-        // the user sees something happening in the chat area before the runtime
-        // fires TurnStarted / ItemStarted.
+        // Push the user's message into the transcript right away so "You" is
+        // never blank.  Uses a well-known placeholder ID so that when the
+        // runtime fires ItemCompleted for the real user message, we can replace
+        // this placeholder with the persisted entry (avoiding duplicates).
         {
             use std::time::{SystemTime, UNIX_EPOCH};
             let ts = SystemTime::now()
@@ -929,11 +930,11 @@ impl InteractiveApp {
                 .unwrap_or_default()
                 .as_secs() as i64;
             self.upsert_transcript_entry(TranscriptEntry {
-                item_id: THINKING_PLACEHOLDER_ID.to_string(),
+                item_id: USER_PENDING_PLACEHOLDER_ID.to_string(),
                 tool_call_id: None,
-                kind: EntryKind::Assistant,
-                title: "Thinking…".into(),
-                body: String::new(),
+                kind: EntryKind::User,
+                title: "You".into(),
+                body: raw.clone(),
                 timestamp: Some(ts),
                 pending: true,
             });
@@ -1667,11 +1668,13 @@ impl InteractiveApp {
             .unwrap_or("AGENT_MESSAGE");
 
         let entry_kind = match kind {
+            "USER_MESSAGE" => EntryKind::User,
             "AGENT_MESSAGE" => EntryKind::Assistant,
             "REASONING_TEXT" | "REASONING_SUMMARY" => EntryKind::Reasoning,
             _ => EntryKind::Status,
         };
         let title = match entry_kind {
+            EntryKind::User => "You",
             EntryKind::Assistant => "Codezilla",
             EntryKind::Reasoning => "Reasoning",
             _ => "Runtime",
@@ -1680,15 +1683,19 @@ impl InteractiveApp {
         if entry_kind == EntryKind::Assistant {
             self.remove_thinking_placeholder();
         }
-        self.upsert_transcript_entry(TranscriptEntry {
-            item_id: item_id.to_string(),
-            tool_call_id: None,
-            kind: entry_kind,
-            title: title.into(),
-            body: String::new(),
-            timestamp: Some(event.emitted_at / 1000),
-            pending: true,
-        });
+        // Skip creating a duplicate entry for USER_MESSAGE — it's already
+        // pushed eagerly in submit_composer with the actual body text.
+        if entry_kind != EntryKind::User {
+            self.upsert_transcript_entry(TranscriptEntry {
+                item_id: item_id.to_string(),
+                tool_call_id: None,
+                kind: entry_kind,
+                title: title.into(),
+                body: String::new(),
+                timestamp: Some(event.emitted_at / 1000),
+                pending: true,
+            });
+        }
 
         // ── Contextual status + live activity messages ─────────────────────
         // `live_activity` drives the header; `status_message` drives the status bar.
@@ -1833,6 +1840,11 @@ impl InteractiveApp {
         } else if matches!(item.kind, ItemKind::AgentMessage) {
             self.upsert_transcript_entry(entry_from_item(&item));
             self.live_activity = None;
+        } else if matches!(item.kind, ItemKind::UserMessage) {
+            // Replace the eager placeholder from submit_composer with the
+            // real persisted entry (correct item_id, non-pending).
+            self.remove_user_pending_placeholder();
+            self.upsert_transcript_entry(entry_from_item(&item));
         } else {
             self.upsert_transcript_entry(entry_from_item(&item));
         }
@@ -1874,6 +1886,20 @@ impl InteractiveApp {
     /// Remove the "thinking" placeholder from the transcript if it is still present.
     fn remove_thinking_placeholder(&mut self) {
         if let Some(index) = self.transcript_index.get(THINKING_PLACEHOLDER_ID).copied() {
+            self.transcript.remove(index);
+            self.rebuild_transcript_index();
+        }
+    }
+
+    /// Remove the eager "You" placeholder injected by submit_composer.
+    /// Called when the real UserMessage ItemCompleted event arrives so the
+    /// placeholder is replaced by the persisted entry (avoiding duplicates).
+    fn remove_user_pending_placeholder(&mut self) {
+        if let Some(index) = self
+            .transcript_index
+            .get(USER_PENDING_PLACEHOLDER_ID)
+            .copied()
+        {
             self.transcript.remove(index);
             self.rebuild_transcript_index();
         }
@@ -2267,7 +2293,7 @@ fn append_cached_transcript_entry_lines(
     // ── Body ─────────────────────────────────────────────────────────────────
     let use_markdown = matches!(
         entry.kind,
-        EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
+        EntryKind::User | EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
     );
     let use_read_file = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
         && is_read_file_body(&entry.raw_body);
