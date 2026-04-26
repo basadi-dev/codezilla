@@ -101,7 +101,10 @@ impl TurnExecutor {
                     .iter()
                     .find(|t| t.metadata.turn_id == turn_id)
                     .ok_or_else(|| anyhow!("turn_not_found: {turn_id}"))?;
-                let mut items = Vec::new();
+                // Prefix items come first (e.g. ReasoningSummary from auto-compaction
+                // which is stored under the synthetic "compaction" turn_id and therefore
+                // not assigned to any real turn during session reload).
+                let mut items = thread.prefix_items.clone();
                 for lt in &thread.turns {
                     items.extend(lt.items.clone());
                 }

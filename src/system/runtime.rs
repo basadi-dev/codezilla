@@ -224,6 +224,10 @@ pub(crate) struct ThreadSession {
     pub(crate) pending_steering: Vec<UserInput>,
     /// Live approval-policy override; updated by the TUI without restarting the turn.
     pub(crate) approval_policy_override: Option<ApprovalPolicy>,
+    /// Items that don't belong to any real turn (e.g. ReasoningSummary produced by
+    /// compact_thread with a synthetic turn_id like "compaction"). These are prepended
+    /// to the context on every turn so the model always sees the compaction summary.
+    pub(crate) prefix_items: Vec<ConversationItem>,
 }
 
 // ─── RuntimeInner ─────────────────────────────────────────────────────────────
@@ -380,6 +384,7 @@ impl ConversationRuntime {
             owner_connection_id: None,
             pending_steering: Vec::new(),
             approval_policy_override: None,
+            prefix_items: Vec::new(),
         }));
         self.inner
             .loaded_threads
@@ -907,9 +912,15 @@ impl ConversationRuntime {
             })
             .collect();
 
+        // Items whose turn_id does not match any real turn (e.g. the ReasoningSummary
+        // written by compact_thread with turn_id "compaction") are collected into
+        // prefix_items so the executor can prepend them to the model context.
+        let mut prefix_items: Vec<ConversationItem> = Vec::new();
         for item in &persisted.items {
             if let Some(turn) = turns_map.get_mut(&item.turn_id) {
                 turn.items.push(item.clone());
+            } else {
+                prefix_items.push(item.clone());
             }
         }
 
@@ -921,6 +932,7 @@ impl ConversationRuntime {
             owner_connection_id: None,
             pending_steering: Vec::new(),
             approval_policy_override: None,
+            prefix_items,
         }));
         self.inner
             .loaded_threads
