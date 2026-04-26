@@ -4,9 +4,9 @@
 
 # Model selection
 model_settings:
-  model_id: "kimi-k2.6:cloud"
+  model_id: "glm-5.1:cloud"
   provider_id: "ollama"
-  context_window: 256000
+  context_window: 198000
   # reasoning_effort: "medium"   # low | medium | high  (Anthropic / OpenAI o-series only)
 
 # Model presets shown in the /model autocomplete list.

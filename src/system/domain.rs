@@ -189,8 +189,8 @@ pub struct ModelSettings {
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
-            model_id: "gpt-4.1-mini".into(),
-            provider_id: "openai".into(),
+            model_id: "glm-5.1:cloud".into(),
+            provider_id: "ollama".into(),
             reasoning_effort: None,
             summary_mode: None,
             service_tier: None,
