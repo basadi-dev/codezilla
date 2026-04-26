@@ -178,6 +178,12 @@ impl TurnExecutor {
             // handle context-overflow recovery outside the inner loop.
             let mut pending_fail: Option<String> = None;
 
+            // Guard 3 — streaming response length limit.
+            // Some local models enter degenerate token loops (repeating the
+            // same pattern forever). This cap prevents unbounded memory growth
+            // and runaway streaming.
+            const MAX_RESPONSE_CHARS: usize = 256_000; // ~64k tokens
+
             while let Some(event) = response.recv().await {
                 if cancel_token.is_cancelled() {
                     return self.complete_interrupted(&params.thread_id, &turn_id).await;
@@ -194,6 +200,40 @@ impl TurnExecutor {
                             ).await?;
                         }
                         assistant_text.push_str(&delta);
+
+                        // ── Degeneration guards ───────────────────────────────
+                        if assistant_text.len() > MAX_RESPONSE_CHARS {
+                            tracing::warn!(
+                                turn_id,
+                                chars = assistant_text.len(),
+                                "streaming guard: response exceeded {MAX_RESPONSE_CHARS} chars — truncating"
+                            );
+                            self.runtime.publish_event(
+                                RuntimeEventKind::Warning,
+                                Some(params.thread_id.clone()), Some(turn_id.clone()),
+                                json!({"message": "Model response was too long and has been truncated."}),
+                            ).await?;
+                            assistant_text.truncate(MAX_RESPONSE_CHARS);
+                            break;
+                        }
+                        if is_degenerate_repetition(&assistant_text) {
+                            tracing::warn!(
+                                turn_id,
+                                chars = assistant_text.len(),
+                                "streaming guard: detected repetitive model output — stopping"
+                            );
+                            self.runtime.publish_event(
+                                RuntimeEventKind::Warning,
+                                Some(params.thread_id.clone()), Some(turn_id.clone()),
+                                json!({"message": "Model entered a repetitive output loop and has been stopped."}),
+                            ).await?;
+                            // Trim back to the non-repeating prefix.
+                            if let Some(pos) = find_repetition_start(&assistant_text) {
+                                assistant_text.truncate(pos);
+                            }
+                            break;
+                        }
+
                         self.runtime.publish_event(
                             RuntimeEventKind::ItemUpdated,
                             Some(params.thread_id.clone()), Some(turn_id.clone()),
@@ -1161,3 +1201,100 @@ pub(crate) fn promote_to_bash_if_needed(call: ToolCall) -> ToolCall {
         arguments: new_args,
     }
 }
+
+// ─── Degenerate-output detection ──────────────────────────────────────────────
+//
+// Some local/quantized models enter token-generation loops, repeating the same
+// pattern indefinitely. These helpers detect that condition early.
+//
+// All comparisons are done on **bytes** (`as_bytes()`) to avoid UTF-8 boundary
+// panics. If the same Unicode text repeats, the same bytes also repeat, so the
+// detection is equally correct at the byte level.
+
+/// Returns `true` when the *tail* of the text contains a byte run of length
+/// ≥ `MIN_PATTERN_LEN` that repeats at least `MIN_REPEATS` times consecutively.
+///
+/// Only examines the last `WINDOW` bytes to stay O(1) per streaming delta.
+fn is_degenerate_repetition(text: &str) -> bool {
+    const MIN_PATTERN_LEN: usize = 40;
+    const MIN_REPEATS: usize = 5;
+    const WINDOW: usize = 4_000;
+
+    let bytes = text.as_bytes();
+    if bytes.len() < MIN_PATTERN_LEN * MIN_REPEATS {
+        return false;
+    }
+
+    let tail = if bytes.len() > WINDOW {
+        &bytes[bytes.len() - WINDOW..]
+    } else {
+        bytes
+    };
+
+    // Try candidate pattern lengths 40, 50, 60 … 200 bytes.
+    let max_pat = 200.min(tail.len() / MIN_REPEATS);
+    for pat_len in (MIN_PATTERN_LEN..=max_pat).step_by(10) {
+        let pattern = &tail[tail.len() - pat_len..];
+        let mut count = 0usize;
+        let mut pos = tail.len() - pat_len;
+        while pos >= pat_len {
+            pos -= pat_len;
+            if &tail[pos..pos + pat_len] == pattern {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count >= MIN_REPEATS {
+            return true;
+        }
+    }
+    false
+}
+
+/// Find the **byte** offset (into `text`) where the repetitive pattern starts,
+/// so we can `truncate()` to the clean prefix. Returns `None` if no repetition
+/// is detected. The returned offset is always on a UTF-8 char boundary because
+/// we walk backward to the nearest boundary before returning.
+fn find_repetition_start(text: &str) -> Option<usize> {
+    const MIN_PATTERN_LEN: usize = 40;
+    const MIN_REPEATS: usize = 5;
+    const WINDOW: usize = 4_000;
+
+    let bytes = text.as_bytes();
+    if bytes.len() < MIN_PATTERN_LEN * MIN_REPEATS {
+        return None;
+    }
+
+    let search_start = bytes.len().saturating_sub(WINDOW);
+    let tail = &bytes[search_start..];
+
+    let max_pat = 200.min(tail.len() / MIN_REPEATS);
+    for pat_len in (MIN_PATTERN_LEN..=max_pat).step_by(10) {
+        let pattern = &tail[tail.len() - pat_len..];
+        let mut earliest = tail.len() - pat_len;
+        let mut count = 0usize;
+        let mut pos = tail.len() - pat_len;
+        while pos >= pat_len {
+            pos -= pat_len;
+            if &tail[pos..pos + pat_len] == pattern {
+                count += 1;
+                earliest = pos;
+            } else {
+                break;
+            }
+        }
+        if count >= MIN_REPEATS {
+            // Walk the raw offset back to the nearest valid UTF-8 char boundary.
+            let raw = search_start + earliest;
+            let boundary = (0..=raw)
+                .rev()
+                .find(|&i| text.is_char_boundary(i))
+                .unwrap_or(0);
+            return Some(boundary);
+        }
+    }
+    None
+}
+
+
