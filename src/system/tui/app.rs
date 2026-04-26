@@ -904,7 +904,7 @@ impl InteractiveApp {
             true
         } else if matches!(command, "/help") {
             self.status_message =
-                "Keys: Tab/↑↓ autocomplete, Ctrl+A approvals, Ctrl+N new, Ctrl+F fork, \
+                "Keys: Tab/↑↓ autocomplete, Ctrl+A/E start/end-of-line, Ctrl+N new, Ctrl+F fork, \
                  Ctrl+C interrupt (double-tap clears composer), Ctrl+Q quit  ·  \
                  Commands: /model [provider/model]  /reasoning [low|medium|high|off]  \
                  /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads (autocomplete)  ·  \

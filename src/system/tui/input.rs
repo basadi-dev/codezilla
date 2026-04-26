@@ -85,8 +85,12 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
                 app.interrupt_active_turn().await?;
             }
         }
+        // Ctrl+A — start of line when in composer.
         (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-            app.toggle_auto_approve_tools().await;
+            if app.focus == FocusPane::Composer {
+                app.jump_transcript_to_bottom();
+                app.composer.move_home();
+            }
         }
         // Ctrl+M — toggle mouse capture.
         //   ON  → wheel scrolls transcript (default)
@@ -168,9 +172,6 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
 
 async fn handle_approval_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-            app.toggle_auto_approve_tools().await;
-        }
         (KeyCode::Char('a') | KeyCode::Char('A'), _) => {
             app.resolve_pending_approval(ApprovalDecision::Approved)
                 .await?;
@@ -241,6 +242,13 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
             app.reset_composer_history_navigation();
             app.composer.delete_word_left();
             app.update_autocomplete();
+        }
+        // Ctrl+A  →  start of line  (emacs/readline C-a)
+        // Handled in the global match above when focus == Composer.
+        // Ctrl+E  →  end of line  (emacs/readline C-e)
+        (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+            app.jump_transcript_to_bottom();
+            app.composer.move_end();
         }
 
         // Generic printable character — exclude CONTROL and ALT so modifier
