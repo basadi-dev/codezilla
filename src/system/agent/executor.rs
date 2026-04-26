@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Result};
+use futures::future::join_all;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::model_gateway::{estimate_items_token_pct, is_context_overflow_error, ModelStreamEvent};
 use crate::system::domain::{
-    now_seconds, ActionDescriptor, ApprovalCategory, ApprovalDecision, ApprovalRequest,
+    now_seconds, ActionDescriptor, ApprovalCategory, ApprovalDecision, ApprovalPolicy,
+    ApprovalRequest,
     ConversationItem, ItemKind, ModelSettings, RuntimeEventKind, ThreadStatus, TokenUsage,
     ToolCall, ToolExecutionContext, ToolListingContext, ToolResult, TurnStatus, UserInput,
 };
@@ -251,7 +253,7 @@ impl TurnExecutor {
                     continue; // retry the outer agent loop
                 }
 
-            // Second overflow or a different error — humanize and fail the turn.
+                // Second overflow or a different error — humanize and fail the turn.
                 let err_display = cod_error::from_raw(error);
                 return self
                     .fail_turn(
@@ -281,143 +283,17 @@ impl TurnExecutor {
                     .await;
             }
 
-            // Track whether any tool in this round succeeded so we can
-            // update the consecutive-failure counter correctly after the loop.
-            let mut had_any_success = false;
-
-            for call in tool_calls {
-                // Safety net: if the model put shell operators (|, >, 2>&1, globs) inside
-                // a shell_exec argv, auto-rewrite to bash_exec so they work correctly.
-                let call = promote_to_bash_if_needed(call);
-
-                let call_item = ConversationItem {
-                    item_id: format!("item_{}", Uuid::new_v4().simple()),
-                    thread_id: params.thread_id.clone(),
-                    turn_id: turn_id.clone(),
-                    created_at: now_seconds(),
-                    kind: ItemKind::ToolCall,
-                    payload: serde_json::to_value(&call)?,
-                };
-                self.persist_turn_item(call_item).await?;
-
-                // Re-read the live policy per tool call so a Ctrl+A toggle during
-                // an LLM response takes effect on the very next tool, not the
-                // next full loop iteration.
-                let approval_policy = {
-                    let t = thread.lock().await;
-                    t.approval_policy_override.clone()
-                }
-                .or_else(|| params.approval_policy.clone())
-                .unwrap_or_else(|| self.runtime.inner.effective_config.approval_policy.clone());
-
-                let action = action_for_tool_call(&call, &cwd);
-                if self.runtime.inner.permission_manager.requires_approval(
-                    &action,
-                    &approval_policy,
+            let had_any_success = self
+                .execute_tool_round(
+                    tool_calls,
+                    &params,
+                    &turn_id,
+                    &thread,
                     &cwd,
-                ) {
-                    let approval = self
-                        .runtime
-                        .inner
-                        .approval_manager
-                        .create_approval(ApprovalRequest {
-                            approval_id: format!("approval_{}", Uuid::new_v4().simple()),
-                            thread_id: params.thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            category: action.category,
-                            title: format!("Approve {}", call.tool_name),
-                            justification: format!("The assistant requested {}", call.tool_name),
-                            action: serde_json::to_value(&action)?,
-                        })
-                        .await;
-
-                    {
-                        let mut thread = thread.lock().await;
-                        let turn = thread
-                            .turns
-                            .iter_mut()
-                            .find(|t| t.metadata.turn_id == turn_id)
-                            .ok_or_else(|| anyhow!("turn_not_found: {turn_id}"))?;
-                        turn.status = TurnStatus::WaitingForApproval;
-                        turn.metadata.status = TurnStatus::WaitingForApproval;
-                        self.runtime
-                            .inner
-                            .persistence_manager
-                            .update_turn(&turn.metadata)?;
-                    }
-
-                    self.runtime
-                        .publish_event(
-                            crate::system::domain::RuntimeEventKind::ApprovalRequested,
-                            Some(params.thread_id.clone()),
-                            Some(turn_id.clone()),
-                            serde_json::to_value(&approval)?,
-                        )
-                        .await?;
-
-                    let transcript = self
-                        .runtime
-                        .inner
-                        .persistence_manager
-                        .read_thread(&params.thread_id)?
-                        .items;
-                    let resolution = self
-                        .runtime
-                        .inner
-                        .approval_manager
-                        .wait_for_approval(&approval.request.approval_id, 300, &transcript)
-                        .await?;
-                    self.runtime
-                        .publish_event(
-                            crate::system::domain::RuntimeEventKind::ApprovalResolved,
-                            Some(params.thread_id.clone()),
-                            Some(turn_id.clone()),
-                            serde_json::to_value(&resolution)?,
-                        )
-                        .await?;
-
-                    if resolution.decision != ApprovalDecision::Approved {
-                        let denial = ToolResult {
-                            tool_call_id: call.tool_call_id.clone(),
-                            ok: false,
-                            output: json!({ "approved": false }),
-                            error_message: Some(format!("approval {:?}", resolution.decision)),
-                        };
-                        self.persist_tool_result(&params.thread_id, &turn_id, &denial)
-                            .await?;
-                        continue;
-                    }
-                }
-
-                let result = self
-                    .runtime
-                    .inner
-                    .tool_orchestrator
-                    .execute(
-                        &call,
-                        ToolExecutionContext {
-                            thread_id: params.thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            cwd: cwd.clone(),
-                            permission_profile: permission_profile.clone(),
-                            approval_policy: approval_policy.clone(),
-                        },
-                    )
-                    .await
-                    .unwrap_or_else(|e| ToolResult {
-                        tool_call_id: call.tool_call_id.clone(),
-                        ok: false,
-                        output: json!({ "error": e.to_string() }),
-                        error_message: Some(e.to_string()),
-                    });
-
-                if result.ok {
-                    had_any_success = true;
-                }
-
-                self.persist_tool_result(&params.thread_id, &turn_id, &result)
-                    .await?;
-            }
+                    &permission_profile,
+                    &listing,
+                )
+                .await?;
 
             // ── Consecutive-failure guard ─────────────────────────────────────
             // Reset counter if any tool succeeded this round; bump it if every
@@ -724,7 +600,6 @@ impl TurnExecutor {
         Ok(())
     }
 
-
     async fn complete_interrupted(&self, thread_id: &str, turn_id: &str) -> Result<()> {
         let thread = self
             .runtime
@@ -815,9 +690,273 @@ impl TurnExecutor {
         }
         Ok(instructions)
     }
+
+    // ── Tool round dispatcher ──────────────────────────────────────────────────
+
+    /// Dispatch one round of tool calls (everything the model emitted in a
+    /// single turn response). Calls that advertise `supports_parallel_calls`
+    /// are grouped into batches and executed concurrently with `join_all`.
+    /// Non-parallel-safe calls get their own sequential batch.
+    ///
+    /// Returns `true` if any tool in the round succeeded (used by the
+    /// consecutive-failure guard in `run_turn`).
+    async fn execute_tool_round(
+        &self,
+        tool_calls: Vec<ToolCall>,
+        params: &crate::system::runtime::TurnStartParams,
+        turn_id: &str,
+        thread: &tokio::sync::Mutex<crate::system::runtime::ThreadSession>,
+        cwd: &str,
+        permission_profile: &crate::system::domain::PermissionProfile,
+        listing_ctx: &ToolListingContext,
+    ) -> Result<bool> {
+        // 1. Normalise: rewrite shell_exec with shell operators → bash_exec.
+        let calls: Vec<ToolCall> = tool_calls
+            .into_iter()
+            .map(promote_to_bash_if_needed)
+            .collect();
+
+        // 2. Persist all ToolCall items in original order *before* executing
+        //    anything, so the transcript always shows calls before results.
+        for call in &calls {
+            let call_item = ConversationItem {
+                item_id: format!("item_{}", Uuid::new_v4().simple()),
+                thread_id: params.thread_id.clone(),
+                turn_id: turn_id.into(),
+                created_at: now_seconds(),
+                kind: ItemKind::ToolCall,
+                payload: serde_json::to_value(call)?,
+            };
+            self.persist_turn_item(call_item).await?;
+        }
+
+        // 3. Partition into batches (consecutive parallel-safe calls grouped;
+        //    each non-parallel-safe call is a solo sequential batch).
+        let batches = partition_into_batches(&calls, |name| {
+            self.runtime
+                .inner
+                .tool_orchestrator
+                .is_parallel_safe(name, listing_ctx)
+        });
+
+        tracing::debug!(
+            turn_id,
+            total_calls = calls.len(),
+            batch_count = batches.len(),
+            "tool_round: dispatching"
+        );
+
+        // 4. Dispatch each batch, collecting results in original-call order.
+        let mut had_any_success = false;
+        for batch in batches {
+            if batch.len() > 1 {
+                tracing::debug!("tool_round: parallel batch of {}", batch.len());
+            }
+            let results = self
+                .dispatch_batch(batch, params, turn_id, thread, cwd, permission_profile)
+                .await?;
+            for result in results {
+                if result.ok {
+                    had_any_success = true;
+                }
+                self.persist_tool_result(&params.thread_id, turn_id, &result)
+                    .await?;
+            }
+        }
+
+        Ok(had_any_success)
+    }
+
+    /// Execute a single batch of tool calls.
+    ///
+    /// Phase A — sequential approval: each call in the batch is approved
+    ///   one at a time (preserves the existing single-prompt UX).
+    /// Phase B — parallel execution: all approved calls are dispatched
+    ///   concurrently with `join_all`.
+    /// Phase C — stable ordering: results are sorted back to original
+    ///   call-index order before being returned.
+    async fn dispatch_batch(
+        &self,
+        batch: Vec<(usize, ToolCall)>,
+        params: &crate::system::runtime::TurnStartParams,
+        turn_id: &str,
+        thread: &tokio::sync::Mutex<crate::system::runtime::ThreadSession>,
+        cwd: &str,
+        permission_profile: &crate::system::domain::PermissionProfile,
+    ) -> Result<Vec<ToolResult>> {
+        // ── Phase A: sequential approval ──────────────────────────────────────
+        let mut ready: Vec<(usize, ToolCall, ApprovalPolicy)> = Vec::new();
+        let mut results: Vec<(usize, ToolResult)> = Vec::new();
+
+        for (idx, call) in batch {
+            // Re-read policy live so a Ctrl+A toggle between batches takes
+            // effect immediately.
+            let approval_policy = {
+                let t = thread.lock().await;
+                t.approval_policy_override.clone()
+            }
+            .or_else(|| params.approval_policy.clone())
+            .unwrap_or_else(|| self.runtime.inner.effective_config.approval_policy.clone());
+
+            let action = action_for_tool_call(&call, cwd);
+            if self.runtime.inner.permission_manager.requires_approval(
+                &action,
+                &approval_policy,
+                cwd,
+            ) {
+                let approval = self
+                    .runtime
+                    .inner
+                    .approval_manager
+                    .create_approval(ApprovalRequest {
+                        approval_id: format!("approval_{}", Uuid::new_v4().simple()),
+                        thread_id: params.thread_id.clone(),
+                        turn_id: turn_id.into(),
+                        category: action.category,
+                        title: format!("Approve {}", call.tool_name),
+                        justification: format!("The assistant requested {}", call.tool_name),
+                        action: serde_json::to_value(&action)?,
+                    })
+                    .await;
+
+                {
+                    let mut t = thread.lock().await;
+                    let turn = t
+                        .turns
+                        .iter_mut()
+                        .find(|t| t.metadata.turn_id == turn_id)
+                        .ok_or_else(|| anyhow!("turn_not_found: {turn_id}"))?;
+                    turn.status = TurnStatus::WaitingForApproval;
+                    turn.metadata.status = TurnStatus::WaitingForApproval;
+                    self.runtime
+                        .inner
+                        .persistence_manager
+                        .update_turn(&turn.metadata)?;
+                }
+
+                self.runtime
+                    .publish_event(
+                        RuntimeEventKind::ApprovalRequested,
+                        Some(params.thread_id.clone()),
+                        Some(turn_id.into()),
+                        serde_json::to_value(&approval)?,
+                    )
+                    .await?;
+
+                let transcript = self
+                    .runtime
+                    .inner
+                    .persistence_manager
+                    .read_thread(&params.thread_id)?
+                    .items;
+                let resolution = self
+                    .runtime
+                    .inner
+                    .approval_manager
+                    .wait_for_approval(&approval.request.approval_id, 300, &transcript)
+                    .await?;
+                self.runtime
+                    .publish_event(
+                        RuntimeEventKind::ApprovalResolved,
+                        Some(params.thread_id.clone()),
+                        Some(turn_id.into()),
+                        serde_json::to_value(&resolution)?,
+                    )
+                    .await?;
+
+                if resolution.decision != ApprovalDecision::Approved {
+                    results.push((
+                        idx,
+                        ToolResult {
+                            tool_call_id: call.tool_call_id.clone(),
+                            ok: false,
+                            output: json!({ "approved": false }),
+                            error_message: Some(format!("approval {:?}", resolution.decision)),
+                        },
+                    ));
+                    continue;
+                }
+            }
+
+            ready.push((idx, call, approval_policy));
+        }
+
+        // ── Phase B: parallel execution ───────────────────────────────────────
+        if !ready.is_empty() {
+            let futures: Vec<_> = ready
+                .into_iter()
+                .map(|(idx, call, approval_policy)| {
+                    let orchestrator = &self.runtime.inner.tool_orchestrator;
+                    let ctx = ToolExecutionContext {
+                        thread_id: params.thread_id.clone(),
+                        turn_id: turn_id.into(),
+                        cwd: cwd.into(),
+                        permission_profile: permission_profile.clone(),
+                        approval_policy,
+                        agent_depth: params.agent_depth,
+                    };
+                    async move {
+                        let result =
+                            orchestrator
+                                .execute(&call, ctx)
+                                .await
+                                .unwrap_or_else(|e| ToolResult {
+                                    tool_call_id: call.tool_call_id.clone(),
+                                    ok: false,
+                                    output: json!({ "error": e.to_string() }),
+                                    error_message: Some(e.to_string()),
+                                });
+                        (idx, result)
+                    }
+                })
+                .collect();
+
+            results.extend(join_all(futures).await);
+        }
+
+        // ── Phase C: sort by original index before returning ──────────────────
+        results.sort_by_key(|(idx, _)| *idx);
+        Ok(results.into_iter().map(|(_, r)| r).collect())
+    }
 }
 
-// ─── thinking instruction helper ─────────────────────────────────────────────
+// ─── partition_into_batches ───────────────────────────────────────────────────
+
+/// Split an ordered slice of `ToolCall`s into sequential execution batches.
+///
+/// Consecutive calls that are all parallel-safe are grouped into a single batch
+/// so they can be executed with `join_all`. Any call that is *not* parallel-safe
+/// gets its own single-element batch and acts as a serialisation barrier.
+///
+/// Examples:
+///   [read, read, read]          → [(read, read, read)]
+///   [read, write, read]         → [(read), (write), (read)]
+///   [read, read, write, read]   → [(read, read), (write), (read)]
+///   [bash, bash]                → [(bash), (bash)]
+fn partition_into_batches<F>(calls: &[ToolCall], is_parallel: F) -> Vec<Vec<(usize, ToolCall)>>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut batches: Vec<Vec<(usize, ToolCall)>> = Vec::new();
+    let mut current: Vec<(usize, ToolCall)> = Vec::new();
+
+    for (i, call) in calls.iter().enumerate() {
+        if is_parallel(&call.tool_name) {
+            current.push((i, call.clone()));
+        } else {
+            if !current.is_empty() {
+                batches.push(std::mem::take(&mut current));
+            }
+            batches.push(vec![(i, call.clone())]);
+        }
+    }
+
+    if !current.is_empty() {
+        batches.push(current);
+    }
+
+    batches
+}
 
 fn thinking_instruction(reasoning_effort: Option<&str>) -> Option<String> {
     match reasoning_effort {

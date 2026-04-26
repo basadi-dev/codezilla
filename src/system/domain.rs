@@ -464,6 +464,10 @@ pub struct ToolExecutionContext {
     pub cwd: PathString,
     pub permission_profile: PermissionProfile,
     pub approval_policy: ApprovalPolicy,
+    /// Nesting depth: 0 = top-level agent, 1 = sub-agent, etc.
+    /// Used to prevent unbounded recursive agent spawning.
+    #[serde(default)]
+    pub agent_depth: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

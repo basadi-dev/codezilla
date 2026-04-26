@@ -190,6 +190,20 @@ impl PersistenceManager {
         })
     }
 
+    pub fn delete_thread(&self, thread_id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM items WHERE thread_id = ?1", params![thread_id])?;
+            tx.execute("DELETE FROM turns WHERE thread_id = ?1", params![thread_id])?;
+            tx.execute(
+                "DELETE FROM threads WHERE thread_id = ?1",
+                params![thread_id],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     /// Mark every non-tombstoned item in `thread_id` as deleted.
     /// Returns the number of rows affected.
     pub fn tombstone_all_items(&self, thread_id: &str) -> Result<usize> {

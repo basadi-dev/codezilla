@@ -706,6 +706,7 @@ impl InteractiveApp {
                         approval_policy: self.current_approval_policy_override(),
                         permission_profile: None,
                         output_schema: None,
+                        agent_depth: 0,
                     },
                     super::super::domain::SurfaceKind::Interactive,
                 )

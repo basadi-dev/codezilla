@@ -134,6 +134,7 @@ impl ExecSurface {
                     approval_policy: None,
                     permission_profile: None,
                     output_schema: None,
+                    agent_depth: 0,
                 },
                 SurfaceKind::Exec,
             )

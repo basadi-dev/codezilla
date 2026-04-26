@@ -924,7 +924,10 @@ impl ToolProvider for ImageToolProvider {
     }
 }
 
-// ─── Stub providers ───────────────────────────────────────────────────────────
+// ─── Placeholder stub (kept for public API compat) ────────────────────────────
+// The *real* SpawnAgentToolProvider is `SpawnAgentToolProviderReal` defined in
+// runtime.rs. It is late-registered after `ConversationRuntime` is constructed
+// so it can hold a runtime clone. This stub is no longer registered anywhere.
 
 pub struct SpawnAgentToolProvider;
 
@@ -934,14 +937,14 @@ impl ToolProvider for SpawnAgentToolProvider {
         ToolProviderKind::Builtin
     }
     fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
-        Vec::new()
+        Vec::new() // deliberately empty — the real provider is registered in runtime.rs
     }
     async fn execute(&self, call: &ToolCall, _ctx: &ToolExecutionContext) -> Result<ToolResult> {
         Ok(ToolResult {
             tool_call_id: call.tool_call_id.clone(),
             ok: false,
-            output: json!({"message":"spawn_agent is not enabled in this build"}),
-            error_message: Some("spawn_agent is not enabled in this build".into()),
+            output: json!({"message":"spawn_agent: reached stub — real provider should be registered"}),
+            error_message: Some("spawn_agent: stub reached unexpectedly".into()),
         })
     }
 }
@@ -994,6 +997,19 @@ impl ToolOrchestrator {
             .iter()
             .flat_map(|p| p.list_tools(context))
             .collect()
+    }
+
+    /// Returns `true` if the named tool is registered and has `supports_parallel_calls = true`.
+    /// Unknown tools default to `false` (safest assumption).
+    pub fn is_parallel_safe(&self, tool_name: &str, context: &ToolListingContext) -> bool {
+        self.registry
+            .read()
+            .unwrap()
+            .iter()
+            .flat_map(|p| p.list_tools(context))
+            .find(|def| def.name == tool_name)
+            .map(|def| def.supports_parallel_calls)
+            .unwrap_or(false)
     }
 
     pub async fn execute(

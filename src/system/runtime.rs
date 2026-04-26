@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock as AsyncRwLock};
+use std::time::Duration;
+use tokio::sync::{Mutex, RwLock as AsyncRwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -16,7 +17,7 @@ use super::agent::{
     ApprovalManager, BashToolProvider, EventBus, ExtensionManager, FileToolProvider,
     ImageToolProvider, ListDirToolProvider, ModelGateway, PermissionManager,
     RequestUserInputToolProvider, SandboxManager, SearchToolProvider, ShellToolProvider,
-    SpawnAgentToolProvider, ToolOrchestrator, TurnExecutor, WebToolProvider,
+    ToolOrchestrator, TurnExecutor, WebToolProvider,
 };
 // Agent types re-exported for callers outside runtime.rs
 #[allow(unused_imports)]
@@ -153,6 +154,9 @@ pub struct TurnStartParams {
     pub approval_policy: Option<ApprovalPolicy>,
     pub permission_profile: Option<PermissionProfile>,
     pub output_schema: Option<Value>,
+    /// Agent nesting depth — 0 for top-level, incremented by spawn_agent.
+    #[serde(default)]
+    pub agent_depth: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,7 +285,8 @@ impl ConversationRuntime {
         )));
         tool_orchestrator.register_provider(Arc::new(SearchToolProvider));
         tool_orchestrator.register_provider(Arc::new(ImageToolProvider));
-        tool_orchestrator.register_provider(Arc::new(SpawnAgentToolProvider));
+        // NOTE: SpawnAgentToolProvider is registered *after* Self is constructed (late registration)
+        // so it can hold a ConversationRuntime clone. See below.
         tool_orchestrator.register_provider(Arc::new(RequestUserInputToolProvider));
         tool_orchestrator.register_provider(Arc::new(WebToolProvider::new()));
 
@@ -299,6 +304,9 @@ impl ConversationRuntime {
             .reload_all(&effective_config.working_directory)
             .await?;
 
+        // ── Build Self first so the runtime handle is available ────────────
+        // SpawnAgentToolProvider needs a ConversationRuntime clone, so we
+        // construct Self before registering it, then swap the stub out.
         let inner = RuntimeInner {
             runtime_id: format!("runtime_{}", Uuid::new_v4().simple()),
             effective_config,
@@ -314,9 +322,18 @@ impl ConversationRuntime {
             model_gateway: Arc::new(ModelGateway::new(llm_client)),
             extension_manager: extensions,
         };
-        Ok(Self {
+        let me = Self {
             inner: Arc::new(inner),
-        })
+        };
+
+        // Late-register the real SpawnAgentToolProvider with a runtime clone.
+        me.inner
+            .tool_orchestrator
+            .register_provider(Arc::new(SpawnAgentToolProviderReal::new(
+                AgentSupervisor::new(me.clone(), 4),
+            )));
+
+        Ok(me)
     }
 
     #[allow(dead_code)]
@@ -937,5 +954,390 @@ impl ConversationRuntime {
             emitted_at: now_millis(),
         });
         Ok(())
+    }
+
+    // ── Sub-agent support ──────────────────────────────────────────────────────
+
+    /// Subscribe to the event bus and block until a specific child turn reaches
+    /// a terminal state. The persisted turn status is authoritative; events only
+    /// wake this waiter so fast terminal transitions cannot be missed.
+    pub async fn await_child_turn_completion(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        timeout_secs: u64,
+    ) -> Result<TurnCompletionOutcome> {
+        if let Some(outcome) = self.child_turn_terminal_outcome(thread_id, turn_id)? {
+            return Ok(outcome);
+        }
+
+        let subscriber_id = format!("spawn_agent_{}", Uuid::new_v4().simple());
+        let mut sub = self.inner.event_bus.subscribe(
+            subscriber_id.clone(),
+            super::agent::EventFilter {
+                thread_id: Some(thread_id.to_string()),
+            },
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+        let outcome = loop {
+            if let Some(outcome) = self.child_turn_terminal_outcome(thread_id, turn_id)? {
+                break outcome;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break TurnCompletionOutcome::TimedOut;
+            }
+            match tokio::time::timeout(remaining, sub.receiver.recv()).await {
+                Ok(Ok(event)) => {
+                    if event.thread_id.as_deref() != Some(thread_id) {
+                        continue;
+                    }
+                    match event.kind {
+                        RuntimeEventKind::TurnCompleted => {
+                            if event.turn_id.as_deref() == Some(turn_id) {
+                                continue;
+                            }
+                        }
+                        RuntimeEventKind::TurnFailed => {
+                            if event.turn_id.as_deref() == Some(turn_id) {
+                                continue;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+                Ok(Err(_)) => break TurnCompletionOutcome::Failed("event_bus_closed".into()),
+                Err(_) => break TurnCompletionOutcome::TimedOut,
+            }
+        };
+
+        self.inner.event_bus.unsubscribe(&subscriber_id);
+        Ok(outcome)
+    }
+
+    fn child_turn_terminal_outcome(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<TurnCompletionOutcome>> {
+        let persisted = self.inner.persistence_manager.read_thread(thread_id)?;
+        let Some(turn) = persisted.turns.iter().find(|turn| turn.turn_id == turn_id) else {
+            return Ok(Some(TurnCompletionOutcome::Failed(format!(
+                "child turn not found: {turn_id}"
+            ))));
+        };
+
+        let outcome = match turn.status {
+            TurnStatus::Completed => Some(TurnCompletionOutcome::Completed),
+            TurnStatus::Failed => Some(TurnCompletionOutcome::Failed(
+                last_error_message(&persisted.items, turn_id).unwrap_or_else(|| "failed".into()),
+            )),
+            TurnStatus::Interrupted => Some(TurnCompletionOutcome::Interrupted),
+            TurnStatus::Created | TurnStatus::Running | TurnStatus::WaitingForApproval => None,
+        };
+        Ok(outcome)
+    }
+
+    async fn cancel_child_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        grace_secs: u64,
+    ) -> Result<TurnCompletionOutcome> {
+        let _ = self
+            .interrupt_turn(TurnInterruptParams {
+                thread_id: thread_id.into(),
+                turn_id: turn_id.into(),
+            })
+            .await?;
+
+        self.await_child_turn_completion(thread_id, turn_id, grace_secs)
+            .await
+            .or_else(|_| Ok(TurnCompletionOutcome::TimedOut))
+    }
+
+    /// Read the last `AgentMessage` item from a thread's persisted history.
+    pub fn read_last_agent_message(&self, thread_id: &str) -> Result<Option<String>> {
+        let persisted = self.inner.persistence_manager.read_thread(thread_id)?;
+        let text = persisted
+            .items
+            .iter()
+            .rev()
+            .find(|i| i.kind == ItemKind::AgentMessage)
+            .and_then(|i| i.payload.get("text").and_then(Value::as_str))
+            .map(|s| s.to_string());
+        Ok(text)
+    }
+
+    pub async fn delete_thread(&self, thread_id: &str) -> Result<()> {
+        self.inner.loaded_threads.write().await.remove(thread_id);
+        self.inner.persistence_manager.delete_thread(thread_id)?;
+        Ok(())
+    }
+}
+
+/// Outcome of awaiting a sub-agent turn.
+pub enum TurnCompletionOutcome {
+    Completed,
+    Failed(String),
+    Interrupted,
+    TimedOut,
+}
+
+fn last_error_message(items: &[ConversationItem], turn_id: &str) -> Option<String> {
+    items
+        .iter()
+        .rev()
+        .find(|item| item.turn_id == turn_id && item.kind == ItemKind::Error)
+        .and_then(|item| {
+            item.payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentSupervisor {
+    runtime: ConversationRuntime,
+    child_slots: Arc<Semaphore>,
+}
+
+pub(crate) struct ChildAgentRequest {
+    prompt: String,
+    cwd: String,
+    approval_policy: ApprovalPolicy,
+    permission_profile: PermissionProfile,
+    timeout_secs: u64,
+    agent_depth: u32,
+}
+
+pub(crate) struct ChildAgentRun {
+    child_thread_id: ThreadId,
+    child_turn_id: TurnId,
+    result_text: String,
+    outcome: TurnCompletionOutcome,
+}
+
+impl AgentSupervisor {
+    pub fn new(runtime: ConversationRuntime, max_concurrent_children: usize) -> Self {
+        Self {
+            runtime,
+            child_slots: Arc::new(Semaphore::new(max_concurrent_children.max(1))),
+        }
+    }
+
+    pub async fn run_child(&self, request: ChildAgentRequest) -> Result<ChildAgentRun> {
+        let _slot = self
+            .child_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| anyhow!("child_agent_slots_closed: {e}"))?;
+
+        let child = self
+            .runtime
+            .start_thread(ThreadStartParams {
+                cwd: Some(request.cwd),
+                model_settings: None,
+                approval_policy: Some(request.approval_policy.clone()),
+                permission_profile: Some(request.permission_profile.clone()),
+                ephemeral: true,
+            })
+            .await?;
+        let child_thread_id = child.metadata.thread_id;
+
+        let child_turn = self
+            .runtime
+            .start_turn(
+                TurnStartParams {
+                    thread_id: child_thread_id.clone(),
+                    input: vec![UserInput::from_text(&request.prompt)],
+                    cwd: None,
+                    model_settings: None,
+                    approval_policy: Some(request.approval_policy),
+                    permission_profile: Some(request.permission_profile),
+                    output_schema: None,
+                    agent_depth: request.agent_depth + 1,
+                },
+                SurfaceKind::Exec,
+            )
+            .await?;
+        let child_turn_id = child_turn.turn.turn_id;
+
+        let mut outcome = self
+            .runtime
+            .await_child_turn_completion(&child_thread_id, &child_turn_id, request.timeout_secs)
+            .await?;
+
+        if matches!(outcome, TurnCompletionOutcome::TimedOut) {
+            let _ = self
+                .runtime
+                .cancel_child_turn(&child_thread_id, &child_turn_id, 5)
+                .await;
+            outcome = TurnCompletionOutcome::TimedOut;
+        }
+
+        let result_text = self
+            .runtime
+            .read_last_agent_message(&child_thread_id)?
+            .unwrap_or_else(|| "[sub-agent produced no output]".into());
+
+        if matches!(outcome, TurnCompletionOutcome::Completed) {
+            if let Err(e) = self.runtime.delete_thread(&child_thread_id).await {
+                tracing::warn!(thread_id = %child_thread_id, "failed to delete successful ephemeral sub-agent thread: {e}");
+            }
+        }
+
+        Ok(ChildAgentRun {
+            child_thread_id,
+            child_turn_id,
+            result_text,
+            outcome,
+        })
+    }
+}
+
+// ─── SpawnAgentToolProviderReal ───────────────────────────────────────────────
+//
+// Registered *after* ConversationRuntime is constructed so it can hold a
+// runtime clone without creating a circular dependency.
+
+use crate::system::agent::tools::ToolProvider;
+use crate::system::domain::{
+    ToolDefinition, ToolExecutionContext, ToolListingContext, ToolProviderKind, ToolResult,
+};
+use async_trait::async_trait;
+
+pub(crate) struct SpawnAgentToolProviderReal {
+    supervisor: AgentSupervisor,
+}
+
+impl SpawnAgentToolProviderReal {
+    pub fn new(supervisor: AgentSupervisor) -> Self {
+        Self { supervisor }
+    }
+}
+
+#[async_trait]
+impl ToolProvider for SpawnAgentToolProviderReal {
+    fn get_kind(&self) -> ToolProviderKind {
+        ToolProviderKind::Builtin
+    }
+
+    fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "spawn_agent".into(),
+            description: "Spawn an independent sub-agent to work on a task in parallel. \
+                The sub-agent runs with full tool access and returns its final answer as text. \
+                Use this to parallelise independent sub-tasks — for example, analysing multiple \
+                files simultaneously. Multiple spawn_agent calls in the same response run \
+                concurrently."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The task description for the sub-agent. Be specific and self-contained."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Maximum seconds to wait for the sub-agent (default 120, max 600)."
+                    }
+                },
+                "required": ["prompt"]
+            }),
+            requires_approval: false,
+            supports_parallel_calls: true,
+            provider_kind: ToolProviderKind::Builtin,
+        }]
+    }
+
+    async fn execute(&self, call: &ToolCall, ctx: &ToolExecutionContext) -> Result<ToolResult> {
+        use anyhow::anyhow;
+
+        // Depth guard: prevent unbounded recursive agent spawning.
+        if ctx.agent_depth >= 3 {
+            return Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({ "error": "max sub-agent depth reached" }),
+                error_message: Some("spawn_agent cannot be nested more than 3 levels deep".into()),
+            });
+        }
+
+        let prompt = call
+            .arguments
+            .get("prompt")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("spawn_agent: prompt is required"))?
+            .to_string();
+
+        let timeout_secs = call
+            .arguments
+            .get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(120)
+            .min(600);
+
+        let run = self
+            .supervisor
+            .run_child(ChildAgentRequest {
+                prompt,
+                cwd: ctx.cwd.clone(),
+                approval_policy: ctx.approval_policy.clone(),
+                permission_profile: ctx.permission_profile.clone(),
+                timeout_secs,
+                agent_depth: ctx.agent_depth,
+            })
+            .await?;
+
+        match run.outcome {
+            TurnCompletionOutcome::Completed => Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: true,
+                output: json!({
+                    "thread_id": run.child_thread_id,
+                    "turn_id": run.child_turn_id,
+                    "result": run.result_text,
+                }),
+                error_message: None,
+            }),
+            TurnCompletionOutcome::Failed(reason) => Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({
+                    "thread_id": run.child_thread_id,
+                    "turn_id": run.child_turn_id,
+                    "result": run.result_text,
+                    "error": reason,
+                }),
+                error_message: Some(format!("sub-agent failed: {reason}")),
+            }),
+            TurnCompletionOutcome::Interrupted => Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({
+                    "thread_id": run.child_thread_id,
+                    "turn_id": run.child_turn_id,
+                    "result": run.result_text,
+                    "error": "interrupted",
+                }),
+                error_message: Some("sub-agent interrupted".into()),
+            }),
+            TurnCompletionOutcome::TimedOut => Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({
+                    "thread_id": run.child_thread_id,
+                    "turn_id": run.child_turn_id,
+                    "result": run.result_text,
+                    "error": "timeout",
+                }),
+                error_message: Some(format!("sub-agent timed out after {timeout_secs}s")),
+            }),
+        }
     }
 }

@@ -640,4 +640,3 @@ fn inset(r: Rect, left: u16, top: u16) -> Rect {
         height: r.height.saturating_sub(top),
     }
 }
-
