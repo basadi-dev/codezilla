@@ -391,7 +391,7 @@ impl InteractiveApp {
         self.composer_last_click = None;
 
         let now = std::time::Instant::now();
-        let is_double_click = self.transcript_last_click.map_or(false, |t| {
+        let is_double_click = self.transcript_last_click.is_some_and(|t| {
             now.duration_since(t).as_millis() < 400
                 && col == self.transcript_last_click_col
                 && row == self.transcript_last_click_row
@@ -525,7 +525,8 @@ impl InteractiveApp {
         // The composer input area starts after a 1-row separator and 1-row
         // top margin (see render_composer). The actual text starts at
         // `comp_layout[2]` which is stored in `self.composer_area`.
-        if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height {
+        if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height
+        {
             return None;
         }
 
@@ -540,10 +541,15 @@ impl InteractiveApp {
         let composer_scroll = self.composer_scroll_offset(text_width);
 
         let visual_row = local_row + composer_scroll;
-        let visual_col = local_col.saturating_sub(prefix).min(text_width.saturating_sub(1));
+        let visual_col = local_col
+            .saturating_sub(prefix)
+            .min(text_width.saturating_sub(1));
 
         // Convert visual (row, col) back to a char index in composer.chars
-        Some(self.composer.index_for_visual_position(visual_row, visual_col, text_width, text_width))
+        Some(
+            self.composer
+                .index_for_visual_position(visual_row, visual_col, text_width, text_width),
+        )
     }
 
     /// Compute the composer scroll offset (how many visual rows are scrolled out of view).
@@ -568,7 +574,7 @@ impl InteractiveApp {
         self.transcript_last_click = None;
         if let Some(idx) = self.mouse_to_composer_index(col, row) {
             let now = std::time::Instant::now();
-            let is_double_click = self.composer_last_click.map_or(false, |t| {
+            let is_double_click = self.composer_last_click.is_some_and(|t| {
                 now.duration_since(t).as_millis() < 400
                     && col == self.composer_last_click_col
                     && row == self.composer_last_click_row
@@ -1151,6 +1157,7 @@ impl InteractiveApp {
             self.status_message =
                 "Keys: Tab/↑↓ autocomplete, Ctrl+A/E start/end-of-line, Ctrl+N new, Ctrl+F fork, \
                  Ctrl+C interrupt (double-tap clears composer), Ctrl+Q quit  ·  \
+                 Approval: Y approve  U approve+auto  D deny  ·  \
                  Commands: /model [provider/model]  /reasoning [low|medium|high|off]  \
                  /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads (autocomplete)  ·  \
                  CLI: codezilla -r (resume last thread)".into();
@@ -1471,6 +1478,13 @@ impl InteractiveApp {
         self.error_message = None;
         self.pending_approval = None;
         Ok(())
+    }
+
+    /// Approve the current pending request AND enable auto-approve for future requests.
+    pub async fn resolve_pending_approval_auto(&mut self) -> Result<()> {
+        self.set_auto_approve_tools(true).await;
+        self.resolve_pending_approval(ApprovalDecision::Approved)
+            .await
     }
 
     pub async fn handle_runtime_event(&mut self, event: RuntimeEvent) -> Result<()> {
@@ -2040,9 +2054,19 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
     let mut tool_names_by_call_id: HashMap<String, String> = HashMap::new();
 
     for entry in entries {
+        // System prompt entries are persisted for debugging/auditing but should
+        // not be rendered in the TUI — they are internal LLM context and would
+        // otherwise appear as a huge empty-looking "◈ System" block.
+        if entry.kind == EntryKind::System {
+            continue;
+        }
+
         let use_markdown = matches!(
             entry.kind,
-            EntryKind::User | EntryKind::System | EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
+            EntryKind::User
+                | EntryKind::Assistant
+                | EntryKind::Summary
+                | EntryKind::Reasoning
         );
         let use_read_file = entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.body);
 

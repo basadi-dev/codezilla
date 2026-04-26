@@ -60,6 +60,34 @@ impl TurnExecutor {
                 .await?;
         }
 
+        // Persist the system prompt once per turn for DB-level auditing and
+        // post-mortem debugging. System entries are hidden in the TUI but are
+        // available for inspection in the raw conversation store.
+        // We also cache the result here so the first loop iteration can reuse
+        // it rather than calling system_instructions() a second time.
+        let cwd_for_persist = params.cwd.as_deref().unwrap_or(".");
+        let initial_system_instructions = self
+            .system_instructions(cwd_for_persist, None)
+            .await?;
+        {
+            let system_text = initial_system_instructions.join("\n\n");
+            if !system_text.is_empty() {
+                self.persist_turn_item(ConversationItem {
+                    item_id: format!("sys_{}", Uuid::new_v4().simple()),
+                    thread_id: params.thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    created_at: now_seconds(),
+                    kind: ItemKind::SystemMessage,
+                    payload: json!({ "text": system_text }),
+                })
+                .await?;
+            }
+        }
+        // Seed the first loop iteration with the already-computed instructions;
+        // subsequent iterations will recompute (reasoning_effort may differ).
+        let mut cached_system_instructions: Option<Vec<String>> =
+            Some(initial_system_instructions);
+
         // Tracks whether we have already done one automatic context-overflow
         // trim this turn. We only retry once to avoid an infinite loop.
         let mut auto_trim_attempted = false;
@@ -167,15 +195,21 @@ impl TurnExecutor {
 
             let turn_ctx = TurnContext::build(self, &params, &turn_id, thread.clone()).await?;
 
-            let system_instructions = self
-                .system_instructions(
+            // Use the pre-computed instructions on the first iteration to avoid
+            // a redundant async call. Recompute on subsequent iterations so
+            // reasoning_effort from turn_ctx is correctly applied.
+            let system_instructions = if let Some(cached) = cached_system_instructions.take() {
+                cached
+            } else {
+                self.system_instructions(
                     &turn_ctx.cwd,
                     turn_ctx
                         .effective_model_settings
                         .reasoning_effort
                         .as_deref(),
                 )
-                .await?;
+                .await?
+            };
             let tools = self
                 .runtime
                 .inner

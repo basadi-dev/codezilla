@@ -618,6 +618,13 @@ fn render_approval_panel(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         ),
         Span::styled(" approve  ", Style::default().fg(COLOR_MUTED)),
         Span::styled(
+            "U",
+            Style::default()
+                .fg(COLOR_APPROVAL)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" auto-approve  ", Style::default().fg(COLOR_MUTED)),
+        Span::styled(
             "D",
             Style::default()
                 .fg(COLOR_ERROR)
@@ -632,7 +639,6 @@ fn render_approval_panel(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         ),
         Span::styled(" cancel", Style::default().fg(COLOR_MUTED)),
     ]));
-
     // ── Justification / reason ────────────────────────────────────────────────
     if !approval.approval.request.justification.is_empty() {
         for chunk in split_at_width(&approval.approval.request.justification, body_width) {

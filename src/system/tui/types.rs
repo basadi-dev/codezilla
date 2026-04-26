@@ -1404,7 +1404,9 @@ fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
         if !chunk.starts_with("++") {
             let mut spans = vec![Span::styled(
                 "+".to_string(),
-                Style::default().fg(Color::Rgb(100, 220, 120)).bg(BG_DIFF_ADD),
+                Style::default()
+                    .fg(Color::Rgb(100, 220, 120))
+                    .bg(BG_DIFF_ADD),
             )];
             spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_ADD));
             return spans;
@@ -1415,7 +1417,9 @@ fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
         if !chunk.starts_with("--") {
             let mut spans = vec![Span::styled(
                 "-".to_string(),
-                Style::default().fg(Color::Rgb(255, 100, 100)).bg(BG_DIFF_REMOVE),
+                Style::default()
+                    .fg(Color::Rgb(255, 100, 100))
+                    .bg(BG_DIFF_REMOVE),
             )];
             spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_REMOVE));
             return spans;

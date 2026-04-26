@@ -179,6 +179,9 @@ async fn handle_approval_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
             app.resolve_pending_approval(ApprovalDecision::Approved)
                 .await?;
         }
+        (KeyCode::Char('u') | KeyCode::Char('U'), _) => {
+            app.resolve_pending_approval_auto().await?;
+        }
         (KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc, _) => {
             app.resolve_pending_approval(ApprovalDecision::Denied)
                 .await?;
