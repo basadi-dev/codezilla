@@ -88,8 +88,19 @@ impl TurnExecutor {
         // If the model keeps exploring without ever writing or executing, it gets
         // a single nudge telling it to act. Resets to 0 as soon as one action
         // tool (write_file, bash_exec, …) appears in any round.
-        const MAX_CONSECUTIVE_READ_ONLY_ROUNDS: usize = 15;
+        // Threshold is deliberately low (8) so we force a transition to action
+        // before the context becomes heavy enough to impair tool-call generation.
+        const MAX_CONSECUTIVE_READ_ONLY_ROUNDS: usize = 8;
         let mut consecutive_read_only_rounds: usize = 0;
+
+        // Guard 4 — empty-response circuit breaker: a model response that
+        // contains *neither* text nor tool calls is a distinct failure mode from
+        // "intent narration without a call". It usually signals context
+        // saturation, reasoning-only output that wasn't surfaced, or a confused
+        // model state. We retry once with an explicit prompt then fail the turn
+        // so the user sees a clear error rather than a silent non-completion.
+        const MAX_EMPTY_RESPONSES: usize = 2;
+        let mut consecutive_empty_responses: usize = 0;
 
         loop {
             agent_iterations += 1;
@@ -334,10 +345,64 @@ impl TurnExecutor {
                     agent_iterations,
                     completed_tool_rounds,
                     no_tool_nudges,
+                    consecutive_empty_responses,
                     assistant_text_len = assistant_text.len(),
                     assistant_text_preview = %assistant_text.chars().take(200).collect::<String>(),
                     "executor: no tool calls in model response"
                 );
+
+                // ── Empty-response guard (Guard 4) ────────────────────────────
+                // A completely blank response (no text AND no tools) is a
+                // different failure mode from intent-narration-without-a-call.
+                // It means the model is confused or context-saturated — not
+                // that the task is done. Retry once with an explicit recovery
+                // prompt; on the second consecutive blank, fail the turn.
+                if assistant_text.is_empty() {
+                    consecutive_empty_responses += 1;
+                    tracing::warn!(
+                        turn_id = %turn_id,
+                        consecutive_empty_responses,
+                        MAX_EMPTY_RESPONSES,
+                        "executor: model returned empty response (no text, no tool calls)"
+                    );
+                    if consecutive_empty_responses >= MAX_EMPTY_RESPONSES {
+                        return self
+                            .fail_turn(
+                                &params.thread_id,
+                                &turn_id,
+                                "empty_response",
+                                &format!(
+                                    "The model returned {consecutive_empty_responses} consecutive \
+                                     empty responses (no text and no tool calls). The turn has \
+                                     been stopped to prevent a silent incomplete result."
+                                ),
+                            )
+                            .await;
+                    }
+                    no_tool_nudge_instruction = Some(
+                        "Your previous response was completely empty — no text and no tool call \
+                         was emitted. If the task is not yet complete, you must emit at least \
+                         one tool call now. If the task is complete, provide a brief summary \
+                         of what was accomplished."
+                            .into(),
+                    );
+                    self.runtime
+                        .publish_event(
+                            RuntimeEventKind::Warning,
+                            Some(params.thread_id.clone()),
+                            Some(turn_id.clone()),
+                            json!({
+                                "message": "Model returned an empty response — retrying with an explicit recovery prompt."
+                            }),
+                        )
+                        .await?;
+                    continue;
+                }
+
+                // Model produced text — not a blank response, reset the counter.
+                consecutive_empty_responses = 0;
+
+                // ── Intent-narration guard ────────────────────────────────────
                 if no_tool_nudges < MAX_NO_TOOL_NUDGES
                     && should_retry_no_tool_completion(
                         &assistant_text,
@@ -381,6 +446,7 @@ impl TurnExecutor {
                     .await;
             }
             no_tool_nudges = 0;
+            consecutive_empty_responses = 0;
 
             // Snapshot whether this round is pure read-only *before* tool_calls is moved.
             let round_is_read_only = tool_calls.iter().all(|c| is_read_only_tool(&c.tool_name));
