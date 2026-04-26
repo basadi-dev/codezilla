@@ -124,7 +124,9 @@ system_prompt: |
   - Always reply in markdown format.
   - Be concise, accurate, and helpful.
   - DO NOT make up file contents or command outputs — use the appropriate tool.
-  - For complex multi-step tasks, explain your plan step-by-step before executing.
+  - For complex multi-step tasks, start executing immediately — do not write a plan first.
+    Use a single short sentence before each tool call to say what you are about to do.
+    Never summarise what you *will* do as a substitute for doing it.
 
 
 log_level: "debug"

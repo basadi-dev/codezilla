@@ -143,16 +143,30 @@ pub struct PendingApprovalView {
 
 // ─── ComposerState ────────────────────────────────────────────────────────────
 
+/// Pastes larger than this many characters are stored out-of-band and shown
+/// as a `[pasted N chars]` placeholder so the composer stays responsive.
+const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
+
+/// The placeholder text injected into the composer for large pastes.
+/// Brackets make it behave as a single token for Alt+Backspace deletion.
+fn paste_placeholder(char_count: usize) -> String {
+    format!("[pasted {char_count} chars]")
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ComposerState {
     pub chars: Vec<char>,
     pub cursor: usize,
+    /// Holds the full text of a large paste that was replaced by a placeholder.
+    /// `take_text()` splices it back before returning the final string.
+    pasted_text: Option<String>,
 }
 
 impl ComposerState {
     pub fn set_text(&mut self, text: String) {
         self.chars = text.chars().collect();
         self.cursor = self.chars.len();
+        self.pasted_text = None;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -167,11 +181,28 @@ impl ComposerState {
         self.chars.iter().collect()
     }
 
+    /// Clears the composer and returns the final text, expanding any paste
+    /// placeholder back to the original full content before returning.
     pub fn take_text(&mut self) -> String {
-        let text = self.text();
+        let displayed = self.text();
         self.chars.clear();
         self.cursor = 0;
+
+        let text = if let Some(real) = self.pasted_text.take() {
+            // Replace the placeholder token with the stored real text.
+            let placeholder = paste_placeholder(real.chars().count());
+            displayed.replacen(&placeholder, &real, 1)
+        } else {
+            displayed
+        };
+
         text
+    }
+
+    /// Returns true when a large paste placeholder is currently active.
+    #[allow(dead_code)]
+    pub fn has_paste_placeholder(&self) -> bool {
+        self.pasted_text.is_some()
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -179,11 +210,27 @@ impl ComposerState {
         self.cursor += 1;
     }
 
+    /// Insert a string into the composer.  If the string is longer than
+    /// [`PASTE_PLACEHOLDER_THRESHOLD`] characters **and** the composer is
+    /// currently empty (a fresh paste into a blank input), the real text is
+    /// stored in `pasted_text` and only a compact placeholder is inserted so
+    /// the composer widget stays snappy.
     pub fn insert_str(&mut self, text: &str) {
-        let chars = text.chars().collect::<Vec<_>>();
-        let len = chars.len();
-        self.chars.splice(self.cursor..self.cursor, chars);
-        self.cursor += len;
+        let char_count = text.chars().count();
+        if char_count >= PASTE_PLACEHOLDER_THRESHOLD && self.pasted_text.is_none() && self.chars.is_empty() {
+            // Store the full paste and show a compact stand-in instead.
+            self.pasted_text = Some(text.to_string());
+            let placeholder = paste_placeholder(char_count);
+            let ph_chars: Vec<char> = placeholder.chars().collect();
+            let ph_len = ph_chars.len();
+            self.chars.splice(self.cursor..self.cursor, ph_chars);
+            self.cursor += ph_len;
+        } else {
+            let chars = text.chars().collect::<Vec<_>>();
+            let len = chars.len();
+            self.chars.splice(self.cursor..self.cursor, chars);
+            self.cursor += len;
+        }
     }
 
     pub fn backspace(&mut self) {
