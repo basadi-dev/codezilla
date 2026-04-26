@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -19,6 +20,7 @@ use crate::system::domain::{
     ActionDescriptor, ApprovalCategory, ToolCall, ToolCallId, ToolDefinition, ToolExecutionContext,
     ToolListingContext, ToolProviderKind, ToolResult,
 };
+use crate::system::intel::cache::IntelCache;
 
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
@@ -480,6 +482,8 @@ impl ToolProvider for ListDirToolProvider {
 pub struct FileToolProvider {
     sandbox: Arc<SandboxManager>,
     permissions: Arc<PermissionManager>,
+    /// Optional intel cache — used to invalidate stale symbols after writes.
+    intel_cache: Option<Arc<IntelCache>>,
 }
 
 impl FileToolProvider {
@@ -487,7 +491,14 @@ impl FileToolProvider {
         Self {
             sandbox,
             permissions,
+            intel_cache: None,
         }
+    }
+
+    /// Attach an intel cache so write/patch operations invalidate stale symbols.
+    pub fn with_intel_cache(mut self, cache: Arc<IntelCache>) -> Self {
+        self.intel_cache = Some(cache);
+        self
     }
 }
 
@@ -650,6 +661,11 @@ impl ToolProvider for FileToolProvider {
                 let (diff_text, lines_added, lines_removed) =
                     make_unified_diff(file_path, old_content.as_deref(), content);
 
+                // Evict stale symbols from the intel cache.
+                if let Some(cache) = &self.intel_cache {
+                    cache.invalidate(Path::new(file_path));
+                }
+
                 json!({
                     "ok": true,
                     "path": file_path,
@@ -733,6 +749,11 @@ impl ToolProvider for FileToolProvider {
 
                 let (diff_text, lines_added, lines_removed) =
                     make_unified_diff(file_path, Some(&old_content), &new_content);
+
+                // Evict stale symbols from the intel cache.
+                if let Some(cache) = &self.intel_cache {
+                    cache.invalidate(Path::new(file_path));
+                }
 
                 json!({
                     "ok": true,

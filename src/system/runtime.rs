@@ -19,6 +19,7 @@ use super::agent::{
     RequestUserInputToolProvider, SandboxManager, SearchToolProvider, ShellToolProvider,
     ToolOrchestrator, TurnExecutor, WebToolProvider,
 };
+use super::intel::RepoMap;
 // Agent types re-exported for callers outside runtime.rs
 #[allow(unused_imports)]
 pub use super::agent::{AutoReviewer, EventFilter, EventSubscription, ModelDescription};
@@ -246,6 +247,8 @@ pub(crate) struct RuntimeInner {
     pub(crate) persistence_manager: Arc<PersistenceManager>,
     pub(crate) model_gateway: Arc<ModelGateway>,
     pub(crate) extension_manager: Arc<ExtensionManager>,
+    /// Codebase intelligence: repo map builder + SHA2-keyed symbol cache.
+    pub(crate) repo_map: Arc<RepoMap>,
 }
 
 // ─── ConversationRuntime (thin coordinator) ───────────────────────────────────
@@ -283,10 +286,16 @@ impl ConversationRuntime {
             permissions.clone(),
         )));
         tool_orchestrator.register_provider(Arc::new(ListDirToolProvider));
-        tool_orchestrator.register_provider(Arc::new(FileToolProvider::new(
-            sandbox.clone(),
-            permissions.clone(),
-        )));
+
+        // Build the intel cache early so FileToolProvider can invalidate entries
+        // after write operations.
+        let repo_map = Arc::new(RepoMap::new(200));
+        let intel_cache = repo_map.cache();
+
+        tool_orchestrator.register_provider(Arc::new(
+            FileToolProvider::new(sandbox.clone(), permissions.clone())
+                .with_intel_cache(intel_cache),
+        ));
         tool_orchestrator.register_provider(Arc::new(SearchToolProvider));
         tool_orchestrator.register_provider(Arc::new(ImageToolProvider));
         // NOTE: SpawnAgentToolProvider is registered *after* Self is constructed (late registration)
@@ -325,6 +334,9 @@ impl ConversationRuntime {
             persistence_manager: persistence,
             model_gateway: Arc::new(ModelGateway::new(llm_client)),
             extension_manager: extensions,
+            // Re-use the repo_map that shares its cache with FileToolProvider
+            // so write invalidations are visible to the map builder.
+            repo_map,
         };
         let me = Self {
             inner: Arc::new(inner),

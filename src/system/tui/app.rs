@@ -695,6 +695,50 @@ impl InteractiveApp {
             }
         }
     }
+
+    /// Scroll the composer content by `delta` visual rows (negative = up).
+    /// This adjusts the cursor position to keep the view anchored, since
+    /// the composer currently auto-scrolls to keep the cursor visible.
+    pub fn composer_scroll(&mut self, delta: i32) {
+        let (first_w, cont_w) = self.composer_wrap_widths();
+        let (cursor_row, cursor_col) = self.composer.visual_cursor_row_col(first_w, cont_w);
+        let visible_rows = self.composer_area.height as usize;
+        let total_visual_rows = {
+            let text = self.composer.text();
+            let logical_lines: Vec<&str> = if text.is_empty() {
+                vec![""]
+            } else {
+                text.split('\n').collect()
+            };
+            let widths = (first_w, cont_w);
+            let mut rows = 0usize;
+            for (i, line) in logical_lines.iter().enumerate() {
+                rows += super::types::wrapped_rows_for_line(line.chars().count(), i == 0, widths);
+            }
+            rows.max(1)
+        };
+
+        // Compute target visual row: move the "viewport anchor" by delta
+        let current_scroll = if cursor_row >= visible_rows {
+            cursor_row + 1 - visible_rows
+        } else {
+            0
+        };
+        let new_scroll = if delta < 0 {
+            current_scroll.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (current_scroll + delta as usize).min(total_visual_rows.saturating_sub(visible_rows))
+        };
+
+        // Move cursor to the same column in the new scroll-relative row
+        let target_row =
+            new_scroll + (cursor_row - current_scroll).min(visible_rows.saturating_sub(1));
+        let new_cursor =
+            self.composer
+                .cursor_for_visual_position(target_row, cursor_col, (first_w, cont_w));
+        self.composer.cursor = new_cursor;
+    }
+
     pub fn scroll_transcript(&mut self, delta: i32) {
         if delta < 0 {
             // Scrolling up — detach from the bottom.

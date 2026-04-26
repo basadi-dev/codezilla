@@ -60,13 +60,60 @@ impl TurnExecutor {
                 .await?;
         }
 
+        // ── Codebase intelligence — build the repo map once for the entire turn ─
+        // The map is expensive to build (directory walk + file reads + hashing)
+        // so we compute it here and thread the result through every call to
+        // system_instructions(). This avoids N-1 redundant rebuilds in a
+        // multi-round turn.
+        let cwd_for_persist = params.cwd.as_deref().unwrap_or(".");
+        let repo_map_text: Option<String> = {
+            let intel_cfg = &self.runtime.inner.effective_config.codebase_intel;
+            if intel_cfg.enabled {
+                // Show the user that indexing is in progress.
+                self.runtime.publish_event(
+                    RuntimeEventKind::CompactionStatus,
+                    Some(params.thread_id.clone()),
+                    Some(turn_id.clone()),
+                    json!({ "status": "started", "message": "Indexing codebase…" }),
+                ).await?;
+
+                let t0 = std::time::Instant::now();
+                let repo_map = self.runtime.inner.repo_map.clone();
+                let result = tokio::task::spawn_blocking({
+                    let cwd = cwd_for_persist.to_string();
+                    let cfg = intel_cfg.clone();
+                    move || repo_map.build_map(&cwd, &cfg)
+                })
+                .await
+                .unwrap_or(None);
+
+                let elapsed_ms = t0.elapsed().as_millis();
+                let status_msg = match &result {
+                    Some(map) => {
+                        let approx_files = map.lines().filter(|l| l.contains('[')).count();
+                        format!("Indexed {approx_files} files in {elapsed_ms}ms")
+                    }
+                    None => format!("Codebase index skipped ({elapsed_ms}ms)"),
+                };
+                self.runtime.publish_event(
+                    RuntimeEventKind::CompactionStatus,
+                    Some(params.thread_id.clone()),
+                    Some(turn_id.clone()),
+                    json!({ "status": "completed", "message": status_msg }),
+                ).await?;
+
+                result
+            } else {
+                None
+            }
+        };
+
         // Persist the system prompt once per turn for DB-level auditing and
         // post-mortem debugging. System entries are hidden in the TUI but are
         // available for inspection in the raw conversation store.
         // We also cache the result here so the first loop iteration can reuse
         // it rather than calling system_instructions() a second time.
-        let cwd_for_persist = params.cwd.as_deref().unwrap_or(".");
-        let initial_system_instructions = self.system_instructions(cwd_for_persist, None).await?;
+        let initial_system_instructions = self.system_instructions(cwd_for_persist, None, repo_map_text.as_deref()).await?;
         {
             let system_text = initial_system_instructions.join("\n\n");
             if !system_text.is_empty() {
@@ -113,9 +160,11 @@ impl TurnExecutor {
         // If the model keeps exploring without ever writing or executing, it gets
         // a single nudge telling it to act. Resets to 0 as soon as one action
         // tool (write_file, bash_exec, …) appears in any round.
-        // Threshold is deliberately low (8) so we force a transition to action
-        // before the context becomes heavy enough to impair tool-call generation.
-        const MAX_CONSECUTIVE_READ_ONLY_ROUNDS: usize = 8;
+        // Threshold is deliberately low (4) — the repo map is now injected at
+        // turn start, so the model already knows the file tree and top-level
+        // symbols.  Excessive reading beyond 4 rounds is a sign of context bloat
+        // or confusion, not legitimate exploration.
+        const MAX_CONSECUTIVE_READ_ONLY_ROUNDS: usize = 4;
         let mut consecutive_read_only_rounds: usize = 0;
 
         // Guard 4 — empty-response circuit breaker: a model response that
@@ -204,6 +253,7 @@ impl TurnExecutor {
                         .effective_model_settings
                         .reasoning_effort
                         .as_deref(),
+                    repo_map_text.as_deref(),
                 )
                 .await?
             };
@@ -1038,6 +1088,7 @@ impl TurnExecutor {
         &self,
         cwd: &str,
         reasoning_effort: Option<&str>,
+        repo_map_text: Option<&str>,
     ) -> Result<Vec<String>> {
         let mut instructions = vec![self.runtime.inner.effective_config.system_prompt.clone()];
         if let Some(instruction) = thinking_instruction(reasoning_effort) {
@@ -1049,6 +1100,19 @@ impl TurnExecutor {
                 instructions.push(format!("Skill {}: {}", skill.name, skill.description));
             }
         }
+
+        // ── Codebase intelligence — repo map injection ────────────────────────
+        // The map is pre-built once per turn in run_turn() and passed in here.
+        // This avoids redundant directory walks + file reads on every iteration.
+        if let Some(map_text) = repo_map_text {
+            instructions.push(format!(
+                "The following is an automatically generated structural map of the \
+                 repository. Use it to locate files and symbols before resorting to \
+                 `read_file` or `list_dir` calls. It is current as of this turn start \
+                 and reflects the latest on-disk state.\n\n{map_text}"
+            ));
+        }
+
         Ok(instructions)
     }
 }

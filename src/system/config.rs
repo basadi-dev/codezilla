@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use super::intel::CodebaseIntelConfig;
+
 // ── Auto-compaction config ────────────────────────────────────────────────────
 
 /// Controls automatic context compaction triggered after each completed turn.
@@ -182,6 +184,8 @@ pub struct EffectiveConfig {
     pub models: Vec<ModelSettings>,
     #[serde(default)]
     pub auto_compaction: AutoCompactionConfig,
+    #[serde(default)]
+    pub codebase_intel: CodebaseIntelConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +232,8 @@ struct RawSpecConfig {
     pub models: Vec<ModelSettings>,
     #[serde(default)]
     pub auto_compaction: AutoCompactionConfig,
+    #[serde(default)]
+    pub codebase_intel: CodebaseIntelConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -334,6 +340,7 @@ impl ConfigManager {
             log_file: raw.log_file,
             models: raw.models,
             auto_compaction: raw.auto_compaction,
+            codebase_intel: raw.codebase_intel,
         };
 
         *self.cached_effective_config.write().unwrap() = Some(effective.clone());

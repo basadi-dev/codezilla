@@ -436,7 +436,7 @@ impl ComposerState {
         (visual_row + row_in_line, col_in_line)
     }
 
-    fn cursor_for_visual_position(
+    pub fn cursor_for_visual_position(
         &self,
         target_row: usize,
         desired_col: usize,
@@ -531,7 +531,11 @@ fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
-fn wrapped_rows_for_line(len: usize, is_first_line: bool, widths: (usize, usize)) -> usize {
+pub(crate) fn wrapped_rows_for_line(
+    len: usize,
+    is_first_line: bool,
+    widths: (usize, usize),
+) -> usize {
     let (first_width, continuation_width) = widths;
     let initial_width = if is_first_line {
         first_width

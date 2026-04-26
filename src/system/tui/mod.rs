@@ -175,11 +175,19 @@ pub async fn run_interactive_tui(
                     match mouse.kind {
                         // ── Wheel scroll ─────────────────────────────────────
                         MouseEventKind::ScrollUp => {
-                            app.scroll_transcript(-3);
+                            if in_composer {
+                                app.composer_scroll(-1);
+                            } else {
+                                app.scroll_transcript(-3);
+                            }
                             dirty = true;
                         }
                         MouseEventKind::ScrollDown => {
-                            app.scroll_transcript(3);
+                            if in_composer {
+                                app.composer_scroll(1);
+                            } else {
+                                app.scroll_transcript(3);
+                            }
                             dirty = true;
                         }
                         // ── Drag-to-select (left button) ─────────────────────
