@@ -676,6 +676,7 @@ impl ConversationRuntime {
             summary_mode: None,
             service_tier: None,
             web_search_enabled: false,
+            context_window: self.inner.effective_config.model_settings.context_window,
         };
 
         let compaction_messages = build_compaction_messages(&system_instructions, &persisted.items);

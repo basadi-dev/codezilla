@@ -6,9 +6,9 @@ use uuid::Uuid;
 use super::model_gateway::{estimate_items_token_pct, is_context_overflow_error, ModelStreamEvent};
 use crate::system::domain::{
     now_seconds, ActionDescriptor, ApprovalCategory, ApprovalDecision, ApprovalPolicy,
-    ApprovalRequest,
-    ConversationItem, ItemKind, ModelSettings, RuntimeEventKind, ThreadStatus, TokenUsage,
-    ToolCall, ToolExecutionContext, ToolListingContext, ToolResult, TurnStatus, UserInput,
+    ApprovalRequest, ConversationItem, ItemKind, ModelSettings, RuntimeEventKind, ThreadStatus,
+    TokenUsage, ToolCall, ToolExecutionContext, ToolListingContext, ToolResult, TurnStatus,
+    UserInput,
 };
 use crate::system::error as cod_error;
 
@@ -155,6 +155,12 @@ impl TurnExecutor {
                         summary_mode: None,
                         service_tier: None,
                         web_search_enabled: false,
+                        context_window: self
+                            .runtime
+                            .inner
+                            .effective_config
+                            .model_settings
+                            .context_window,
                     });
             let request = super::model_gateway::ModelRequest {
                 system_instructions: self
@@ -532,7 +538,19 @@ impl TurnExecutor {
             .copied()
             .unwrap_or(cfg.threshold_pct);
 
-        let used_pct = estimate_items_token_pct(&persisted.items);
+        let model_settings = self
+            .runtime
+            .inner
+            .effective_config
+            .models
+            .iter()
+            .find(|m| m.model_id == model_id)
+            .cloned()
+            .unwrap_or_else(|| self.runtime.inner.effective_config.model_settings.clone());
+        let prompt_budget =
+            super::model_gateway::calculate_prompt_budget(model_settings.context_window);
+
+        let used_pct = estimate_items_token_pct(&persisted.items, prompt_budget);
         if used_pct < threshold as f64 {
             return;
         }
@@ -754,6 +772,7 @@ impl TurnExecutor {
     ///
     /// Returns `true` if any tool in the round succeeded (used by the
     /// consecutive-failure guard in `run_turn`).
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool_round(
         &self,
         tool_calls: Vec<ToolCall>,
@@ -1310,5 +1329,3 @@ fn find_repetition_start(text: &str) -> Option<usize> {
     }
     None
 }
-
-

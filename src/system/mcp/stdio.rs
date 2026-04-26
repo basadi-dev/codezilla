@@ -55,7 +55,7 @@ impl StdioMcpClient {
                         req["jsonrpc"] = json!("2.0");
 
                         let msg = format!("{}\n", serde_json::to_string(&req).unwrap());
-                        if let Err(_) = stdin.write_all(msg.as_bytes()).await {
+                        if stdin.write_all(msg.as_bytes()).await.is_err() {
                             let _ = reply_tx.send(Err(anyhow!("Failed to write to MCP stdin")));
                             break;
                         }

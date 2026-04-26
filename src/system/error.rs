@@ -1,12 +1,12 @@
-/// Structured error classification for the Codezilla runtime.
-///
-/// All error strings that leave the internal pipeline and are displayed to the
-/// user pass through here.  The taxonomy provides:
-///
-/// - [`ErrorKind`] — machine-readable category for routing / recovery logic.
-/// - [`CodError`] — a thin wrapper that pairs a kind with a human message.
-/// - [`classify`] — maps raw `anyhow` error strings → `ErrorKind`.
-/// - [`humanize`] — rewrites terse/opaque error strings into plain English.
+//! Structured error classification for the Codezilla runtime.
+//!
+//! All error strings that leave the internal pipeline and are displayed to the
+//! user pass through here.  The taxonomy provides:
+//!
+//! - [`ErrorKind`] — machine-readable category for routing / recovery logic.
+//! - [`CodError`] — a thin wrapper that pairs a kind with a human message.
+//! - [`classify`] — maps raw `anyhow` error strings → `ErrorKind`.
+//! - [`humanize`] — rewrites terse/opaque error strings into plain English.
 
 // ─── Error kinds ─────────────────────────────────────────────────────────────
 
@@ -177,9 +177,7 @@ pub fn humanize(raw: &str, kind: ErrorKind) -> String {
 
         ErrorKind::AuthError => {
             let extra = extract_api_detail(raw);
-            format!(
-                "Authentication failed — check your API key or token.{extra}"
-            )
+            format!("Authentication failed — check your API key or token.{extra}")
         }
 
         ErrorKind::ToolNotFound => {

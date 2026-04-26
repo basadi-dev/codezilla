@@ -25,9 +25,9 @@ use super::super::runtime::{
 use super::types::{
     basename, entry_from_item, entry_style, format_timestamp, format_tool_result,
     is_read_file_body, relative_time_ago, render_read_file_body_lines, short_turn_id,
-    split_at_width, thread_label, transcript_lines,
-    AutocompleteItem, ComposerState, EntryKind, FocusPane, PendingApprovalView, SelectionPoint,
-    SelectionRange, TranscriptEntry, COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
+    split_at_width, thread_label, transcript_lines, AutocompleteItem, ComposerState, EntryKind,
+    FocusPane, PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
+    COLOR_MUTED, THREAD_LIMIT,
 };
 
 /// Sentinel item-id for the "thinking" placeholder injected immediately after
@@ -1010,6 +1010,7 @@ impl InteractiveApp {
             summary_mode: None,
             service_tier: None,
             web_search_enabled: false,
+            context_window: cfg.model_settings.context_window,
         }
     }
 
@@ -1490,7 +1491,11 @@ impl InteractiveApp {
             }
             _ => (String::new(), "Streaming response…".into()),
         };
-        self.live_activity = if activity.is_empty() { None } else { Some(activity) };
+        self.live_activity = if activity.is_empty() {
+            None
+        } else {
+            Some(activity)
+        };
         self.status_message = status;
         self.error_message = None;
         // Do NOT force auto_scroll here — if the user scrolled up, respect that.

@@ -77,8 +77,12 @@ impl ModelGateway {
         &self,
         request: ModelRequest,
     ) -> Result<mpsc::Receiver<ModelStreamEvent>> {
-        let messages =
-            build_llm_messages(&request.system_instructions, &request.conversation_items);
+        let prompt_budget = calculate_prompt_budget(request.model_settings.context_window);
+        let messages = build_llm_messages(
+            &request.system_instructions,
+            &request.conversation_items,
+            prompt_budget,
+        );
         let tools = request
             .tool_definitions
             .iter()
@@ -293,27 +297,27 @@ pub fn is_context_overflow_error(err: &str) -> bool {
 /// Conservative estimate: 4 characters ≈ 1 token (GPT/Claude average).
 const CHARS_PER_TOKEN: usize = 4;
 
-/// Maximum context tokens we ever attempt to fill.
-/// 100 k is a safe ceiling that fits within every model we support;
-/// the actual model limit may be larger but we stay well clear of it.
-const MAX_CONTEXT_TOKENS: usize = 100_000;
-
 /// Tokens we always reserve for the model's output.
 const RESERVED_OUTPUT_TOKENS: usize = 8_192;
 
-/// Token budget available for the full prompt (system + history).
-const PROMPT_TOKEN_BUDGET: usize = MAX_CONTEXT_TOKENS - RESERVED_OUTPUT_TOKENS;
+/// Default context window if not specified by the model settings.
+pub const DEFAULT_CONTEXT_WINDOW: usize = 100_000;
+
+pub fn calculate_prompt_budget(context_window: Option<usize>) -> usize {
+    let window = context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    window.saturating_sub(RESERVED_OUTPUT_TOKENS)
+}
 
 /// Rough token count for a single `ConversationItem`.
 fn item_token_estimate(item: &ConversationItem) -> usize {
     item.payload.to_string().len().saturating_add(32) / CHARS_PER_TOKEN
 }
 
-/// Returns estimated context usage as a percentage of `PROMPT_TOKEN_BUDGET`.
+/// Returns estimated context usage as a percentage of the given `prompt_budget`.
 /// Used by auto-compaction to decide when to compact.
-pub fn estimate_items_token_pct(items: &[ConversationItem]) -> f64 {
+pub fn estimate_items_token_pct(items: &[ConversationItem], prompt_budget: usize) -> f64 {
     let used: usize = items.iter().map(item_token_estimate).sum();
-    (used as f64 / PROMPT_TOKEN_BUDGET as f64) * 100.0
+    (used as f64 / prompt_budget as f64) * 100.0
 }
 
 /// Apply the token-budget guard and convert items to LLM messages.
@@ -328,13 +332,14 @@ pub fn estimate_items_token_pct(items: &[ConversationItem]) -> f64 {
 pub fn build_llm_messages(
     system_instructions: &[String],
     items: &[ConversationItem],
+    prompt_budget: usize,
 ) -> Vec<llm::Message> {
     // ── 1. Measure system tokens ──────────────────────────────────────────────
     let system_tokens: usize = system_instructions
         .iter()
         .map(|s| s.len().saturating_add(16) / CHARS_PER_TOKEN)
         .sum();
-    let mut remaining_budget = PROMPT_TOKEN_BUDGET.saturating_sub(system_tokens);
+    let mut remaining_budget = prompt_budget.saturating_sub(system_tokens);
 
     // ── 2. Group consecutive items into logical turns ─────────────────────────
     // A "turn boundary" is any UserMessage or a ReasoningSummary (compaction

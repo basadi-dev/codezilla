@@ -434,12 +434,27 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     // ── Quit-confirm mode: take over the entire status bar ────────────────────
     if app.quit_requested {
         let spans = vec![
-            Span::styled("  ⚠ ", Style::default().fg(COLOR_APPROVAL).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  ⚠ ",
+                Style::default()
+                    .fg(COLOR_APPROVAL)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Press ", Style::default().fg(COLOR_MUTED)),
-            Span::styled("^Q", Style::default().fg(COLOR_APPROVAL).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "^Q",
+                Style::default()
+                    .fg(COLOR_APPROVAL)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" again to quit", Style::default().fg(COLOR_MUTED)),
             Span::styled("   ", Style::default()),
-            Span::styled("Esc", Style::default().fg(COLOR_ERROR).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(COLOR_ERROR)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to cancel", Style::default().fg(COLOR_MUTED)),
         ];
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -498,10 +513,17 @@ fn render_approval_panel(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
 
     // ── Header line: sigil + title ──────────────────────────────────────────
     lines.push(Line::from(vec![
-        Span::styled("  ⚠  ", Style::default().fg(COLOR_APPROVAL).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  ⚠  ",
+            Style::default()
+                .fg(COLOR_APPROVAL)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             approval.approval.request.title.clone(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
 
@@ -515,17 +537,23 @@ fn render_approval_panel(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
         Span::styled(
             "A",
-            Style::default().fg(COLOR_APPROVAL).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(COLOR_APPROVAL)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" approve  ", Style::default().fg(COLOR_MUTED)),
         Span::styled(
             "D",
-            Style::default().fg(COLOR_ERROR).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(COLOR_ERROR)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" deny  ", Style::default().fg(COLOR_MUTED)),
         Span::styled(
             "Esc",
-            Style::default().fg(COLOR_ERROR).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(COLOR_ERROR)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" cancel", Style::default().fg(COLOR_MUTED)),
     ]));

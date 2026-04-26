@@ -139,6 +139,7 @@ pub enum StreamChunk {
 #[async_trait::async_trait]
 pub trait LlmClient: Send + Sync {
     /// Non-streaming completion.
+    #[allow(clippy::too_many_arguments)]
     async fn complete(
         &self,
         provider_id: &str,
@@ -151,6 +152,7 @@ pub trait LlmClient: Send + Sync {
     ) -> Result<LlmResponse>;
 
     /// Streaming completion — returns a channel of `StreamChunk`s.
+    #[allow(clippy::too_many_arguments)]
     async fn stream(
         &self,
         provider_id: &str,

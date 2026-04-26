@@ -8,8 +8,8 @@ use anyhow::Result;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event, MouseButton, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -97,10 +97,8 @@ pub async fn run_interactive_tui(
         }
 
         // Poll background compaction task (non-blocking try_recv under the hood).
-        if app.pending_compact.is_some() {
-            if app.poll_compact_result().await? {
-                dirty = true;
-            }
+        if app.pending_compact.is_some() && app.poll_compact_result().await? {
+            dirty = true;
         }
 
         if dirty {
@@ -198,7 +196,7 @@ pub async fn run_interactive_tui(
                         // Strip trailing newlines to prevent accidental submission
                         // when copying from code blocks or terminal output.
                         let text = text.trim_end_matches('\n');
-                        app.composer.insert_str(&text);
+                        app.composer.insert_str(text);
                         dirty = true;
                     }
                 }

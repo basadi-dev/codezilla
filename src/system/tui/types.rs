@@ -217,7 +217,10 @@ impl ComposerState {
     /// the composer widget stays snappy.
     pub fn insert_str(&mut self, text: &str) {
         let char_count = text.chars().count();
-        if char_count >= PASTE_PLACEHOLDER_THRESHOLD && self.pasted_text.is_none() && self.chars.is_empty() {
+        if char_count >= PASTE_PLACEHOLDER_THRESHOLD
+            && self.pasted_text.is_none()
+            && self.chars.is_empty()
+        {
             // Store the full paste and show a compact stand-in instead.
             self.pasted_text = Some(text.to_string());
             let placeholder = paste_placeholder(char_count);
@@ -582,13 +585,12 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             item_id: item.item_id.clone(),
             tool_call_id,
             kind: EntryKind::ToolCall,
-            title: format!(
-                "{}",
-                item.payload
-                    .get("toolName")
-                    .and_then(|v: &serde_json::Value| v.as_str())
-                    .unwrap_or("tool")
-            ),
+            title: item
+                .payload
+                .get("toolName")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or("tool")
+                .to_string(),
             body: format_tool_call(
                 item.payload
                     .get("toolName")
@@ -741,10 +743,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             } else {
                 cmd_parts.join(" ")
             };
-            let exit_code = item
-                .payload
-                .get("exitCode")
-                .and_then(|v| v.as_i64());
+            let exit_code = item.payload.get("exitCode").and_then(|v| v.as_i64());
             let mut body = String::new();
             if !cmd_str.is_empty() {
                 body.push_str(&cmd_str);
@@ -760,7 +759,11 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 item_id: item.item_id.clone(),
                 tool_call_id: None,
                 kind: EntryKind::Command,
-                title: cmd_str.split_whitespace().next().unwrap_or("cmd").to_string(),
+                title: cmd_str
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("cmd")
+                    .to_string(),
                 body,
                 timestamp: Some(item.created_at),
                 pending: false,
@@ -777,10 +780,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .get("stderr")
                 .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or_default();
-            let exit_code = item
-                .payload
-                .get("exitCode")
-                .and_then(|v| v.as_i64());
+            let exit_code = item.payload.get("exitCode").and_then(|v| v.as_i64());
             let mut body = String::new();
             if !stdout.is_empty() {
                 body.push_str(stdout);
@@ -789,10 +789,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 if !body.is_empty() {
                     body.push('\n');
                 }
-                body.push_str(&format!(
-                    "stderr:\n{}",
-                    stderr
-                ));
+                body.push_str(&format!("stderr:\n{}", stderr));
             }
             if let Some(code) = exit_code {
                 body.push_str(&format!("\nexit code: {code}"));
@@ -1053,7 +1050,8 @@ fn append_transcript_entry_lines(
             for chunk in split_at_width(body_line, body_width) {
                 if current_line >= start_line && current_line < end_line {
                     let spans = render_diff_chunk(&chunk, lang);
-                    let mut line_spans = vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                    let mut line_spans =
+                        vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
                     line_spans.extend(spans);
                     out.push(Line::from(line_spans));
                 }
@@ -1066,17 +1064,15 @@ fn append_transcript_entry_lines(
         for body_line in entry.body.split('\n') {
             for chunk in split_at_width(body_line, body_width) {
                 if current_line >= start_line && current_line < end_line {
-                    let prefix = if is_first {
-                        "$ "
-                    } else {
-                        "  "
-                    };
+                    let prefix = if is_first { "$ " } else { "  " };
                     is_first = false;
                     out.push(Line::from(vec![
                         Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
                         Span::styled(
                             prefix,
-                            Style::default().fg(COLOR_WARNING).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(COLOR_WARNING)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(chunk, Style::default().fg(body_color)),
                     ]));
@@ -1153,9 +1149,7 @@ fn diff_line_color(line: &str) -> Color {
 }
 
 fn diff_lang_for_body(body: &str) -> &'static str {
-    diff_path_for_body(body)
-        .map(lang_for_path)
-        .unwrap_or("")
+    diff_path_for_body(body).map(lang_for_path).unwrap_or("")
 }
 
 pub fn read_file_lang_for_body(body: &str) -> &'static str {
@@ -1211,11 +1205,7 @@ fn read_file_path_for_body(body: &str) -> Option<&str> {
     if !first.starts_with("📄 ") {
         return None;
     }
-    let path = first
-        .trim_start_matches("📄 ")
-        .split("  (")
-        .next()?
-        .trim();
+    let path = first.trim_start_matches("📄 ").split("  (").next()?.trim();
     if path.is_empty() {
         None
     } else {
@@ -1243,7 +1233,10 @@ pub fn render_read_file_body_lines(
         let chunks = split_at_width(body_line, width);
         for chunk in chunks {
             if chunk.trim() == "…" || chunk.starts_with("▲ ") {
-                out.push(vec![Span::styled(chunk, Style::default().fg(COLOR_WARNING))]);
+                out.push(vec![Span::styled(
+                    chunk,
+                    Style::default().fg(COLOR_WARNING),
+                )]);
                 continue;
             }
 
@@ -1264,7 +1257,10 @@ pub fn render_read_file_body_lines(
 
 fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
     if chunk.starts_with("--- ") || chunk.starts_with("+++ ") {
-        return vec![Span::styled(chunk.to_string(), Style::default().fg(COLOR_MUTED))];
+        return vec![Span::styled(
+            chunk.to_string(),
+            Style::default().fg(COLOR_MUTED),
+        )];
     }
     if chunk.starts_with("@@") {
         return vec![Span::styled(
@@ -1273,7 +1269,10 @@ fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
         )];
     }
     if chunk.starts_with('▲') {
-        return vec![Span::styled(chunk.to_string(), Style::default().fg(COLOR_WARNING))];
+        return vec![Span::styled(
+            chunk.to_string(),
+            Style::default().fg(COLOR_WARNING),
+        )];
     }
 
     if lang.is_empty() {
@@ -1505,14 +1504,8 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
             }
         }
         "list_dir" => {
-            let path = arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or(".");
-            let depth = arguments
-                .get("depth")
-                .and_then(Value::as_u64)
-                .unwrap_or(1);
+            let path = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
+            let depth = arguments.get("depth").and_then(Value::as_u64).unwrap_or(1);
             format!("{path}  (depth {depth})")
         }
         "grep_search" => {
@@ -1520,10 +1513,7 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
                 .get("pattern")
                 .and_then(Value::as_str)
                 .unwrap_or("?");
-            let path = arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or(".");
+            let path = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
             format!("/{pattern}/  in {path}")
         }
         "read_file" | "write_file" | "create_directory" | "remove_path" => {
@@ -1595,10 +1585,7 @@ pub fn format_tool_result(output: Option<&Value>, error_message: Option<&Value>)
 
 /// Format the result of a `write_file` call that carries a unified diff.
 fn format_write_file_result(output: &Value) -> String {
-    let path = output
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or("?");
+    let path = output.get("path").and_then(Value::as_str).unwrap_or("?");
     let is_new = output
         .get("is_new_file")
         .and_then(Value::as_bool)
@@ -1611,10 +1598,7 @@ fn format_write_file_result(output: &Value) -> String {
         .get("lines_removed")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let diff = output
-        .get("diff")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let diff = output.get("diff").and_then(Value::as_str).unwrap_or("");
 
     let status = if is_new {
         format!("new file  +{added}")
@@ -1703,10 +1687,7 @@ fn format_shell_result(output: &Value) -> Option<String> {
 /// Format a `list_dir` result as a compact visual tree.
 fn format_list_dir_result(output: &Value) -> Option<String> {
     let entries = output.get("entries")?.as_array()?;
-    let root = output
-        .get("root")
-        .and_then(Value::as_str)
-        .unwrap_or(".");
+    let root = output.get("root").and_then(Value::as_str).unwrap_or(".");
     let truncated = output
         .get("truncated")
         .and_then(Value::as_bool)
@@ -1733,7 +1714,10 @@ fn format_list_dir_result(output: &Value) -> Option<String> {
         let size = entry.get("size_bytes").and_then(Value::as_u64);
 
         // Indent based on path depth
-        let depth = path.chars().filter(|&c| c == '/' || c == std::path::MAIN_SEPARATOR).count();
+        let depth = path
+            .chars()
+            .filter(|&c| c == '/' || c == std::path::MAIN_SEPARATOR)
+            .count();
         let indent = "  ".repeat(depth);
         let icon = if is_dir { "▸" } else { " " };
         let name = path.rsplit('/').next().unwrap_or(path);
@@ -1785,10 +1769,7 @@ fn format_read_file_result(output: &Value) -> Option<String> {
 /// Format a `grep_search` result as a match count header + list.
 fn format_grep_result(output: &Value) -> Option<String> {
     let matches = output.get("matches")?.as_array()?;
-    let source = output
-        .get("source")
-        .and_then(Value::as_str)
-        .unwrap_or("?");
+    let source = output.get("source").and_then(Value::as_str).unwrap_or("?");
     let count = matches.len();
 
     if count == 0 {

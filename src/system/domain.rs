@@ -181,6 +181,8 @@ pub struct ModelSettings {
     pub service_tier: Option<String>,
     #[serde(default)]
     pub web_search_enabled: bool,
+    #[serde(default)]
+    pub context_window: Option<usize>,
 }
 
 impl Default for ModelSettings {
@@ -192,6 +194,7 @@ impl Default for ModelSettings {
             summary_mode: None,
             service_tier: None,
             web_search_enabled: false,
+            context_window: None,
         }
     }
 }

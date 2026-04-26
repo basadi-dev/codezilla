@@ -167,6 +167,7 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<Value> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn complete(
     http: &Client,
     cfg: &Config,
@@ -209,6 +210,7 @@ pub async fn complete(
     parse_chat_response(&resp_val)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn stream(
     http: &Client,
     cfg: &Config,
