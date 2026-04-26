@@ -616,8 +616,7 @@ impl ToolProvider for FileToolProvider {
                     .unwrap_or(total_lines);
                 let selected: String = lines[start..end]
                     .iter()
-                    .enumerate()
-                    .map(|(i, line)| format!("{}:{}", start + i + 1, line))
+                    .map(|line| (*line).to_string())
                     .collect::<Vec<_>>()
                     .join("\n");
                 json!({

@@ -1232,20 +1232,9 @@ fn append_transcript_entry_lines(
 pub fn is_diff_body(body: &str) -> bool {
     // Require at least one actual diff marker in the first few non-empty lines
     // to distinguish a real unified diff from, e.g., a search-result table.
-    let mut seen = 0;
     for line in body.lines().filter(|l| !l.trim().is_empty()).take(5) {
         if line.starts_with("--- ") || line.starts_with("+++ ") || line.starts_with("@@ ") {
             return true;
-        }
-        // Hunk content: a line that begins with exactly one + or - followed by
-        // a non-+/- char is a strong signal this is diff body.
-        if (line.starts_with('+') && !line.starts_with("++"))
-            || (line.starts_with('-') && !line.starts_with("--"))
-        {
-            seen += 1;
-            if seen >= 2 {
-                return true;
-            }
         }
     }
     false
