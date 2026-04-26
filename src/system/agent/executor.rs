@@ -66,9 +66,7 @@ impl TurnExecutor {
         // We also cache the result here so the first loop iteration can reuse
         // it rather than calling system_instructions() a second time.
         let cwd_for_persist = params.cwd.as_deref().unwrap_or(".");
-        let initial_system_instructions = self
-            .system_instructions(cwd_for_persist, None)
-            .await?;
+        let initial_system_instructions = self.system_instructions(cwd_for_persist, None).await?;
         {
             let system_text = initial_system_instructions.join("\n\n");
             if !system_text.is_empty() {
@@ -85,8 +83,7 @@ impl TurnExecutor {
         }
         // Seed the first loop iteration with the already-computed instructions;
         // subsequent iterations will recompute (reasoning_effort may differ).
-        let mut cached_system_instructions: Option<Vec<String>> =
-            Some(initial_system_instructions);
+        let mut cached_system_instructions: Option<Vec<String>> = Some(initial_system_instructions);
 
         // Tracks whether we have already done one automatic context-overflow
         // trim this turn. We only retry once to avoid an infinite loop.

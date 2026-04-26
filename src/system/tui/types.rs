@@ -1133,7 +1133,9 @@ fn append_transcript_entry_lines(
                 current_line += 1;
             }
         }
-    } else if entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.body) {
+    } else if (entry.kind == EntryKind::ToolResult || entry.kind == EntryKind::ToolCall)
+        && is_read_file_body(&entry.body)
+    {
         let lang = read_file_lang_for_body(&entry.body);
         for rendered_line in render_read_file_body_lines(&entry.body, lang, body_width) {
             if current_line >= start_line && current_line < end_line {
@@ -1143,7 +1145,9 @@ fn append_transcript_entry_lines(
             }
             current_line += 1;
         }
-    } else if entry.kind == EntryKind::ToolResult && is_diff_body(&entry.body) {
+    } else if (entry.kind == EntryKind::ToolResult || entry.kind == EntryKind::ToolCall)
+        && is_diff_body(&entry.body)
+    {
         // Unified diff / write_file result. Reuse the source highlighter when we
         // can infer a language from the changed path, but keep the diff markers
         // colored so additions/removals still read as a diff.
@@ -1199,9 +1203,16 @@ fn append_transcript_entry_lines(
         for body_line in entry.body.split('\n') {
             for chunk in split_at_width(body_line, body_width) {
                 if current_line >= start_line && current_line < end_line {
+                    // Style the result separator line subtly
+                    let is_separator = chunk.trim() == "─── result ───";
+                    let chunk_style = if is_separator {
+                        Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM)
+                    } else {
+                        Style::default().fg(body_color)
+                    };
                     out.push(Line::from(vec![
                         Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
-                        Span::styled(chunk, Style::default().fg(body_color)),
+                        Span::styled(chunk, chunk_style),
                     ]));
                 }
                 current_line += 1;
@@ -1215,7 +1226,7 @@ fn append_transcript_entry_lines(
 }
 
 /// Returns true when `body` looks like a unified diff output (to trigger colourised rendering).
-fn is_diff_body(body: &str) -> bool {
+pub fn is_diff_body(body: &str) -> bool {
     let Some(first) = body.lines().find(|l| !l.trim().is_empty()) else {
         return false;
     };
@@ -1250,7 +1261,7 @@ fn diff_line_color(line: &str) -> Color {
     }
 }
 
-fn diff_lang_for_body(body: &str) -> &'static str {
+pub fn diff_lang_for_body(body: &str) -> &'static str {
     diff_path_for_body(body).map(lang_for_path).unwrap_or("")
 }
 
@@ -1357,7 +1368,7 @@ pub fn render_read_file_body_lines(
     out
 }
 
-fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
+pub fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
     if chunk.starts_with("--- ") || chunk.starts_with("+++ ") {
         return vec![Span::styled(
             chunk.to_string(),

@@ -23,11 +23,11 @@ use super::super::runtime::{
     TurnStartParams, TurnSteerParams,
 };
 use super::types::{
-    basename, entry_from_item, entry_style, format_timestamp, format_tool_result,
-    is_read_file_body, relative_time_ago, render_read_file_body_lines, short_turn_id,
-    split_at_width, thread_label, transcript_lines, AutocompleteItem, ComposerState, EntryKind,
-    FocusPane, PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
-    COLOR_MUTED, THREAD_LIMIT,
+    basename, entry_from_item, entry_style, format_timestamp, format_tool_result, is_diff_body,
+    is_read_file_body, relative_time_ago, render_diff_chunk, render_read_file_body_lines,
+    short_turn_id, split_at_width, thread_label, transcript_lines, AutocompleteItem, ComposerState,
+    EntryKind, FocusPane, PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry,
+    COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
 };
 
 /// Sentinel item-id for the "thinking" placeholder injected immediately after
@@ -1800,8 +1800,33 @@ impl InteractiveApp {
             if tool_result_failed(&result) {
                 self.upsert_transcript_entry(self.failed_tool_result_entry(&item, &result));
             } else {
-                self.remove_latest_tool_context_entries();
-                self.upsert_transcript_entry(entry_from_item(&item));
+                // Merge the result into its matching ToolCall entry in-place so that
+                // the call and result appear as a single cohesive transcript block.
+                // This avoids the separate ToolResult entry and keeps the cache consistent.
+                let result_body = format_tool_result(
+                    item.payload.get("output"),
+                    item.payload.get("errorMessage"),
+                );
+                if let Some(call_idx) = self.transcript.iter().rposition(|e| {
+                    e.kind == EntryKind::ToolCall
+                        && e.tool_call_id.as_deref() == Some(result.tool_call_id.as_str())
+                }) {
+                    let call = &mut self.transcript[call_idx];
+                    if !call.body.ends_with('\n') {
+                        call.body.push('\n');
+                    }
+                    call.body.push_str("─── result ───\n");
+                    call.body.push_str(&result_body);
+                    call.title = format!("{} → done", call.title);
+                    call.pending = false;
+                    self.invalidate_transcript_cache();
+                    // Remove any Approval status entries that were inserted after the call.
+                    self.remove_approval_entries_after(call_idx);
+                } else {
+                    // No matching call found — fall back to standalone result entry.
+                    self.remove_latest_tool_context_entries();
+                    self.upsert_transcript_entry(entry_from_item(&item));
+                }
             }
             // Clear tool activity once the result is in.
             self.live_activity = None;
@@ -1886,6 +1911,27 @@ impl InteractiveApp {
                         && entry.title == "Approval")
             })
             .map(|(_, entry)| entry.clone())
+            .collect();
+        self.rebuild_transcript_index();
+    }
+
+    /// Remove Approval status entries that appear after `after_index` in the transcript.
+    /// Called after merging a tool result into its call entry.
+    fn remove_approval_entries_after(&mut self, after_index: usize) {
+        let had_approvals = self.transcript[after_index + 1..]
+            .iter()
+            .any(|e| e.kind == EntryKind::Status && e.title == "Approval");
+        if !had_approvals {
+            return;
+        }
+        self.transcript = self
+            .transcript
+            .iter()
+            .enumerate()
+            .filter(|(idx, e)| {
+                *idx <= after_index || !(e.kind == EntryKind::Status && e.title == "Approval")
+            })
+            .map(|(_, e)| e.clone())
             .collect();
         self.rebuild_transcript_index();
     }
@@ -1994,7 +2040,7 @@ impl InteractiveApp {
         item: &ConversationItem,
         result: &ToolResult,
     ) -> TranscriptEntry {
-        let (tool_name, tool_input) = self
+        let tool_name = self
             .transcript
             .iter()
             .rev()
@@ -2008,28 +2054,18 @@ impl InteractiveApp {
                     .rev()
                     .find(|entry| entry.kind == EntryKind::ToolCall)
             })
-            .map(|entry| (entry.title.clone(), entry.body.clone()))
-            .unwrap_or_else(|| ("tool".to_string(), String::new()));
+            .map(|entry| entry.title.clone())
+            .unwrap_or_else(|| "tool".to_string());
 
-        let mut body = Vec::new();
-        if !tool_input.trim().is_empty() {
-            body.push(format!(
-                "input: {}",
-                tool_input.lines().next().unwrap_or_default()
-            ));
-        }
         let error_value = result.error_message.as_deref().map(Value::from);
-        body.push(format_tool_result(
-            Some(&result.output),
-            error_value.as_ref(),
-        ));
+        let body = format_tool_result(Some(&result.output), error_value.as_ref());
 
         TranscriptEntry {
             item_id: item.item_id.clone(),
             tool_call_id: Some(result.tool_call_id.clone()),
             kind: EntryKind::Error,
             title: format!("{tool_name} failed"),
-            body: body.join("\n"),
+            body,
             timestamp: Some(item.created_at),
             pending: false,
         }
@@ -2053,7 +2089,7 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
     let mut total_lines = 0usize;
     let mut tool_names_by_call_id: HashMap<String, String> = HashMap::new();
 
-    for entry in entries {
+    for (i, entry) in entries.iter().enumerate() {
         // System prompt entries are persisted for debugging/auditing but should
         // not be rendered in the TUI — they are internal LLM context and would
         // otherwise appear as a huge empty-looking "◈ System" block.
@@ -2061,18 +2097,26 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             continue;
         }
 
+        // ToolResult entries that were successfully merged into their ToolCall are
+        // suppressed: the ToolCall body already contains the result (mutated in
+        // handle_item_completed), so rendering the result separately would be redundant.
+        if entry.kind == EntryKind::ToolResult {
+            continue;
+        }
+
         let use_markdown = matches!(
             entry.kind,
-            EntryKind::User
-                | EntryKind::Assistant
-                | EntryKind::Summary
-                | EntryKind::Reasoning
+            EntryKind::User | EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
         );
-        let use_read_file = entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.body);
+
+        let use_read_file = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
+            && is_read_file_body(&entry.body);
+        let use_diff = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
+            && is_diff_body(&entry.body);
 
         let (raw_body, body_lines): (String, Vec<String>) =
             if entry.body.is_empty() && entry.pending {
-                // Build an animated working indicator that matches the visual render
+                // Build an animated working indicator that matches the visual render.
                 let spinner = super::types::spinner_frame(0);
                 let working_text = match entry.kind {
                     EntryKind::Assistant => "thinking",
@@ -2082,21 +2126,28 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
                     _ => "working",
                 };
                 (String::new(), vec![format!("{spinner}  {working_text}…")])
-            } else if use_markdown || use_read_file {
+            } else if use_markdown {
                 // Render now to get the correct line count for scroll arithmetic.
                 // The rendered Lines themselves are discarded; raw_body is kept so
                 // append_cached_transcript_entry_lines can re-render with styles.
-                let rendered_len = if use_markdown {
-                    md_to_lines(&entry.body, Color::White, body_width).len()
-                } else {
-                    let lang = super::types::read_file_lang_for_body(&entry.body);
-                    render_read_file_body_lines(&entry.body, lang, body_width).len()
-                };
+                let rendered_len = md_to_lines(&entry.body, Color::White, body_width).len();
                 (
                     entry.body.clone(),
                     // Placeholders — count matters, content does not.
                     vec![String::new(); rendered_len.max(1)],
                 )
+            } else if use_read_file {
+                let lang = super::types::read_file_lang_for_body(&entry.body);
+                let rendered_len = render_read_file_body_lines(&entry.body, lang, body_width).len();
+                (entry.body.clone(), vec![String::new(); rendered_len.max(1)])
+            } else if use_diff {
+                // Count lines the same way the renderer will so scroll arithmetic is exact.
+                let line_count: usize = entry
+                    .body
+                    .split('\n')
+                    .map(|l| split_at_width(l, body_width).len())
+                    .sum();
+                (entry.body.clone(), vec![String::new(); line_count.max(1)])
             } else {
                 let plain: Vec<String> = entry
                     .body
@@ -2118,6 +2169,8 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
                 }
             }
         }
+
+        let _ = i; // index no longer used after removing the pre-pass
 
         if let Some(prev) = cached_entries.last() {
             let same_kind = prev.kind == entry.kind;
@@ -2216,7 +2269,10 @@ fn append_cached_transcript_entry_lines(
         entry.kind,
         EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
     );
-    let use_read_file = entry.kind == EntryKind::ToolResult && is_read_file_body(&entry.raw_body);
+    let use_read_file = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
+        && is_read_file_body(&entry.raw_body);
+    let use_diff = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
+        && is_diff_body(&entry.raw_body);
 
     if use_markdown && !entry.raw_body.is_empty() {
         // Re-render from the raw Markdown source so all spans carry proper styles.
@@ -2243,10 +2299,24 @@ fn append_cached_transcript_entry_lines(
             }
             current_line += 1;
         }
+    } else if use_diff && !entry.raw_body.is_empty() {
+        let lang = super::types::diff_lang_for_body(&entry.raw_body);
+        for body_line in entry.raw_body.split('\n') {
+            for chunk in split_at_width(body_line, body_width) {
+                if current_line >= start_line && current_line < end_line {
+                    let spans = render_diff_chunk(&chunk, lang);
+                    let mut line_spans =
+                        vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                    line_spans.extend(spans);
+                    out.push(Line::from(line_spans));
+                }
+                current_line += 1;
+            }
+        }
     } else {
         for body_line in &entry.body_lines {
             if current_line >= start_line && current_line < end_line {
-                // Detect working-indicator lines and style them prominently
+                // Detect working-indicator lines and style them prominently.
                 let is_working_indicator = entry.pending
                     && body_line.contains("  ")
                     && (body_line.contains("thinking")
@@ -2254,12 +2324,19 @@ fn append_cached_transcript_entry_lines(
                         || body_line.contains("waiting")
                         || body_line.contains("reasoning")
                         || body_line.contains("working"));
+                // Style the result separator line subtly.
+                let is_separator = body_line.trim() == "─── result ───";
                 let body_span = if is_working_indicator {
                     Span::styled(
                         body_line.clone(),
                         Style::default()
                             .fg(COLOR_ACCENT)
                             .add_modifier(Modifier::BOLD),
+                    )
+                } else if is_separator {
+                    Span::styled(
+                        body_line.clone(),
+                        Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM),
                     )
                 } else {
                     Span::styled(body_line.clone(), Style::default().fg(body_color))
