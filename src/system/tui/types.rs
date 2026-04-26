@@ -1226,15 +1226,32 @@ fn append_transcript_entry_lines(
 }
 
 /// Returns true when `body` looks like a unified diff output (to trigger colourised rendering).
+///
+/// Note: deliberately excludes the `  ·  ` table-separator that tool-result tables use,
+/// since that pattern is NOT a diff header and caused false-positive diff rendering.
 pub fn is_diff_body(body: &str) -> bool {
-    let Some(first) = body.lines().find(|l| !l.trim().is_empty()) else {
-        return false;
-    };
-
-    first.contains("  ·  ")
-        || first.starts_with("--- ")
-        || first.starts_with("@@")
-        || first.starts_with("+++ ")
+    // Require at least one actual diff marker in the first few non-empty lines
+    // to distinguish a real unified diff from, e.g., a search-result table.
+    let mut seen = 0;
+    for line in body.lines().filter(|l| !l.trim().is_empty()).take(5) {
+        if line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("@@ ")
+        {
+            return true;
+        }
+        // Hunk content: a line that begins with exactly one + or - followed by
+        // a non-+/- char is a strong signal this is diff body.
+        if (line.starts_with('+') && !line.starts_with("++"))
+            || (line.starts_with('-') && !line.starts_with("--"))
+        {
+            seen += 1;
+            if seen >= 2 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn is_read_file_body(body: &str) -> bool {
@@ -1246,14 +1263,14 @@ pub fn is_read_file_body(body: &str) -> bool {
 
 /// Pick a ratatui colour for a single diff line based on its prefix character.
 fn diff_line_color(line: &str) -> Color {
-    if line.starts_with('+') && !line.starts_with("++") {
+    if line.starts_with("---") || line.starts_with("+++") {
+        COLOR_MUTED // file header — muted (must be checked before single +/-)
+    } else if line.starts_with('+') {
         Color::Rgb(100, 220, 120) // green — addition
-    } else if line.starts_with('-') && !line.starts_with("--") {
+    } else if line.starts_with('-') {
         Color::Rgb(255, 100, 100) // red — removal
     } else if line.starts_with("@@") {
         Color::Rgb(100, 200, 240) // cyan — hunk header
-    } else if line.starts_with("---") || line.starts_with("+++") {
-        COLOR_MUTED // file header — muted
     } else if line.starts_with('▲') {
         COLOR_WARNING // truncation notice
     } else {
@@ -1398,10 +1415,14 @@ pub fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
 
     if lang.is_empty() {
         let color = diff_line_color(chunk);
-        let bg = if chunk.starts_with('+') && !chunk.starts_with("++") {
-            BG_DIFF_ADD
-        } else if chunk.starts_with('-') && !chunk.starts_with("--") {
-            BG_DIFF_REMOVE
+        let bg = if !chunk.starts_with("+++") && !chunk.starts_with("---") {
+            if chunk.starts_with('+') {
+                BG_DIFF_ADD
+            } else if chunk.starts_with('-') {
+                BG_DIFF_REMOVE
+            } else {
+                Color::Reset
+            }
         } else {
             Color::Reset
         };
@@ -1411,30 +1432,34 @@ pub fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
         )];
     }
 
+    // File headers (--- / +++) — render muted with no background.
+    if chunk.starts_with("---") || chunk.starts_with("+++") {
+        return vec![Span::styled(
+            chunk.to_string(),
+            Style::default().fg(COLOR_MUTED),
+        )];
+    }
+
     if let Some(rest) = chunk.strip_prefix('+') {
-        if !chunk.starts_with("++") {
-            let mut spans = vec![Span::styled(
-                "+".to_string(),
-                Style::default()
-                    .fg(Color::Rgb(100, 220, 120))
-                    .bg(BG_DIFF_ADD),
-            )];
-            spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_ADD));
-            return spans;
-        }
+        let mut spans = vec![Span::styled(
+            "+".to_string(),
+            Style::default()
+                .fg(Color::Rgb(100, 220, 120))
+                .bg(BG_DIFF_ADD),
+        )];
+        spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_ADD));
+        return spans;
     }
 
     if let Some(rest) = chunk.strip_prefix('-') {
-        if !chunk.starts_with("--") {
-            let mut spans = vec![Span::styled(
-                "-".to_string(),
-                Style::default()
-                    .fg(Color::Rgb(255, 100, 100))
-                    .bg(BG_DIFF_REMOVE),
-            )];
-            spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_REMOVE));
-            return spans;
-        }
+        let mut spans = vec![Span::styled(
+            "-".to_string(),
+            Style::default()
+                .fg(Color::Rgb(255, 100, 100))
+                .bg(BG_DIFF_REMOVE),
+        )];
+        spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_REMOVE));
+        return spans;
     }
 
     if let Some(rest) = chunk.strip_prefix(' ') {

@@ -14,7 +14,7 @@ use super::markdown::{md_to_lines, md_to_lines_with_source_map};
 use super::super::domain::{
     ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalPolicyKind, ApprovalResolution,
     ConversationItem, ItemKind, PendingApproval, RuntimeEvent, RuntimeEventKind, ThreadMetadata,
-    ToolResult, TurnStatus, UserInput,
+    TokenUsage, ToolResult, TurnStatus, UserInput,
 };
 use super::super::error as cod_error;
 use super::super::runtime::{
@@ -75,6 +75,8 @@ pub struct InteractiveApp {
     pub pending_approval: Option<PendingApprovalView>,
     pub approval_policy_override: Option<ApprovalPolicy>,
     pub active_turn_id: Option<String>,
+    /// Cumulative token usage for the current thread (input + output tokens).
+    pub token_usage: TokenUsage,
     pub status_message: String,
     pub error_message: Option<String>,
     pub should_quit: bool,
@@ -157,6 +159,7 @@ impl InteractiveApp {
             pending_approval: None,
             approval_policy_override: None,
             active_turn_id: None,
+            token_usage: TokenUsage::default(),
             status_message: "Ready".into(),
             error_message: None,
             should_quit: false,
@@ -262,6 +265,16 @@ impl InteractiveApp {
                 )
             })
             .map(|t| t.turn_id.clone());
+        // Aggregate token usage from all completed turns.
+        self.token_usage = persisted
+            .turns
+            .iter()
+            .filter(|t| t.status == TurnStatus::Completed)
+            .fold(TokenUsage::default(), |acc, t| TokenUsage {
+                input_tokens: acc.input_tokens + t.token_usage.input_tokens,
+                output_tokens: acc.output_tokens + t.token_usage.output_tokens,
+                cached_tokens: acc.cached_tokens + t.token_usage.cached_tokens,
+            });
         self.pending_approval = None;
         self.drag_start = None;
         self.drag_end = None;
@@ -1587,6 +1600,12 @@ impl InteractiveApp {
                 self.remove_thinking_placeholder();
                 if let Some(thread) = self.current_thread_meta.as_mut() {
                     thread.status = super::super::domain::ThreadStatus::Idle;
+                }
+                // Accumulate token usage from the completed turn.
+                if let Ok(meta) = serde_json::from_value::<super::super::domain::TurnMetadata>(event.payload.clone()) {
+                    self.token_usage.input_tokens += meta.token_usage.input_tokens;
+                    self.token_usage.output_tokens += meta.token_usage.output_tokens;
+                    self.token_usage.cached_tokens += meta.token_usage.cached_tokens;
                 }
                 self.status_message = "Ready".into();
                 self.error_message = None;

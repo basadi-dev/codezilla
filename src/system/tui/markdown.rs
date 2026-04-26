@@ -344,8 +344,20 @@ impl MdRenderer {
                     pulldown_cmark::CodeBlockKind::Fenced(lang) => lang.to_string().to_lowercase(),
                     _ => String::new(),
                 };
+                // Blank line before code block to visually separate it from preceding text
+                // (including bullet/numbered list items that immediately precede code).
                 if !self.out.is_empty() {
-                    self.out.push(Line::from(""));
+                    // Only add if last line isn't already blank
+                    let already_blank = self
+                        .out
+                        .last()
+                        .map(|l: &Line| {
+                            l.spans.is_empty() || l.spans.iter().all(|s| s.content.trim().is_empty())
+                        })
+                        .unwrap_or(false);
+                    if !already_blank {
+                        self.out.push(Line::from(""));
+                    }
                 }
             }
 
@@ -496,10 +508,23 @@ impl MdRenderer {
 
     /// Push a code-block line with syntax highlighting.
     fn push_code_line(&mut self, raw: String) {
-        let max_chars = self.width.saturating_sub(2);
+        let list_indent = if self.list_depth > 0 {
+            let depth = self.list_depth.min(4);
+            let ordered = *self.list_ordered.last().unwrap_or(&false);
+            let base = 2 * (depth - 1);
+            let indent_width = if ordered { base + 3 } else { base + 2 };
+            " ".repeat(indent_width)
+        } else {
+            String::new()
+        };
+        let indent_chars = list_indent.chars().count();
+        let max_chars = self.width.saturating_sub(2 + indent_chars);
         let content: String = raw.chars().take(max_chars).collect();
         let lang = self.current_lang.clone();
-        let mut spans = vec![Span::styled("  ".to_string(), Style::default())];
+        let mut spans = vec![Span::styled(
+            format!("{list_indent}  "),
+            Style::default(),
+        )];
         spans.extend(highlight_code_line(&content, &lang));
         self.out.push(Line::from(spans));
     }
@@ -876,13 +901,205 @@ pub fn highlight_code_line(line: &str, lang: &str) -> Vec<Span<'static>> {
             "LIMIT",
             "OFFSET",
         ],
+        "c" | "cpp" | "h" | "hpp" => &[
+            "auto", "break", "case", "char", "class", "const", "continue", "default", "delete",
+            "do", "double", "else", "enum", "extern", "float", "for", "friend", "goto", "if",
+            "inline", "int", "long", "mutable", "namespace", "new", "operator", "private",
+            "protected", "public", "register", "return", "short", "signed", "sizeof", "static",
+            "struct", "switch", "template", "this", "throw", "try", "typedef", "typename",
+            "union", "unsigned", "using", "virtual", "void", "volatile", "while",
+            "nullptr", "constexpr", "decltype", "noexcept", "override", "final",
+            "static_assert", "thread_local", "alignas", "alignof",
+            "true", "false", "NULL",
+            "std", "string", "vector", "map", "set", "pair", "shared_ptr", "unique_ptr",
+            "make_shared", "make_unique", "cout", "cin", "endl", "cerr",
+        ],
+        "java" => &[
+            "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
+            "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
+            "finally", "float", "for", "if", "implements", "import", "instanceof", "int",
+            "interface", "long", "native", "new", "null", "package", "private", "protected",
+            "public", "return", "short", "static", "strictfp", "super", "switch", "synchronized",
+            "this", "throw", "throws", "transient", "try", "void", "volatile", "while",
+            "true", "false", "String", "Integer", "Boolean", "Long", "Double", "Float",
+            "System", "Override",
+        ],
+        "kotlin" => &[
+            "as", "break", "class", "continue", "do", "else", "false", "for", "fun", "if",
+            "in", "interface", "is", "null", "object", "package", "return", "super", "this",
+            "throw", "true", "try", "typealias", "typeof", "val", "var", "when", "while",
+            "by", "catch", "constructor", "delegate", "dynamic", "field", "file", "finally",
+            "get", "import", "init", "inner", "internal", "it", "lateinit", "noinline",
+            "open", "operator", "out", "override", "private", "protected", "public", "reified",
+            "sealed", "set", "suspend", "tailrec", "value", "where",
+            "Unit", "Boolean", "Int", "Long", "Float", "Double", "String", "List", "Map", "Set",
+        ],
+        "swift" => &[
+            "as", "break", "case", "catch", "class", "continue", "default", "defer", "do",
+            "else", "enum", "extension", "fallthrough", "false", "for", "func", "guard", "if",
+            "import", "in", "init", "inout", "internal", "is", "let", "nil", "operator",
+            "private", "protocol", "public", "repeat", "return", "self", "Self", "static",
+            "struct", "subscript", "super", "switch", "throw", "true", "try", "typealias",
+            "var", "where", "while", "yield",
+            "Int", "String", "Double", "Float", "Bool", "Array", "Dictionary", "Set", "Optional",
+            "print", "fatalError",
+        ],
+        "ruby" => &[
+            "BEGIN", "END", "alias", "and", "begin", "break", "case", "class", "def", "defined?",
+            "do", "else", "elsif", "end", "ensure", "false", "for", "if", "in", "module",
+            "next", "nil", "not", "or", "redo", "rescue", "retry", "return", "self", "super",
+            "then", "true", "undef", "unless", "until", "when", "while", "yield",
+            "attr_accessor", "attr_reader", "attr_writer", "require", "include", "extend",
+            "raise", "puts", "p", "pp",
+        ],
+        "html" => &[
+            "html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li",
+            "table", "tr", "td", "th", "form", "input", "button", "select", "option",
+            "textarea", "label", "script", "style", "link", "meta", "title", "header",
+            "footer", "nav", "main", "section", "article", "aside", "h1", "h2", "h3",
+            "h4", "h5", "h6", "class", "id", "src", "href", "type", "value", "name",
+            "placeholder", "disabled", "readonly", "required", "hidden",
+        ],
+        "css" => &[
+            "color", "background", "background-color", "border", "border-radius", "box-shadow",
+            "display", "flex", "grid", "font", "font-size", "font-weight", "height", "width",
+            "margin", "padding", "position", "top", "left", "right", "bottom", "z-index",
+            "overflow", "opacity", "transform", "transition", "animation", "cursor",
+            "align-items", "align-self", "justify-content", "gap", "grid-template-columns",
+            "important", "hover", "focus", "active", "before", "after", "first-child",
+            "last-child", "nth-child", "root", "var", "calc", "min", "max", "clamp",
+            "media", "keyframes", "from", "to",
+        ],
+        "lua" => &[
+            "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto",
+            "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until",
+            "while",
+            "print", "pairs", "ipairs", "tostring", "tonumber", "type", "require",
+            "table", "string", "math", "io", "os",
+        ],
+        "php" => &[
+            "abstract", "and", "array", "as", "break", "callable", "case", "catch", "class",
+            "clone", "const", "continue", "declare", "default", "die", "do", "echo", "else",
+            "elseif", "empty", "enddeclare", "endfor", "endforeach", "endif", "endswitch",
+            "endwhile", "eval", "exit", "extends", "final", "finally", "fn", "for", "foreach",
+            "function", "global", "goto", "if", "implements", "include", "instanceof", "insteadof",
+            "interface", "isset", "list", "match", "namespace", "new", "or", "print", "private",
+            "protected", "public", "readonly", "require", "return", "static", "switch", "throw",
+            "trait", "try", "unset", "use", "var", "while", "xor", "yield",
+            "true", "false", "null", "self", "parent",
+        ],
+        "dart" => &[
+            "abstract", "as", "assert", "async", "await", "break", "case", "catch", "class",
+            "const", "continue", "covariant", "default", "deferred", "do", "dynamic", "else",
+            "enum", "export", "extends", "extension", "external", "factory", "false", "final",
+            "finally", "for", "Function", "get", "hide", "if", "implements", "import", "in",
+            "interface", "is", "late", "library", "mixin", "new", "null", "on", "operator",
+            "part", "required", "rethrow", "return", "sealed", "set", "show", "static", "super",
+            "switch", "this", "throw", "true", "try", "typedef", "var", "void", "while", "with",
+            "yield",
+            "int", "double", "String", "bool", "List", "Map", "Set", "Future", "Stream",
+            "print",
+        ],
+        "elixir" => &[
+            "after", "and", "catch", "do", "else", "end", "false", "fn", "in", "not", "or",
+            "rescue", "true", "when", "unless", "use", "import", "require", "alias",
+            "def", "defp", "defmodule", "defstruct", "defprotocol", "defimpl", "defmacro",
+            "defmacrop", "defguard", "defguardp", "defdelegate", "defexception", "defcallback",
+            "defmacrocallback", "defoverridable",
+            "case", "cond", "for", "if", "unless", "receive", "try", "with",
+            "raise", "throw", "quote", "unquote", "super",
+            "IO", "Enum", "Map", "List", "String", "Atom", "Kernel", "Agent", "GenServer",
+            "Task", "Supervisor", "Application", "Process", "Node", "Module", "Function",
+        ],
+        "haskell" => &[
+            "case", "class", "data", "default", "deriving", "do", "else", "forall", "foreign",
+            "if", "import", "in", "infix", "infixl", "infixr", "instance", "let", "module",
+            "newtype", "of", "qualified", "then", "type", "where",
+            "do", "if", "then", "else", "case", "of", "let", "in", "where",
+            "True", "False", "Nothing", "Just", "Left", "Right", "IO", "Maybe", "Either",
+            "Int", "Integer", "Float", "Double", "String", "Char", "Bool",
+            "putStrLn", "print", "return", "pure", "map", "filter", "foldl", "foldr",
+        ],
+        "protobuf" => &[
+            "syntax", "package", "import", "option", "message", "enum", "service", "rpc",
+            "returns", "stream", "repeated", "optional", "required", "oneof", "map",
+            "reserved", "extensions", "extend", "to", "true", "false", "null",
+            "int32", "int64", "uint32", "uint64", "sint32", "sint64",
+            "fixed32", "fixed64", "sfixed32", "sfixed64",
+            "float", "double", "bool", "string", "bytes",
+        ],
+        "dockerfile" => &[
+            "FROM", "RUN", "CMD", "LABEL", "EXPOSE", "ENV", "ADD", "COPY", "ENTRYPOINT",
+            "VOLUME", "USER", "WORKDIR", "ARG", "ONBUILD", "STOPSIGNAL", "HEALTHCHECK",
+            "SHELL", "AS", "MAINTAINER",
+        ],
+        "makefile" => &[
+            "ifeq", "ifneq", "ifdef", "ifndef", "else", "endif", "define", "endef",
+            "include", "export", "unexport", "override", "private", "vpath",
+            "all", "clean", "install", "test", "build", "run", "check",
+            "PHONY", "SHELL", "MAKE", "MAKEFILE", "CURDIR", "RM", "CP", "MV",
+        ],
+        "vue" | "svelte" => &[
+            "script", "template", "style", "setup", "lang",
+            // Also highlight JS/TS keywords since these are component frameworks
+            "import", "export", "from", "default", "const", "let", "var", "function", "return",
+            "if", "else", "for", "while", "class", "extends", "new", "this", "super",
+            "true", "false", "null", "undefined", "async", "await", "try", "catch", "finally",
+            "throw", "typeof", "instanceof", "in", "of",
+            "props", "emit", "ref", "reactive", "computed", "watch", "onMounted",
+        ],
+        "zig" => &[
+            "const", "var", "fn", "pub", "return", "if", "else", "while", "for", "switch",
+            "try", "catch", "error", "defer", "errdefer", "async", "await", "suspend", "resume",
+            "usingnamespace", "struct", "enum", "union", "opaque", "comptime",
+            "true", "false", "null", "undefined", "unreachable",
+            "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64",
+            "f16", "f32", "f64", "bool", "void", "type", "anytype",
+            "print", "alloc", "free", "create", "destroy",
+        ],
+        "nim" => &[
+            "addr", "and", "as", "asm", "bind", "block", "break", "case", "cast", "concept",
+            "const", "continue", "converter", "defer", "discard", "distinct", "do", "elif",
+            "else", "end", "enum", "except", "export", "finally", "for", "from", "func", "if",
+            "import", "include", "interface", "iterator", "let", "macro", "method", "mixin",
+            "mod", "nil", "not", "object", "of", "or", "out", "proc", "ptr", "raise", "ref",
+            "return", "shl", "shr", "static", "template", "try", "tuple", "type", "using",
+            "var", "when", "while", "with", "without", "xor", "yield",
+            "true", "false", "echo", "new", "int", "float", "string", "bool", "char",
+            "seq", "array", "set", "Table", "OrderedTable", "Option",
+        ],
+        "r" => &[
+            "if", "else", "repeat", "while", "function", "for", "in", "next", "break",
+            "TRUE", "FALSE", "NULL", "NA", "Inf", "NaN",
+            "library", "require", "source", "return", "invisible",
+            "print", "cat", "paste", "paste0", "nchar", "substr", "grep", "gsub",
+            "length", "which", "min", "max", "sum", "mean", "range", "var",
+            "data.frame", "matrix", "list", "c", "cbind", "rbind",
+            "apply", "lapply", "sapply", "vapply", "tapply", "mapply",
+        ],
+        "erlang" => &[
+            "after", "begin", "case", "catch", "cond", "end", "fun", "if", "let", "of",
+            "receive", "when", "try", "query",
+            "module", "export", "import", "include", "define", "spec", "type", "record",
+            "behaviour", "behavior", "callback",
+            "true", "false", "undefined",
+            "ok", "error", "ignore", "stop",
+        ],
+        "markdown" => &[],   // markdown has no keywords — plain text rendering
+        "xml" => &[],        // XML has no keywords — plain text rendering
+        "json" => &[],       // JSON has no keywords — plain text rendering
+        "toml" => &[],       // TOML has no keywords — plain text rendering
+        "yaml" => &[],       // YAML has no keywords — plain text rendering
         _ => &[],
     };
 
     let comment_starts: &[&str] = match lang {
-        "python" | "py" | "bash" | "sh" | "shell" | "zsh" | "yaml" | "toml" | "ruby" => &["#"],
-        "sql" => &["--"],
-        "html" => &["<!--"],
+        "python" | "py" | "bash" | "sh" | "shell" | "zsh" | "yaml" | "toml" | "ruby" | "r" | "nim" => &["#"],
+        "sql" | "haskell" | "elixir" | "erlang" => &["--"],
+        "html" | "xml" | "vue" | "svelte" => &["<!--"],
+        "lua" => &["--"],
+        "protobuf" => &["//"],
+        "dockerfile" | "makefile" => &["#"],
         _ => &["//", "/*"],
     };
 
@@ -1054,11 +1271,37 @@ pub fn lang_for_path(path: &str) -> &'static str {
         "json" => "json",
         "rb" => "ruby",
         "c" | "h" => "c",
-        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => "cpp",
         "java" => "java",
         "kt" | "kts" => "kotlin",
         "swift" => "swift",
-        _ => "",
+        "html" | "htm" => "html",
+        "css" | "scss" | "sass" | "less" => "css",
+        "md" | "mdx" => "markdown",
+        "xml" | "svg" | "xsl" | "xslt" => "xml",
+        "lua" => "lua",
+        "php" => "php",
+        "r" => "r",
+        "dart" => "dart",
+        "ex" | "exs" => "elixir",
+        "erl" | "hrl" => "erlang",
+        "hs" => "haskell",
+        "proto" => "protobuf",
+        "dockerfile" | "containerfile" => "dockerfile",
+        "makefile" | "mk" | "mak" => "makefile",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "zig" => "zig",
+        "nim" => "nim",
+        _ => {
+            // Fallback: check the filename itself (e.g. Makefile, Dockerfile)
+            let filename = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+            match filename.as_str() {
+                f if f.starts_with("dockerfile") || f.starts_with("containerfile") => "dockerfile",
+                f if f == "makefile" || f == "gnumakefile" => "makefile",
+                _ => "",
+            }
+        }
     }
 }
 

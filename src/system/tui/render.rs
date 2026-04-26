@@ -547,6 +547,34 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         (Style::default().fg(COLOR_MUTED), "  ")
     };
 
+    // Build context info: token usage + context remaining %
+    let usage = &app.token_usage;
+    let has_tokens = usage.input_tokens > 0 || usage.output_tokens > 0;
+
+    // Context remaining percentage (always compute)
+    let context_window = app.effective_model_settings().context_window.unwrap_or(100_000);
+    let prompt_budget = context_window.saturating_sub(8_192);
+    let used_pct = (usage.input_tokens as f64 / prompt_budget as f64) * 100.0;
+    let remaining_pct = (100.0 - used_pct).max(0.0);
+
+    let token_part = if has_tokens {
+        let in_k = usage.input_tokens as f64 / 1000.0;
+        let out_k = usage.output_tokens as f64 / 1000.0;
+        let cached_k = usage.cached_tokens as f64 / 1000.0;
+        if usage.cached_tokens > 0 {
+            format!("↑{in_k:.1}k ↓{out_k:.1}k ⚡{cached_k:.1}k  ")
+        } else {
+            format!("↑{in_k:.1}k ↓{out_k:.1}k  ")
+        }
+    } else {
+        String::new()
+    };
+
+    let pct_str = format!("ctx {remaining_pct:.0}%");
+
+    // Context width for layout calculation
+    let context_width = token_part.chars().count() + pct_str.chars().count() + 2; // +2 for trailing padding
+
     // Essential keys only — right-aligned, always dim
     let essential_keys = "^N new  ^C stop  ^Q quit";
     let keys_width = essential_keys.chars().count();
@@ -559,9 +587,31 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
 
     let available = area.width as usize;
     let used = msg_width;
-    let padding = available.saturating_sub(used + keys_width);
+    let padding = available.saturating_sub(used + context_width + keys_width);
     if padding > 0 {
         spans.push(Span::styled(" ".repeat(padding), Style::default()));
+    }
+    if has_tokens {
+        spans.push(Span::styled(
+            token_part,
+            Style::default().fg(COLOR_HINT),
+        ));
+    }
+    // Always show context remaining percentage
+    let pct_color = if remaining_pct > 50.0 {
+        COLOR_HINT // dim — plenty of room
+    } else if remaining_pct > 20.0 {
+        Color::Rgb(255, 200, 80) // yellow — getting low
+    } else {
+        COLOR_ERROR // red — critical
+    };
+    spans.push(Span::styled(
+        pct_str,
+        Style::default().fg(pct_color),
+    ));
+    spans.push(Span::styled("  ", Style::default()));
+    // Only show key hints if there's room
+    if available.saturating_sub(used + context_width) >= keys_width {
         spans.push(Span::styled(
             essential_keys,
             Style::default().fg(COLOR_HINT),
