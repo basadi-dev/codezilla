@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -482,107 +482,94 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
 }
 
 // ─── Approval panel ───────────────────────────────────────────────────────────
+//
+// Stream-style inline panel (no borders) matching the autocomplete aesthetic.
+// Uses the same gutter prefix pattern as transcript entries.
 
 fn render_approval_panel(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     let Some(approval) = &app.pending_approval else {
         return;
     };
-    let body_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // title + metadata
-            Constraint::Min(2),    // action preview
-            Constraint::Length(1), // key hint
-        ])
-        .split(area);
 
-    frame.render_widget(
-        Block::default()
-            .title(Span::styled(
-                " approval required ",
-                Style::default()
-                    .fg(COLOR_APPROVAL)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(COLOR_APPROVAL)),
-        area,
-    );
+    let body_width = (area.width as usize).saturating_sub(5).max(1);
 
-    let header = Text::from(vec![
-        Line::from(Span::styled(
+    // Build lines exactly like the autocomplete: prefix + content, no borders.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── Header line: sigil + title ──────────────────────────────────────────
+    lines.push(Line::from(vec![
+        Span::styled("  ⚠  ", Style::default().fg(COLOR_APPROVAL).add_modifier(Modifier::BOLD)),
+        Span::styled(
             approval.approval.request.title.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled("category  ", Style::default().fg(COLOR_MUTED)),
-            Span::raw(format!("{:?}", approval.approval.request.category)),
-            Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
-            Span::styled(
-                "A",
-                Style::default()
-                    .fg(COLOR_APPROVAL)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" approve  ", Style::default().fg(COLOR_MUTED)),
-            Span::styled(
-                "D / Esc",
-                Style::default()
-                    .fg(COLOR_ERROR)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" deny", Style::default().fg(COLOR_MUTED)),
-        ]),
-        Line::from(vec![
-            Span::styled("reason    ", Style::default().fg(COLOR_MUTED)),
-            Span::raw(approval.approval.request.justification.clone()),
-        ]),
-    ]);
-    let header_area = inset(body_layout[0], 1, 0);
-    frame.render_widget(Paragraph::new(header), header_area);
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+    ]));
 
+    // ── Category + key hints (same line, compact) ─────────────────────────────
+    lines.push(Line::from(vec![
+        Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+        Span::styled(
+            format!("{:?}", approval.approval.request.category),
+            Style::default().fg(COLOR_MUTED),
+        ),
+        Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
+        Span::styled(
+            "A",
+            Style::default().fg(COLOR_APPROVAL).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" approve  ", Style::default().fg(COLOR_MUTED)),
+        Span::styled(
+            "D",
+            Style::default().fg(COLOR_ERROR).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" deny  ", Style::default().fg(COLOR_MUTED)),
+        Span::styled(
+            "Esc",
+            Style::default().fg(COLOR_ERROR).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" cancel", Style::default().fg(COLOR_MUTED)),
+    ]));
+
+    // ── Justification / reason ────────────────────────────────────────────────
+    if !approval.approval.request.justification.is_empty() {
+        for chunk in split_at_width(&approval.approval.request.justification, body_width) {
+            lines.push(Line::from(vec![
+                Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]));
+        }
+    }
+
+    // ── Separator before action preview ─────────────────────────────────────────
+    lines.push(Line::from(vec![
+        Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+        Span::styled("─".repeat(body_width), Style::default().fg(COLOR_BORDER)),
+    ]));
+
+    // ── Action preview (hard-wrapped, gutter-prefixed) ─────────────────────────
     let preview = truncate_lines(
         &approval.action_preview,
-        body_layout[1].height.saturating_sub(2) as usize,
+        area.height.saturating_sub(lines.len() as u16 + 1) as usize,
     );
-    frame.render_widget(
-        Paragraph::new(preview).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title(Span::styled(" action ", Style::default().fg(COLOR_MUTED)))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(COLOR_BORDER)),
-        ),
-        body_layout[1],
-    );
+    for preview_line in preview.lines() {
+        for chunk in split_at_width(preview_line, body_width) {
+            lines.push(Line::from(vec![
+                Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]));
+        }
+    }
 
-    let hint_area = inset(body_layout[2], 1, 0);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " pending approval blocks new input until resolved",
-                Style::default().fg(COLOR_MUTED),
-            ),
-            Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
-            Span::styled(
-                "A",
-                Style::default()
-                    .fg(COLOR_APPROVAL)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" approve", Style::default().fg(COLOR_MUTED)),
-            Span::styled("  ·  ", Style::default().fg(COLOR_MUTED)),
-            Span::styled(
-                "D",
-                Style::default()
-                    .fg(COLOR_ERROR)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" deny", Style::default().fg(COLOR_MUTED)),
-        ])),
-        hint_area,
-    );
+    // ── Bottom hint line ──────────────────────────────────────────────────────
+    lines.push(Line::from(vec![
+        Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+        Span::styled(
+            "pending approval blocks new input until resolved",
+            Style::default().fg(COLOR_MUTED),
+        ),
+    ]));
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 // ─── Autocomplete section ─────────────────────────────────────────────────────
@@ -629,14 +616,4 @@ fn render_autocomplete(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         .collect();
 
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
-}
-
-/// Shrink a rect by `left` columns and `top` rows (simple inset helper).
-fn inset(r: Rect, left: u16, top: u16) -> Rect {
-    Rect {
-        x: r.x + left,
-        y: r.y + top,
-        width: r.width.saturating_sub(left),
-        height: r.height.saturating_sub(top),
-    }
 }
