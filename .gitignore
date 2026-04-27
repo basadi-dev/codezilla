@@ -33,3 +33,6 @@ Thumbs.db
 # Environment variables and local configs
 .env
 .codezilla/
+
+# Benchmark results and temporary workspaces (tasks are tracked)
+bench/results/

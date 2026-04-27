@@ -66,3 +66,13 @@ fmt:
 check: fmt
 	$(CARGO) clippy -- -D warnings
 	$(CARGO) check
+
+# ── Benchmarks ────────────────────────────────────────────────────────────────
+
+bench: build
+	@echo "Running benchmark suite…"
+	./target/release/$(BINARY_NAME) bench --tasks bench/tasks --output bench/results
+
+bench-filter: build
+	@echo "Running filtered benchmarks (FILTER=$(FILTER))…"
+	./target/release/$(BINARY_NAME) bench --tasks bench/tasks --output bench/results --filter "$(FILTER)"
