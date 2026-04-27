@@ -46,6 +46,37 @@ async fn async_main() -> Result<i32> {
         std::env::set_current_dir(cd)?;
     }
 
+    if let Some(("bench", sub)) = matches.subcommand() {
+        let tasks_dir = sub
+            .get_one::<String>("tasks")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("bench/tasks"));
+        let output_dir = sub
+            .get_one::<String>("output")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("bench/results"));
+        let filter = sub.get_one::<String>("filter").cloned();
+        let model = matches.get_one::<String>("model").cloned();
+
+        let codezilla_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("codezilla"));
+
+        let bench_config = system::bench::runner::BenchConfig {
+            tasks_dir,
+            filter,
+            model,
+            codezilla_bin,
+            config_path: Some(config_path),
+            output_dir,
+        };
+
+        let summary = system::bench::runner::run_bench(&bench_config)?;
+        return if summary.passed == summary.total {
+            Ok(0)
+        } else {
+            Ok(1)
+        };
+    }
+
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .to_string_lossy()
@@ -101,6 +132,8 @@ async fn async_main() -> Result<i32> {
                     ephemeral: sub.get_flag("ephemeral"),
                     cwd: Some(cwd),
                     thread_id: None,
+                    approval_policy: Some(effective_config.approval_policy.clone()),
+                    permission_profile: Some(effective_config.permission_profile.clone()),
                 })
                 .await
         }
@@ -117,6 +150,8 @@ async fn async_main() -> Result<i32> {
                     ephemeral: true,
                     cwd: Some(cwd),
                     thread_id: None,
+                    approval_policy: Some(effective_config.approval_policy.clone()),
+                    permission_profile: Some(effective_config.permission_profile.clone()),
                 })
                 .await
         }
@@ -371,6 +406,30 @@ fn build_cli() -> Command {
         )
         .subcommand(Command::new("exec-server"))
         .subcommand(Command::new("features"))
+        .subcommand(
+            Command::new("bench")
+                .about("Run benchmark tasks to evaluate agent performance")
+                .arg(
+                    Arg::new("tasks")
+                        .long("tasks")
+                        .value_name("DIR")
+                        .default_value("bench/tasks")
+                        .help("Directory containing benchmark task definitions"),
+                )
+                .arg(
+                    Arg::new("filter")
+                        .long("filter")
+                        .value_name("PATTERN")
+                        .help("Glob pattern to filter task IDs (e.g. 'fix-*')"),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .value_name("DIR")
+                        .default_value("bench/results")
+                        .help("Output directory for results"),
+                ),
+        )
 }
 
 fn build_cli_overrides(matches: &ArgMatches) -> Result<HashMap<String, serde_json::Value>> {
@@ -378,35 +437,35 @@ fn build_cli_overrides(matches: &ArgMatches) -> Result<HashMap<String, serde_jso
 
     if let Some(model) = matches.get_one::<String>("model") {
         overrides.insert(
-            "modelSettings.modelId".into(),
+            "model_settings.model_id".into(),
             serde_json::Value::String(model.clone()),
         );
     }
     if let Some(sandbox) = matches.get_one::<String>("sandbox") {
         overrides.insert(
-            "permissionProfile.sandboxMode".into(),
+            "permission_profile.sandboxMode".into(),
             serde_json::Value::String(sandbox.clone()),
         );
     }
     if matches.get_flag("full-auto") {
         overrides.insert(
-            "approvalPolicy.kind".into(),
+            "approval_policy.kind".into(),
             serde_json::Value::String("ON_FAILURE".into()),
         );
     }
     if matches.get_flag("dangerously-bypass-approvals-and-sandbox") {
         overrides.insert(
-            "approvalPolicy.kind".into(),
+            "approval_policy.kind".into(),
             serde_json::Value::String("NEVER".into()),
         );
         overrides.insert(
-            "permissionProfile.sandboxMode".into(),
+            "permission_profile.sandboxMode".into(),
             serde_json::Value::String("danger-full-access".into()),
         );
     }
     if let Some(add_dirs) = matches.get_many::<String>("add-dir") {
         overrides.insert(
-            "addDirs".into(),
+            "add_dirs".into(),
             serde_json::Value::Array(
                 add_dirs
                     .map(|value| serde_json::Value::String(value.clone()))
