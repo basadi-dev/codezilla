@@ -13,8 +13,8 @@ use self::utils::{
     recently_read_paths, should_retry_no_tool_completion, thinking_instruction,
 };
 use crate::system::domain::{
-    now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus, TokenUsage, ToolCall,
-    ToolResult, TurnStatus, UserInput,
+    now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
+    TokenUsage, ToolCall, ToolResult, TurnMetrics, TurnStatus, UserInput,
 };
 use crate::system::error as cod_error;
 
@@ -70,12 +70,14 @@ impl TurnExecutor {
             let intel_cfg = &self.runtime.inner.effective_config.codebase_intel;
             if intel_cfg.enabled {
                 // Show the user that indexing is in progress.
-                self.runtime.publish_event(
-                    RuntimeEventKind::CompactionStatus,
-                    Some(params.thread_id.clone()),
-                    Some(turn_id.clone()),
-                    json!({ "status": "started", "message": "Indexing codebase…" }),
-                ).await?;
+                self.runtime
+                    .publish_event(
+                        RuntimeEventKind::CompactionStatus,
+                        Some(params.thread_id.clone()),
+                        Some(turn_id.clone()),
+                        json!({ "status": "started", "message": "Indexing codebase…" }),
+                    )
+                    .await?;
 
                 let t0 = std::time::Instant::now();
                 let repo_map = self.runtime.inner.repo_map.clone();
@@ -95,12 +97,14 @@ impl TurnExecutor {
                     }
                     None => format!("Codebase index skipped ({elapsed_ms}ms)"),
                 };
-                self.runtime.publish_event(
-                    RuntimeEventKind::CompactionStatus,
-                    Some(params.thread_id.clone()),
-                    Some(turn_id.clone()),
-                    json!({ "status": "completed", "message": status_msg }),
-                ).await?;
+                self.runtime
+                    .publish_event(
+                        RuntimeEventKind::CompactionStatus,
+                        Some(params.thread_id.clone()),
+                        Some(turn_id.clone()),
+                        json!({ "status": "completed", "message": status_msg }),
+                    )
+                    .await?;
 
                 result
             } else {
@@ -113,7 +117,9 @@ impl TurnExecutor {
         // available for inspection in the raw conversation store.
         // We also cache the result here so the first loop iteration can reuse
         // it rather than calling system_instructions() a second time.
-        let initial_system_instructions = self.system_instructions(cwd_for_persist, None, repo_map_text.as_deref()).await?;
+        let initial_system_instructions = self
+            .system_instructions(cwd_for_persist, None, repo_map_text.as_deref())
+            .await?;
         {
             let system_text = initial_system_instructions.join("\n\n");
             if !system_text.is_empty() {
@@ -154,6 +160,9 @@ impl TurnExecutor {
         let mut no_tool_nudges: usize = 0;
         let mut no_tool_nudge_instruction: Option<String> = None;
         let mut completed_tool_rounds: usize = 0;
+        let mut total_tool_calls: usize = 0;
+        let mut file_changes: Vec<FileChangeSummary> = Vec::new();
+        let turn_start_time = std::time::Instant::now();
 
         // Guard 3 — read-only exploration saturation: counts consecutive rounds
         // where *every* tool call was a pure read (read_file, list_dir, grep …).
@@ -589,8 +598,14 @@ impl TurnExecutor {
                     completed_tool_rounds,
                     "executor: turn completing — no tool calls, no nudge required"
                 );
+                let metrics = TurnMetrics {
+                    agent_iterations,
+                    tool_call_count: total_tool_calls,
+                    elapsed_ms: turn_start_time.elapsed().as_millis() as u64,
+                    file_changes: file_changes.clone(),
+                };
                 return self
-                    .complete_turn(&params.thread_id, &turn_id, final_usage)
+                    .complete_turn(&params.thread_id, &turn_id, final_usage, metrics)
                     .await;
             }
             no_tool_nudges = 0;
@@ -598,9 +613,13 @@ impl TurnExecutor {
 
             // Snapshot whether this round is pure read-only *before* tool_calls is moved.
             let round_is_read_only = tool_calls.iter().all(|c| is_read_only_tool(&c.tool_name));
+            let round_call_count = tool_calls.len();
 
-            let had_any_success = self.execute_tool_round(&turn_ctx, tool_calls).await?;
+            let (had_any_success, round_file_changes) =
+                self.execute_tool_round(&turn_ctx, tool_calls).await?;
             completed_tool_rounds += 1;
+            total_tool_calls += round_call_count;
+            file_changes.extend(round_file_changes);
 
             // ── Read-only exploration guard ───────────────────────────────────
             // Reset when any action tool ran this round; bump when every call
@@ -819,6 +838,7 @@ impl TurnExecutor {
         thread_id: &str,
         turn_id: &str,
         usage: TokenUsage,
+        metrics: TurnMetrics,
     ) -> Result<()> {
         let thread = self
             .runtime
@@ -857,7 +877,13 @@ impl TurnExecutor {
                 crate::system::domain::RuntimeEventKind::TurnCompleted,
                 Some(thread_id.into()),
                 Some(turn_id.into()),
-                serde_json::to_value(&metadata)?,
+                json!({
+                    "turnId": metadata.turn_id,
+                    "threadId": metadata.thread_id,
+                    "status": metadata.status,
+                    "tokenUsage": metadata.token_usage,
+                    "metrics": metrics,
+                }),
             )
             .await?;
 

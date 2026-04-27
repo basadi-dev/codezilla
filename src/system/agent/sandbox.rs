@@ -62,7 +62,10 @@ impl SandboxManager {
         sandbox: &SandboxRequest,
     ) -> Result<()> {
         self.ensure_path_allowed(path, sandbox, true)?;
-        if let Some(parent) = Path::new(path).parent() {
+        if let Some(parent) = Path::new(path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(path, data).await?;

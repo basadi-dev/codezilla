@@ -8,8 +8,8 @@ use crate::system::agent::executor::utils::{
     action_for_tool_call, partition_into_batches, promote_to_bash_if_needed,
 };
 use crate::system::domain::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, ConversationItem, ItemKind,
-    RuntimeEventKind, ToolCall, ToolExecutionContext, ToolResult, TurnStatus,
+    ApprovalDecision, ApprovalPolicy, ApprovalRequest, ConversationItem, FileChangeSummary,
+    ItemKind, RuntimeEventKind, ToolCall, ToolExecutionContext, ToolResult, TurnStatus,
 };
 
 use super::TurnExecutor;
@@ -20,13 +20,14 @@ impl TurnExecutor {
     /// are grouped into batches and executed concurrently with `join_all`.
     /// Non-parallel-safe calls get their own sequential batch.
     ///
-    /// Returns `true` if any tool in the round succeeded (used by the
-    /// consecutive-failure guard in `run_turn`).
+    /// Returns `(had_any_success, file_changes)` — the first is used by the
+    /// consecutive-failure guard in `run_turn`, the second collects file
+    /// modifications for benchmark metrics.
     pub(crate) async fn execute_tool_round(
         &self,
         ctx: &TurnContext,
         tool_calls: Vec<ToolCall>,
-    ) -> Result<bool> {
+    ) -> Result<(bool, Vec<FileChangeSummary>)> {
         // 1. Normalise: rewrite shell_exec with shell operators → bash_exec.
         let calls: Vec<ToolCall> = tool_calls
             .into_iter()
@@ -77,11 +78,14 @@ impl TurnExecutor {
 
         // 4. Dispatch each batch, collecting results in original-call order.
         let mut had_any_success = false;
+        let mut file_changes: Vec<FileChangeSummary> = Vec::new();
         for batch in batches {
             if batch.len() > 1 {
                 tracing::debug!("tool_round: parallel batch of {}", batch.len());
             }
+            tracing::debug!(turn_id = %ctx.turn_id, "tool_round: calling dispatch_batch");
             let results = self.dispatch_batch(ctx, batch).await?;
+            tracing::debug!(turn_id = %ctx.turn_id, n = results.len(), "tool_round: dispatch_batch returned");
             for result in results {
                 if result.ok {
                     had_any_success = true;
@@ -90,6 +94,10 @@ impl TurnExecutor {
                         tool_call_id = %result.tool_call_id,
                         "tool_result: ok"
                     );
+                    // Extract file change info for benchmark metrics.
+                    if let Some(change) = extract_file_change(&result) {
+                        file_changes.push(change);
+                    }
                 } else {
                     tracing::warn!(
                         turn_id = %ctx.turn_id,
@@ -99,12 +107,14 @@ impl TurnExecutor {
                         "tool_result: FAILED"
                     );
                 }
+                tracing::debug!(turn_id = %ctx.turn_id, "tool_round: calling persist_tool_result");
                 self.persist_tool_result(&ctx.params.thread_id, &ctx.turn_id, &result)
                     .await?;
+                tracing::debug!(turn_id = %ctx.turn_id, "tool_round: persist_tool_result done");
             }
         }
 
-        Ok(had_any_success)
+        Ok((had_any_success, file_changes))
     }
 
     /// Execute a single batch of tool calls.
@@ -135,11 +145,20 @@ impl TurnExecutor {
             .unwrap_or_else(|| self.runtime.inner.effective_config.approval_policy.clone());
 
             let action = action_for_tool_call(&call, &ctx.cwd);
-            if self.runtime.inner.permission_manager.requires_approval(
+            let requires_approval = self.runtime.inner.permission_manager.requires_approval(
                 &action,
                 &approval_policy,
                 &ctx.cwd,
-            ) {
+            );
+            tracing::debug!(
+                turn_id = %ctx.turn_id,
+                tool_call_id = %call.tool_call_id,
+                tool_name = %call.tool_name,
+                policy = ?approval_policy.kind,
+                requires_approval,
+                "tool_round: approval decision"
+            );
+            if requires_approval {
                 let approval = self
                     .runtime
                     .inner
@@ -179,6 +198,11 @@ impl TurnExecutor {
                     )
                     .await?;
 
+                tracing::debug!(
+                    turn_id = %ctx.turn_id,
+                    approval_id = %approval.request.approval_id,
+                    "tool_round: waiting for approval"
+                );
                 let transcript = self
                     .runtime
                     .inner
@@ -191,6 +215,12 @@ impl TurnExecutor {
                     .approval_manager
                     .wait_for_approval(&approval.request.approval_id, 300, &transcript)
                     .await?;
+                tracing::debug!(
+                    turn_id = %ctx.turn_id,
+                    approval_id = %approval.request.approval_id,
+                    decision = ?resolution.decision,
+                    "tool_round: approval resolved"
+                );
                 self.runtime
                     .publish_event(
                         RuntimeEventKind::ApprovalResolved,
@@ -232,6 +262,11 @@ impl TurnExecutor {
                         agent_depth: ctx.params.agent_depth,
                     };
                     async move {
+                        tracing::debug!(
+                            tool_call_id = %call.tool_call_id,
+                            tool_name = %call.tool_name,
+                            "tool_round: executing tool"
+                        );
                         let result =
                             orchestrator
                                 .execute(&call, ctx)
@@ -242,6 +277,12 @@ impl TurnExecutor {
                                     output: json!({ "error": e.to_string() }),
                                     error_message: Some(e.to_string()),
                                 });
+                        tracing::debug!(
+                            tool_call_id = %call.tool_call_id,
+                            tool_name = %call.tool_name,
+                            ok = result.ok,
+                            "tool_round: tool execution finished"
+                        );
                         (idx, result)
                     }
                 })
@@ -254,4 +295,41 @@ impl TurnExecutor {
         results.sort_by_key(|(idx, _)| *idx);
         Ok(results.into_iter().map(|(_, r)| r).collect())
     }
+}
+
+/// Extract a `FileChangeSummary` from a successful tool result for write_file
+/// or patch_file operations. Returns `None` for non-file-change tools.
+fn extract_file_change(result: &ToolResult) -> Option<FileChangeSummary> {
+    let output = &result.output;
+    let path = output.get("path")?.as_str()?.to_string();
+    let diff = output
+        .get("diff")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let lines_added = output
+        .get("lines_added")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let lines_removed = output
+        .get("lines_removed")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let is_new_file = output
+        .get("is_new_file")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let kind = if is_new_file {
+        "create".to_string()
+    } else {
+        "modify".to_string()
+    };
+
+    Some(FileChangeSummary {
+        path,
+        kind,
+        lines_added,
+        lines_removed,
+        diff,
+    })
 }
