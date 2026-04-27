@@ -22,6 +22,8 @@ pub const BG_DIFF_REMOVE: Color = Color::Rgb(60, 20, 20);
 pub const COLOR_ACCENT: Color = Color::Rgb(100, 200, 163); // soft mint-green
 /// Dimmed muted text, timestamps, hints
 pub const COLOR_MUTED: Color = Color::Rgb(110, 118, 135);
+/// Even dimmer text for secondary metadata (durations, gaps)
+pub const COLOR_DIM: Color = Color::Rgb(80, 86, 100);
 /// User message sigil + text
 pub const COLOR_USER: Color = Color::Rgb(255, 195, 100); // warm amber
 /// Assistant message sigil + text
@@ -949,6 +951,8 @@ pub fn transcript_window_lines(
     let body_width = (width as usize).saturating_sub(5).max(1); // "  │  " = 5 chars
     let end_line = start_line.saturating_add(max_lines);
     let mut line_index = 0usize;
+    let mut prev_timestamp: Option<i64> = None;
+    let mut prev_user_timestamp: Option<i64> = None;
 
     for entry in entries {
         let entry_line_count = transcript_entry_line_count(entry, body_width);
@@ -964,13 +968,23 @@ pub fn transcript_window_lines(
                 start_line,
                 end_line,
                 entry_start,
+                prev_timestamp,
+                prev_user_timestamp,
             );
+        }
+
+        // Track timestamps for duration/gap calculations
+        if entry.timestamp.is_some() {
+            prev_timestamp = entry.timestamp;
+        }
+        if entry.kind == EntryKind::User && entry.timestamp.is_some() {
+            prev_user_timestamp = entry.timestamp;
         }
 
         line_index = entry_end;
     }
 
-    // ── Apply character-level selection highlight ─────────────────────────────
+    // Apply character-level selection highlighting (drag-to-select)
     if let Some(sel) = selection {
         let visible_start = start_line;
         let visible_end = start_line.saturating_add(lines.len());
@@ -1033,6 +1047,7 @@ fn transcript_entry_line_count(entry: &TranscriptEntry, body_width: usize) -> us
     1 + body_lines + 1
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_transcript_entry_lines(
     out: &mut Vec<Line<'static>>,
     entry: &TranscriptEntry,
@@ -1041,6 +1056,8 @@ fn append_transcript_entry_lines(
     start_line: usize,
     end_line: usize,
     entry_start: usize,
+    prev_timestamp: Option<i64>,
+    prev_user_timestamp: Option<i64>,
 ) {
     let (sigil, sigil_color, body_color) = entry_style(entry.kind);
     let mut current_line = entry_start;
@@ -1068,6 +1085,28 @@ fn append_transcript_entry_lines(
                 format_timestamp(ts),
                 Style::default().fg(COLOR_MUTED),
             ));
+            // Show duration since previous entry
+            if let Some(prev_ts) = prev_timestamp {
+                let gap = ts - prev_ts;
+                if gap > 0 {
+                    header_spans.push(Span::styled(
+                        format!(" · {}", format_duration(gap)),
+                        Style::default().fg(COLOR_DIM),
+                    ));
+                }
+            }
+            // Show time since last user message (if this isn't a user message itself)
+            if entry.kind != EntryKind::User {
+                if let Some(user_ts) = prev_user_timestamp {
+                    let since_user = ts - user_ts;
+                    if since_user > 0 {
+                        header_spans.push(Span::styled(
+                            format!(" · +{}", format_duration(since_user)),
+                            Style::default().fg(COLOR_DIM),
+                        ));
+                    }
+                }
+            }
         }
         if entry.pending {
             header_spans.push(Span::raw("  "));
@@ -1087,7 +1126,6 @@ fn append_transcript_entry_lines(
         entry.kind,
         EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
     );
-
     if entry.body.is_empty() && entry.pending {
         if current_line >= start_line && current_line < end_line {
             // Show a clear animated "working" indicator in the transcript body
@@ -1530,6 +1568,32 @@ pub fn format_timestamp(timestamp: i64) -> String {
         .unwrap_or_else(|| timestamp.to_string())
 }
 
+/// Format a duration in seconds into a compact human-readable string.
+/// e.g. "3s", "1m12s", "2h5m"
+pub fn format_duration(secs: i64) -> String {
+    if secs < 0 {
+        return String::new();
+    }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m{s:02}s")
+        }
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m:02}m")
+        }
+    }
+}
 pub fn basename(path: &str) -> String {
     Path::new(path)
         .file_name()

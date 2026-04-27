@@ -2060,6 +2060,8 @@ impl InteractiveApp {
             .partition_point(|&line_end| line_end <= start_line);
 
         let mut lines = Vec::new();
+        let mut prev_timestamp: Option<i64> = None;
+        let mut prev_user_timestamp: Option<i64> = None;
         for idx in first_entry..self.transcript_render_cache.entries.len() {
             let entry_end = self.transcript_render_cache.line_ends[idx];
             let entry = &self.transcript_render_cache.entries[idx];
@@ -2075,7 +2077,16 @@ impl InteractiveApp {
                 start_line,
                 end_line,
                 entry_start,
+                prev_timestamp,
+                prev_user_timestamp,
             );
+            // Track timestamps for duration/gap calculations
+            if entry.timestamp.is_some() {
+                prev_timestamp = entry.timestamp;
+            }
+            if entry.kind == EntryKind::User && entry.timestamp.is_some() {
+                prev_user_timestamp = entry.timestamp;
+            }
         }
 
         if let Some(sel) = selection {
@@ -2305,6 +2316,7 @@ fn extract_user_message_history(items: &[ConversationItem]) -> Vec<String> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_cached_transcript_entry_lines(
     out: &mut Vec<Line<'static>>,
     entry: &CachedTranscriptEntry,
@@ -2313,6 +2325,8 @@ fn append_cached_transcript_entry_lines(
     start_line: usize,
     end_line: usize,
     entry_start: usize,
+    prev_timestamp: Option<i64>,
+    prev_user_timestamp: Option<i64>,
 ) {
     let (sigil, sigil_color, body_color) = entry_style(entry.kind);
     let mut current_line = entry_start;
@@ -2341,6 +2355,28 @@ fn append_cached_transcript_entry_lines(
                 format_timestamp(ts),
                 Style::default().fg(COLOR_MUTED),
             ));
+            // Show duration since previous entry
+            if let Some(prev_ts) = prev_timestamp {
+                let gap = ts - prev_ts;
+                if gap > 0 {
+                    header_spans.push(Span::styled(
+                        format!(" · {}", super::types::format_duration(gap)),
+                        Style::default().fg(super::types::COLOR_DIM),
+                    ));
+                }
+            }
+            // Show time since last user message (if this isn't a user message itself)
+            if entry.kind != EntryKind::User {
+                if let Some(user_ts) = prev_user_timestamp {
+                    let since_user = ts - user_ts;
+                    if since_user > 0 {
+                        header_spans.push(Span::styled(
+                            format!(" · +{}", super::types::format_duration(since_user)),
+                            Style::default().fg(super::types::COLOR_DIM),
+                        ));
+                    }
+                }
+            }
         }
         if entry.pending {
             header_spans.push(Span::raw("  "));

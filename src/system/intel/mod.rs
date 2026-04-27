@@ -121,7 +121,10 @@ impl RepoMap {
             return None;
         }
 
-        let indexable_count = file_list.iter().filter(|f| !f.is_binary && f.lang.is_indexable()).count();
+        let indexable_count = file_list
+            .iter()
+            .filter(|f| !f.is_binary && f.lang.is_indexable())
+            .count();
         let mut cache_hits = 0usize;
         let mut cache_misses = 0usize;
         let mut total_symbols = 0usize;
@@ -129,7 +132,8 @@ impl RepoMap {
         let entries: Vec<FileEntry<'_>> = file_list
             .iter()
             .map(|summary| {
-                let symbols = self.symbols_for_tracked(root, summary, &mut cache_hits, &mut cache_misses);
+                let symbols =
+                    self.symbols_for_tracked(root, summary, &mut cache_hits, &mut cache_misses);
                 total_symbols += symbols.len();
                 FileEntry { summary, symbols }
             })
