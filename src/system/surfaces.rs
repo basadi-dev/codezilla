@@ -1,7 +1,9 @@
 use anyhow::{bail, Result};
 use std::io::{self, Write};
 
-use super::domain::{OutputMode, RuntimeEventKind, SurfaceKind, UserInput};
+use super::domain::{
+    ApprovalPolicy, OutputMode, PermissionProfile, RuntimeEventKind, SurfaceKind, UserInput,
+};
 use super::runtime::{
     ConversationRuntime, EventFilter, ThreadForkParams, ThreadResumeParams, ThreadStartParams,
     TurnStartParams,
@@ -27,6 +29,8 @@ pub struct ExecInvocation {
     pub ephemeral: bool,
     pub cwd: Option<String>,
     pub thread_id: Option<String>,
+    pub approval_policy: Option<ApprovalPolicy>,
+    pub permission_profile: Option<PermissionProfile>,
 }
 
 pub struct InteractiveSurface {
@@ -106,8 +110,8 @@ impl ExecSurface {
                 .start_thread(ThreadStartParams {
                     cwd: invocation.cwd,
                     model_settings: None,
-                    approval_policy: None,
-                    permission_profile: None,
+                    approval_policy: invocation.approval_policy.clone(),
+                    permission_profile: invocation.permission_profile.clone(),
                     ephemeral: invocation.ephemeral,
                 })
                 .await?
@@ -131,8 +135,8 @@ impl ExecSurface {
                     input: vec![UserInput::from_text(prompt)],
                     cwd: None,
                     model_settings: None,
-                    approval_policy: None,
-                    permission_profile: None,
+                    approval_policy: invocation.approval_policy.clone(),
+                    permission_profile: invocation.permission_profile.clone(),
                     output_schema: None,
                     agent_depth: 0,
                 },
@@ -150,6 +154,11 @@ impl ExecSurface {
                     match self.output_mode {
                         OutputMode::Jsonl => {
                             println!("{}", serde_json::to_string(&event)?);
+                            match event.kind {
+                                RuntimeEventKind::TurnCompleted => break 0,
+                                RuntimeEventKind::TurnFailed => break 1,
+                                _ => {}
+                            }
                         }
                         OutputMode::Human => match event.kind {
                             RuntimeEventKind::ItemUpdated => {

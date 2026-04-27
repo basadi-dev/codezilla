@@ -395,7 +395,7 @@ impl ConversationRuntime {
             subscribed_clients: HashSet::new(),
             owner_connection_id: None,
             pending_steering: Vec::new(),
-            approval_policy_override: None,
+            approval_policy_override: params.approval_policy.clone(),
             prefix_items: Vec::new(),
         }));
         self.inner
