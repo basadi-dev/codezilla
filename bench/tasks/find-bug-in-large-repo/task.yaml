@@ -1,0 +1,27 @@
+id: find-bug-in-large-repo
+title: "Find and fix a bug in a 25-file codebase"
+difficulty: hard
+category: debugging
+tags: [python, debugging, navigation, large-repo]
+prompt: |
+  Users report that task prioritization is broken. When they sort tasks
+  by priority, tasks with high priority and near deadlines sometimes
+  appear below low-priority tasks with distant deadlines.
+
+  Example: "Deploy critical hotfix" (high priority, due tomorrow) shows
+  up below "Update README" (low priority, due next month).
+
+  The test suite has some failing tests. Run `python3 -m pytest tests/ -v`
+  to see the failures, then trace through the code to find and fix the
+  bug.
+
+  Do NOT modify any test files.
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "cd $PWD && python3 -m pytest tests/ -v 2>&1"
+
+timeout_secs: 300

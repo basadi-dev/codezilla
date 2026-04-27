@@ -1,0 +1,33 @@
+id: large-file-refactor
+title: "Refactor a large module by splitting into multiple files"
+difficulty: hard
+category: refactor
+tags: [python, refactor, large-file, multi-file]
+prompt: |
+  The file `utils.py` has grown too large — it contains four unrelated
+  classes. Split each class into its own module file and update `utils.py`
+  to re-export them so existing imports continue to work.
+
+  The test suite imports from `utils` directly. Run the tests after your
+  refactoring to make sure nothing broke:
+  `python3 -m pytest test_utils.py -v`
+
+  Do NOT modify test_utils.py.
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "python3 -m pytest test_utils.py -v 2>&1"
+  expected_files:
+    - path: "logger.py"
+      exists: true
+    - path: "config.py"
+      exists: true
+    - path: "validator.py"
+      exists: true
+    - path: "formatter.py"
+      exists: true
+
+timeout_secs: 180

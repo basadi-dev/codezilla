@@ -1,0 +1,21 @@
+id: add-json-serialization
+title: "Add JSON serialization to a Rust struct"
+difficulty: easy
+category: feature
+tags: [rust, feature, serde]
+prompt: |
+  We need the `Config` struct in `src/lib.rs` to support JSON
+  serialization and deserialization. Add a `to_json()` method and a
+  `from_json()` class method so configs can be persisted to disk.
+
+  The serde and serde_json dependencies are already in Cargo.toml.
+  Run `cargo test` to verify your implementation.
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "cd $PWD && cargo test 2>&1"
+
+timeout_secs: 120

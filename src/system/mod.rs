@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod bench;
 pub mod config;
 pub mod domain;
 pub mod error;

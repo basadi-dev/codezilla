@@ -1,0 +1,15 @@
+id: smoke-test
+title: "Smoke test — write a file"
+difficulty: trivial
+category: smoke
+prompt: |
+  Create a file called hello.txt containing exactly the text: hello world
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "grep -qx 'hello world' hello.txt && echo PASS"
+
+timeout_secs: 120

@@ -1,0 +1,20 @@
+id: python-fix-csv-parser
+title: "Fix a broken CSV parser in Python"
+difficulty: medium
+category: bugfix
+tags: [python, bugfix, parsing]
+prompt: |
+  The CSV parser in `parser.py` is producing wrong results. Run the test
+  suite with `python3 -m pytest test_parser.py -v` to see what's failing,
+  then fix the parser.
+
+  Do NOT modify test_parser.py — only fix parser.py.
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "python3 -m pytest test_parser.py -v 2>&1"
+
+timeout_secs: 90

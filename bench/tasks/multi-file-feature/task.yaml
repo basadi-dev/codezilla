@@ -1,0 +1,24 @@
+id: multi-file-feature
+title: "Add a new command to a multi-file CLI app"
+difficulty: medium
+category: feature
+tags: [rust, multi-file, feature]
+prompt: |
+  This is a small CLI calculator app with `add` and `multiply` commands.
+  Add support for a `divide` command. Look at how the existing commands
+  are structured and follow the same pattern.
+
+  Handle division by zero gracefully. There are commented-out tests in
+  the commands module — uncomment them and make sure everything passes.
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "rustc --edition 2021 src/main.rs --test -o test_bin && ./test_bin"
+  expected_files:
+    - path: "src/commands/divide.rs"
+      exists: true
+
+timeout_secs: 120

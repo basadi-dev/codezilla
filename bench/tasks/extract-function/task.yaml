@@ -1,0 +1,24 @@
+id: extract-function
+title: "Extract helper function from a long method"
+difficulty: medium
+category: refactor
+tags: [rust, refactor]
+prompt: |
+  The `process_records()` function in `src/lib.rs` is too long and does
+  too many things. The validation logic should be in its own function.
+
+  Extract the validation into a separate function and make sure all
+  existing tests pass. Run the tests to verify.
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "rustc --edition 2021 src/lib.rs --test -o test_bin && ./test_bin"
+  expected_files:
+    - path: "src/lib.rs"
+      contains:
+        - "validate_record"
+
+timeout_secs: 120

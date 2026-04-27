@@ -1,0 +1,23 @@
+id: fix-path-traversal
+title: "Fix a path traversal vulnerability"
+difficulty: hard
+category: security
+tags: [python, security, vulnerability]
+prompt: |
+  Security audit found that the file server in `server.py` allows reading
+  files outside its document root using `../../` paths. Fix the
+  vulnerability so directory traversal attacks are blocked.
+
+  Existing functionality must still work. Run the tests to verify:
+  `python3 -m pytest test_server.py -v`
+
+  Do NOT modify test_server.py.
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "python3 -m pytest test_server.py -v 2>&1"
+
+timeout_secs: 120

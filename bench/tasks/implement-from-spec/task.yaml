@@ -1,0 +1,22 @@
+id: implement-from-spec
+title: "Implement a module from a specification"
+difficulty: hard
+category: implementation
+tags: [rust, implementation, from-scratch]
+prompt: |
+  Implement a `Matrix` struct in `src/lib.rs`. The file already contains
+  a comprehensive test suite that defines the expected API — read the
+  tests to understand what's needed.
+
+  The matrix should support construction, element access, transpose,
+  scaling, addition, and multiplication. Run the tests to verify:
+  `rustc --edition 2021 src/lib.rs --test -o test_bin && ./test_bin`
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "rustc --edition 2021 src/lib.rs --test -o test_bin && ./test_bin"
+
+timeout_secs: 180

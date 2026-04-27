@@ -663,6 +663,38 @@ pub struct ReviewTarget {
     pub base_path: PathString,
 }
 
+// ── Benchmark / observability types ───────────────────────────────────────────
+
+/// Metrics collected during a single agent turn, designed for benchmark harnesses
+/// to parse from the `TurnCompleted` event payload.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnMetrics {
+    /// Number of full agent-loop iterations executed.
+    pub agent_iterations: usize,
+    /// Total tool calls dispatched (across all rounds).
+    pub tool_call_count: usize,
+    /// Wall-clock time from turn start to completion (milliseconds).
+    pub elapsed_ms: u64,
+    /// File changes produced during this turn.
+    #[serde(default)]
+    pub file_changes: Vec<FileChangeSummary>,
+}
+
+/// Summary of a single file modification made by the agent during a turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChangeSummary {
+    pub path: PathString,
+    /// One of: "create", "modify", "delete"
+    pub kind: String,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    /// Unified diff text (may be empty for deletes).
+    #[serde(default)]
+    pub diff: String,
+}
+
 pub fn now_seconds() -> TimestampSeconds {
     chrono::Utc::now().timestamp()
 }

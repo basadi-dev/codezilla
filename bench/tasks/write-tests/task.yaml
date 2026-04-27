@@ -1,0 +1,28 @@
+id: write-tests
+title: "Write comprehensive tests for untested code"
+difficulty: medium
+category: testing
+tags: [python, testing, test-writing]
+prompt: |
+  The file `stack.py` implements a Stack data structure but has no tests.
+  Write a thorough test suite in `test_stack.py` using pytest.
+
+  Cover all public methods, edge cases (empty stack operations), and the
+  dunder methods (__contains__, __iter__, __repr__, __len__). Aim for at
+  least 15 test functions.
+
+  Run your tests to verify they pass: `python3 -m pytest test_stack.py -v`
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "python3 -m pytest test_stack.py -v 2>&1"
+  expected_files:
+    - path: "test_stack.py"
+      exists: true
+      contains:
+        - "def test_"
+
+timeout_secs: 120

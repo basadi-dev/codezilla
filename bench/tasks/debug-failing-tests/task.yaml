@@ -1,0 +1,21 @@
+id: debug-failing-tests
+title: "Debug and fix failing tests (no hint given)"
+difficulty: medium
+category: debugging
+tags: [rust, debugging, blind]
+prompt: |
+  The KV store implementation in `src/lib.rs` has some bugs. Several
+  tests are failing.
+
+  Run the tests, read the failures, diagnose the issues, and fix the
+  implementation. Do NOT modify any test — only fix the implementation
+  code.
+
+setup:
+  fixtures: "fixtures"
+  commands: []
+
+validate:
+  command: "rustc --edition 2021 src/lib.rs --test -o test_bin && ./test_bin"
+
+timeout_secs: 120
