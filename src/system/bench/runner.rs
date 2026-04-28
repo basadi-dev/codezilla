@@ -60,6 +60,9 @@ pub struct TaskResult {
     /// How many of those attempts passed.
     #[serde(default)]
     pub pass_count: usize,
+    /// Path to the per-task log directory (events.jsonl, stderr.txt, validation.txt).
+    #[serde(default)]
+    pub log_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -220,7 +223,14 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
                 task.id.clone()
             };
 
-            let result = run_single_task(&config, task_dir, task);
+            // Build a deterministic per-run log directory.
+            // Layout: <output_dir>/logs/<task_id>/run_<N>/
+            let log_dir = config.output_dir
+                .join("logs")
+                .join(&task.id)
+                .join(format!("run_{}", ri + 1));
+
+            let result = run_single_task(&config, task_dir, task, &log_dir);
             let done = done_ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
             {
@@ -260,6 +270,7 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
                 validation_output: String::new(),
                 run_count: 1,
                 pass_count: 0,
+                log_dir: Some(log_dir.to_string_lossy().into_owned()),
                 error: Some(e.to_string()),
             });
             acc.lock().unwrap().push((ti, task_result));
@@ -376,7 +387,15 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
 
 // ── Single task execution ────────────────────────────────────────────────────
 
-fn run_single_task(config: &BenchConfig, task_dir: &Path, task: &BenchTask) -> Result<TaskResult> {
+fn run_single_task(
+    config: &BenchConfig,
+    task_dir: &Path,
+    task: &BenchTask,
+    log_dir: &Path,
+) -> Result<TaskResult> {
+    // Ensure per-task log directory exists.
+    std::fs::create_dir_all(log_dir)?;
+
     // 1. Create a temporary workspace.
     let workdir = tempdir_in_project(config)?;
 
@@ -405,14 +424,49 @@ fn run_single_task(config: &BenchConfig, task_dir: &Path, task: &BenchTask) -> R
 
     // 4. Run codezilla exec.
     let start = Instant::now();
-    let (exit_code, events) = run_codezilla(config, task, &workdir)?;
+    let (exit_code, events, stderr_lines) = run_codezilla(config, task, &workdir)?;
     let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    // 4a. Persist raw event stream.
+    let events_path = log_dir.join("events.jsonl");
+    if let Ok(mut f) = std::fs::File::create(&events_path) {
+        for ev in &events {
+            if let Ok(line) = serde_json::to_string(ev) {
+                use std::io::Write;
+                let _ = writeln!(f, "{line}");
+            }
+        }
+    }
+
+    // 4b. Persist stderr.
+    let stderr_path = log_dir.join("stderr.txt");
+    if let Ok(mut f) = std::fs::File::create(&stderr_path) {
+        use std::io::Write;
+        for line in &stderr_lines {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    // 4c. Write human-readable transcript.
+    let transcript = generate_transcript(&events, task);
+    let _ = std::fs::write(log_dir.join("transcript.md"), &transcript);
 
     // 5. Extract metrics from the event stream.
     let metrics = extract_metrics(&events);
 
+    let log_dir_str = Some(log_dir.to_string_lossy().into_owned());
+
     if exit_code != 0 {
         let cost = estimate_cost_usd(&metrics.token_usage, config.model.as_deref());
+        let error_msg = extract_terminal_error(&events)
+            .unwrap_or_else(|| format!("codezilla exec failed with exit code {exit_code}"));
+
+        // Persist validation placeholder so log dir is always consistent.
+        let _ = std::fs::write(
+            log_dir.join("validation.txt"),
+            format!("Skipped — agent did not complete successfully.\nError: {error_msg}\n"),
+        );
+
         return Ok(TaskResult {
             task_id: task.id.clone(),
             title: task.title.clone(),
@@ -429,19 +483,32 @@ fn run_single_task(config: &BenchConfig, task_dir: &Path, task: &BenchTask) -> R
             validation_output: String::new(),
             run_count: 1,
             pass_count: 0,
-            error: Some(
-                extract_terminal_error(&events)
-                    .unwrap_or_else(|| format!("codezilla exec failed with exit code {exit_code}")),
-            ),
+            log_dir: log_dir_str,
+            error: Some(error_msg),
         });
     }
 
     // 6. Run validation.
     let (passed, validation_output) = run_validation(&task.validate, &workdir)?;
 
-    // 7. Clean up workspace for passing tasks to prevent disk bloat.
+    // 6a. Persist validation output.
+    let _ = std::fs::write(
+        log_dir.join("validation.txt"),
+        format!(
+            "Result: {}\n\n{validation_output}\n",
+            if passed { "PASSED" } else { "FAILED" }
+        ),
+    );
+
+    // 7. Keep workspace on failure for inspection; remove on pass to save disk.
     if passed {
         let _ = std::fs::remove_dir_all(&workdir);
+    } else {
+        // Record where the workspace is so it's easy to find.
+        let _ = std::fs::write(
+            log_dir.join("workspace_path.txt"),
+            format!("{}", workdir.display()),
+        );
     }
 
     let cost = estimate_cost_usd(&metrics.token_usage, config.model.as_deref());
@@ -462,6 +529,7 @@ fn run_single_task(config: &BenchConfig, task_dir: &Path, task: &BenchTask) -> R
         validation_output,
         run_count: 1,
         pass_count: if passed { 1 } else { 0 },
+        log_dir: log_dir_str,
         error: None,
     })
 }
@@ -534,7 +602,7 @@ fn run_codezilla(
     config: &BenchConfig,
     task: &BenchTask,
     workdir: &Path,
-) -> Result<(i32, Vec<Value>)> {
+) -> Result<(i32, Vec<Value>, Vec<String>)> {
     let mut cmd = Command::new(&config.codezilla_bin);
     cmd.arg("--cd")
         .arg(workdir.to_string_lossy().as_ref())
@@ -574,6 +642,8 @@ fn run_codezilla(
     let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
     let events_shared: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let events_clone = Arc::clone(&events_shared);
+    let stderr_shared: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_clone = Arc::clone(&stderr_shared);
     let done_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let done_flag_clone = Arc::clone(&done_flag);
 
@@ -608,13 +678,14 @@ fn run_codezilla(
         }
     });
 
-    // Drain stderr as well so verbose logging cannot block the child process.
+    // Drain stderr and collect it so it can be persisted per-task.
     let stderr_thread = std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
             let Ok(line) = line else { break };
             if !line.trim().is_empty() {
                 tracing::debug!("bench: codezilla stderr: {line}");
+                stderr_clone.lock().unwrap().push(line);
             }
         }
     });
@@ -656,8 +727,12 @@ fn run_codezilla(
         .unwrap_or_default()
         .into_inner()
         .unwrap_or_default();
+    let stderr_lines = Arc::try_unwrap(stderr_shared)
+        .unwrap_or_default()
+        .into_inner()
+        .unwrap_or_default();
 
-    Ok((exit_code, events))
+    Ok((exit_code, events, stderr_lines))
 }
 
 // ── Metrics extraction ───────────────────────────────────────────────────────
@@ -1036,4 +1111,290 @@ fn load_summary(dir: &str) -> Result<BenchSummary> {
         .with_context(|| format!("reading {}", summary_file.display()))?;
     serde_json::from_str(&content)
         .with_context(|| format!("parsing {}", summary_file.display()))
+}
+
+// ── Transcript generation ─────────────────────────────────────────────────────
+
+/// Renders the raw event stream from a benchmark run into a human-readable
+/// Markdown transcript. Designed to be opened in any text editor or Markdown
+/// viewer to understand exactly what the agent did and why it passed or failed.
+fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
+    let mut out = String::with_capacity(8 * 1024);
+
+    // ── Header ────────────────────────────────────────────────────────────────
+    out.push_str(&format!("# Benchmark Transcript: {}\n\n", task.title));
+    out.push_str(&format!(
+        "**Task ID:** `{}`  |  **Difficulty:** {}  |  **Category:** {}\n\n",
+        task.id, task.difficulty, task.category
+    ));
+    out.push_str("---\n\n## Prompt\n\n");
+    out.push_str(&task.prompt);
+    out.push_str("\n\n---\n\n");
+
+    let mut agent_turn = 0usize;
+
+    for event in events {
+        let ev_kind = event.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let payload = match event.get("payload") {
+            Some(p) => p,
+            None => continue,
+        };
+
+        match ev_kind {
+            // ── ITEM_COMPLETED: the payload IS the ConversationItem ────────────
+            "ITEM_COMPLETED" => {
+                // The item's own kind is camelCase (serde serialises ItemKind as
+                // SCREAMING_SNAKE_CASE; check both for safety).
+                let item_kind = payload
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                // The per-item payload lives one level deeper.
+                let item_payload = payload.get("payload").unwrap_or(&Value::Null);
+
+                match item_kind {
+                    "USER_MESSAGE" => {
+                        let text = item_payload
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        out.push_str("## 👤 User Message\n\n");
+                        out.push_str(text);
+                        out.push_str("\n\n");
+                    }
+                    "AGENT_MESSAGE" => {
+                        agent_turn += 1;
+                        let text = item_payload
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        out.push_str(&format!("## 🤖 Agent Message (round {agent_turn})\n\n"));
+                        out.push_str(text);
+                        out.push_str("\n\n");
+                    }
+                    "REASONING_TEXT" => {
+                        let text = item_payload
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        out.push_str("### 💭 Reasoning\n\n");
+                        // Indent as a block-quote.
+                        for line in text.lines() {
+                            out.push_str("> ");
+                            out.push_str(line);
+                            out.push('\n');
+                        }
+                        out.push('\n');
+                    }
+                    "REASONING_SUMMARY" => {
+                        let text = item_payload
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        out.push_str("### 💭 Reasoning Summary\n\n");
+                        for line in text.lines() {
+                            out.push_str("> ");
+                            out.push_str(line);
+                            out.push('\n');
+                        }
+                        out.push('\n');
+                    }
+                    "TOOL_CALL" => {
+                        let tool_name = item_payload
+                            .get("toolName")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let args = item_payload
+                            .get("arguments")
+                            .map(|v| {
+                                serde_json::to_string_pretty(v).unwrap_or_default()
+                            })
+                            .unwrap_or_default();
+                        out.push_str(&format!("### 🔧 Tool Call: `{tool_name}`\n\n"));
+                        if !args.is_empty() && args != "null" {
+                            out.push_str("```json\n");
+                            out.push_str(&args);
+                            out.push_str("\n```\n\n");
+                        }
+                    }
+                    "TOOL_RESULT" => {
+                        let ok = item_payload
+                            .get("ok")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        let icon = if ok { "✅" } else { "❌" };
+                        let output = item_payload.get("output").unwrap_or(&Value::Null);
+                        let output_str = if let Some(s) = output.as_str() {
+                            s.to_string()
+                        } else {
+                            serde_json::to_string_pretty(output).unwrap_or_default()
+                        };
+                        let error_msg = item_payload
+                            .get("errorMessage")
+                            .and_then(|v| v.as_str());
+
+                        out.push_str(&format!("### {icon} Tool Result\n\n"));
+                        if let Some(err) = error_msg {
+                            out.push_str(&format!("> **Error:** {err}\n\n"));
+                        }
+                        if !output_str.is_empty() && output_str != "null" {
+                            // Truncate very long outputs — full detail is in events.jsonl.
+                            const MAX_OUTPUT: usize = 3_000;
+                            let body = if output_str.len() > MAX_OUTPUT {
+                                format!(
+                                    "{}\n\n… *(truncated — {} bytes total, see events.jsonl)*",
+                                    &output_str[..MAX_OUTPUT],
+                                    output_str.len()
+                                )
+                            } else {
+                                output_str
+                            };
+                            out.push_str("```\n");
+                            out.push_str(&body);
+                            out.push_str("\n```\n\n");
+                        }
+                    }
+                    "COMMAND_EXECUTION" => {
+                        let cmd = item_payload
+                            .get("command")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .unwrap_or_default();
+                        let exit_code = item_payload
+                            .get("exitCode")
+                            .and_then(|v| v.as_i64());
+                        let ok = exit_code.map(|c| c == 0).unwrap_or(true);
+                        let icon = if ok { "▶️" } else { "💥" };
+                        let stdout = item_payload
+                            .get("stdout")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let stderr_out = item_payload
+                            .get("stderr")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        out.push_str(&format!("### {icon} Command\n\n"));
+                        out.push_str(&format!("```\n{cmd}\n```\n\n"));
+                        if !stdout.is_empty() {
+                            out.push_str("**stdout:**\n```\n");
+                            let s = if stdout.len() > 1_500 { &stdout[..1_500] } else { stdout };
+                            out.push_str(s);
+                            out.push_str("\n```\n\n");
+                        }
+                        if !stderr_out.is_empty() {
+                            out.push_str("**stderr:**\n```\n");
+                            let s = if stderr_out.len() > 1_500 { &stderr_out[..1_500] } else { stderr_out };
+                            out.push_str(s);
+                            out.push_str("\n```\n\n");
+                        }
+                    }
+                    "FILE_CHANGE" => {
+                        let path = item_payload
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let change_kind = item_payload
+                            .get("changeKind")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("modify");
+                        let diff = item_payload
+                            .get("diff")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        out.push_str(&format!("### 📝 File {change_kind}: `{path}`\n\n"));
+                        if !diff.is_empty() {
+                            let d = if diff.len() > 3_000 { &diff[..3_000] } else { diff };
+                            out.push_str("```diff\n");
+                            out.push_str(d);
+                            out.push_str("\n```\n\n");
+                        }
+                    }
+                    "ERROR" => {
+                        let kind = item_payload
+                            .get("kind")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("error");
+                        let msg = item_payload
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error");
+                        out.push_str(&format!("### ❗ Error: `{kind}`\n\n> {msg}\n\n"));
+                    }
+                    _ => {} // UserAttachment, Status, ReviewMarker — skip
+                }
+            }
+
+            // ── TURN_COMPLETED ────────────────────────────────────────────────
+            "TURN_COMPLETED" => {
+                out.push_str("---\n\n## ✅ Turn Completed\n\n");
+                if let Some(metrics) = payload.get("metrics") {
+                    let iters = metrics
+                        .get("agentIterations")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let tools = metrics
+                        .get("toolCallCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    out.push_str(&format!("- Agent iterations: {iters}\n"));
+                    out.push_str(&format!("- Tool calls: {tools}\n"));
+                }
+                if let Some(usage) = payload.get("tokenUsage") {
+                    let input = usage
+                        .get("inputTokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let output = usage
+                        .get("outputTokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let cached = usage
+                        .get("cachedTokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    out.push_str(&format!(
+                        "- Tokens: {input} input / {output} output / {cached} cached\n"
+                    ));
+                }
+                out.push('\n');
+            }
+
+            // ── TURN_FAILED ───────────────────────────────────────────────────
+            "TURN_FAILED" => {
+                let kind = payload
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let reason = payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                out.push_str(&format!(
+                    "---\n\n## ❌ Turn Failed: `{kind}`\n\n> {reason}\n\n"
+                ));
+            }
+
+            // ── WARNING ───────────────────────────────────────────────────────
+            "WARNING" => {
+                let msg = payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !msg.is_empty() {
+                    out.push_str(&format!("> ⚠️ **Warning:** {msg}\n\n"));
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    out
 }
