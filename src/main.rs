@@ -47,17 +47,41 @@ async fn async_main() -> Result<i32> {
     }
 
     if let Some(("bench", sub)) = matches.subcommand() {
+        // ── bench compare ───────────────────────────────────────────────────
+        if let Some(("compare", csub)) = sub.subcommand() {
+            let base = csub.get_one::<String>("base").unwrap();
+            let head = csub.get_one::<String>("head").unwrap();
+            return system::bench::runner::run_compare(base, head)
+                .map(|_| 0);
+        }
+
+        // ── bench run ───────────────────────────────────────────────────────
         let tasks_dir = sub
             .get_one::<String>("tasks")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("bench/tasks"));
-        let output_dir = sub
+
+        let runs: usize = sub
+            .get_one::<String>("runs")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1)
+            .max(1);
+        let parallelism: usize = sub
+            .get_one::<String>("parallel")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1)
+            .max(1);
+
+        // Use a timestamped sub-directory so each run is archived separately.
+        let base_output = sub
             .get_one::<String>("output")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("bench/results"));
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let output_dir = base_output.join(&timestamp);
+
         let filter = sub.get_one::<String>("filter").cloned();
         let model = matches.get_one::<String>("model").cloned();
-
         let codezilla_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("codezilla"));
 
         let bench_config = system::bench::runner::BenchConfig {
@@ -67,6 +91,8 @@ async fn async_main() -> Result<i32> {
             codezilla_bin,
             config_path: Some(config_path),
             output_dir,
+            runs,
+            parallelism,
         };
 
         let summary = system::bench::runner::run_bench(&bench_config)?;
@@ -409,6 +435,12 @@ fn build_cli() -> Command {
         .subcommand(
             Command::new("bench")
                 .about("Run benchmark tasks to evaluate agent performance")
+                .subcommand(
+                    Command::new("compare")
+                        .about("Compare two bench result directories and show regressions")
+                        .arg(Arg::new("base").value_name("BASE_DIR").required(true))
+                        .arg(Arg::new("head").value_name("HEAD_DIR").required(true)),
+                )
                 .arg(
                     Arg::new("tasks")
                         .long("tasks")
@@ -427,7 +459,21 @@ fn build_cli() -> Command {
                         .long("output")
                         .value_name("DIR")
                         .default_value("bench/results")
-                        .help("Output directory for results"),
+                        .help("Base output directory; a timestamped sub-dir is created per run"),
+                )
+                .arg(
+                    Arg::new("runs")
+                        .long("runs")
+                        .value_name("N")
+                        .default_value("1")
+                        .help("Number of times to run each task (≥1); use >1 to detect flakiness"),
+                )
+                .arg(
+                    Arg::new("parallel")
+                        .long("parallel")
+                        .value_name("N")
+                        .default_value("1")
+                        .help("Max tasks to run concurrently (1 = sequential)"),
                 ),
         )
 }

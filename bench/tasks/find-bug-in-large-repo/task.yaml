@@ -20,6 +20,7 @@ prompt: |
 setup:
   fixtures: "fixtures"
   commands: []
+  assert_fails: "cd $PWD && python3 -m pytest tests/ -v 2>&1"
 
 validate:
   command: "cd $PWD && python3 -m pytest tests/ -v 2>&1"

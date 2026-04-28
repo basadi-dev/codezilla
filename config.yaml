@@ -6,7 +6,6 @@
 model_settings:
   model_id: "glm-5.1:cloud"
   provider_id: "ollama"
-  context_window: 198000
   # reasoning_effort: "medium"   # low | medium | high  (Anthropic / OpenAI o-series only)
 
 # Model presets shown in the /model autocomplete list.
@@ -22,6 +21,9 @@ models:
     provider_id: "ollama"
     context_window: 256000
   - model_id: "deepseek-v4-flash:cloud"
+    provider_id: "ollama"
+    context_window: 1000000
+  - model_id: "deepseek-v4-pro:cloud"
     provider_id: "ollama"
     context_window: 1000000
   - model_id: "claude-opus-4-5"

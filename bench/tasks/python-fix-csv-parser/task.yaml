@@ -13,6 +13,7 @@ prompt: |
 setup:
   fixtures: "fixtures"
   commands: []
+  assert_fails: "python3 -m pytest test_parser.py -v 2>&1"
 
 validate:
   command: "python3 -m pytest test_parser.py -v 2>&1"

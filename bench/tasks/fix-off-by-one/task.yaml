@@ -14,6 +14,7 @@ prompt: |
 setup:
   fixtures: "fixtures"
   commands: []
+  assert_fails: "rustc --edition 2021 src/lib.rs --test -o test_bin && ./test_bin"
 
 validate:
   command: "rustc --edition 2021 src/lib.rs --test -o test_bin && ./test_bin"

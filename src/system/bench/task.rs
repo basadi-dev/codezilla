@@ -45,6 +45,11 @@ pub struct TaskSetup {
     /// Shell commands to run after copying fixtures (in order).
     #[serde(default)]
     pub commands: Vec<String>,
+    /// A shell command that MUST fail (non-zero exit) after setup.
+    /// Used for bugfix tasks to verify the fixtures are actually broken
+    /// before the agent starts. Prevents false-positive passes.
+    #[serde(default)]
+    pub assert_fails: Option<String>,
 }
 
 /// How to validate the agent's work product.
@@ -80,6 +85,11 @@ pub struct ExpectedFile {
     /// If true, the file must exist.
     #[serde(default = "default_true")]
     pub exists: bool,
+    /// Minimum number of occurrences of a pattern in the file.
+    /// For example, `min_test_count: 15` with a `contains: ["def test_"]`
+    /// ensures at least 15 test functions exist.
+    #[serde(default)]
+    pub min_test_count: Option<usize>,
 }
 
 fn default_difficulty() -> String {

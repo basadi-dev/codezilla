@@ -24,5 +24,6 @@ validate:
       exists: true
       contains:
         - "def test_"
+      min_test_count: 15
 
 timeout_secs: 120

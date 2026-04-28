@@ -16,6 +16,7 @@ setup:
 
 validate:
   command: "rustc --edition 2021 src/lib.rs --test -o test_bin && ./test_bin"
+  no_extra_changes: true
   expected_files:
     - path: "src/lib.rs"
       contains:

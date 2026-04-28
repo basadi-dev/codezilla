@@ -315,10 +315,25 @@ impl ConfigManager {
         let mut llm = raw.llm;
         apply_env_overrides(&mut llm);
 
+        let mut model_settings = raw.model_settings.unwrap_or_default();
+
+        // If the models preset list has an entry matching the active model_id,
+        // backfill any fields that weren't explicitly set in model_settings.
+        // This means context_window (and other per-model settings) only need
+        // to be defined once in the models list — not duplicated in model_settings.
+        if let Some(preset) = raw.models.iter().find(|m| m.model_id == model_settings.model_id) {
+            if model_settings.context_window.is_none() {
+                model_settings.context_window = preset.context_window;
+            }
+            if model_settings.reasoning_effort.is_none() {
+                model_settings.reasoning_effort = preset.reasoning_effort.clone();
+            }
+        }
+
         let effective = EffectiveConfig {
             app_home,
             sqlite_home,
-            model_settings: raw.model_settings.unwrap_or_default(),
+            model_settings,
             approval_policy: raw.approval_policy.unwrap_or_default(),
             approvals_reviewer: raw
                 .approvals_reviewer
