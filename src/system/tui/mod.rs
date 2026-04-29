@@ -1,7 +1,12 @@
+pub mod activity;
 pub mod app;
+pub mod approval;
+pub mod autocomplete;
 pub mod input;
 pub mod markdown;
 pub mod render;
+pub mod threads;
+pub mod transcript_view;
 pub mod types;
 
 use anyhow::Result;
@@ -92,7 +97,7 @@ pub async fn run_interactive_tui(
     loop {
         let spinner_active = app.active_turn_id.is_some() || app.pending_compact.is_some();
         if spinner_active && last_draw.elapsed() >= ACTIVE_POLL_INTERVAL {
-            app.spinner_tick = app.spinner_tick.wrapping_add(1);
+            app.activity.tick();
             dirty = true;
         }
 
@@ -212,7 +217,7 @@ pub async fn run_interactive_tui(
                     }
                 }
                 Event::Paste(text) => {
-                    if app.pending_approval.is_none() && app.focus == FocusPane::Composer {
+                    if !app.approval.has_pending() && app.focus == FocusPane::Composer {
                         app.jump_transcript_to_bottom();
                         // Normalize line endings: convert \r\n and \r to \n so the
                         // composer counts and renders lines consistently.

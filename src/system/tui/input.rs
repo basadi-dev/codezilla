@@ -29,8 +29,7 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 app.composer = super::types::ComposerState::default();
-                app.autocomplete_suggestions.clear();
-                app.autocomplete_selected = 0;
+                app.autocomplete.clear();
                 app.reset_composer_history_navigation();
                 app.composer_clear_requested = false;
                 app.status_message = "Composer cleared".into();
@@ -54,7 +53,7 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
         }
     }
 
-    if app.pending_approval.is_some() {
+    if app.approval.has_pending() {
         return handle_approval_key(app, key).await;
     }
 
@@ -135,17 +134,16 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
         }
         // Ctrl+End  →  jump to bottom + re-enable auto-scroll
         (KeyCode::End, KeyModifiers::CONTROL) => {
-            app.auto_scroll = true;
+            app.transcript_view.jump_to_bottom();
         }
         // Ctrl+Home  →  jump to top
         (KeyCode::Home, KeyModifiers::CONTROL) => {
-            app.auto_scroll = false;
-            app.transcript_scroll = 0;
+            app.transcript_view.jump_to_top();
         }
 
         // Tab / Shift+Tab: autocomplete when suggestions are live, else switch pane
         (KeyCode::Tab, _) => {
-            if !app.autocomplete_suggestions.is_empty() {
+            if app.autocomplete.is_active() {
                 app.autocomplete_select_next();
             } else {
                 app.focus = match app.focus {
@@ -155,7 +153,7 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
             }
         }
         (KeyCode::BackTab, _) => {
-            if !app.autocomplete_suggestions.is_empty() {
+            if app.autocomplete.is_active() {
                 app.autocomplete_select_prev();
             } else {
                 app.focus = match app.focus {
@@ -197,11 +195,8 @@ fn handle_transcript_key(app: &mut InteractiveApp, key: KeyEvent) {
         KeyCode::Down => app.scroll_transcript(1),
         KeyCode::PageUp => app.scroll_transcript(-8),
         KeyCode::PageDown => app.scroll_transcript(8),
-        KeyCode::Home => {
-            app.auto_scroll = false;
-            app.transcript_scroll = 0;
-        }
-        KeyCode::End => app.auto_scroll = true,
+        KeyCode::Home => app.transcript_view.jump_to_top(),
+        KeyCode::End => app.transcript_view.jump_to_bottom(),
         _ => {}
     }
 }
@@ -218,8 +213,7 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         }
         (KeyCode::Enter, _) => {
             app.jump_transcript_to_bottom();
-            app.autocomplete_suggestions.clear();
-            app.autocomplete_selected = 0;
+            app.autocomplete.clear();
             app.submit_composer().await?
         }
 
@@ -312,7 +306,7 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
             app.composer.move_right();
         }
         (KeyCode::Up, _) => {
-            if !app.autocomplete_suggestions.is_empty() {
+            if app.autocomplete.is_active() {
                 app.autocomplete_select_prev();
             } else if app.composer_history_active() || app.composer.is_empty() {
                 app.jump_transcript_to_bottom();
@@ -325,7 +319,7 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
             }
         }
         (KeyCode::Down, _) => {
-            if !app.autocomplete_suggestions.is_empty() {
+            if app.autocomplete.is_active() {
                 app.autocomplete_select_next();
             } else if app.composer_history_active() || app.composer.is_empty() {
                 app.jump_transcript_to_bottom();
@@ -346,8 +340,7 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
             app.composer.move_end();
         }
         (KeyCode::Esc, _) => {
-            app.autocomplete_suggestions.clear();
-            app.autocomplete_selected = 0;
+            app.autocomplete.clear();
             app.reset_composer_history_navigation();
             if !app.composer.is_empty() {
                 app.jump_transcript_to_bottom();

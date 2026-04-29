@@ -28,10 +28,10 @@ const COLOR_HINT: Color = Color::Rgb(60, 65, 75);
 ///   └────────────────────────────────────────┘
 pub fn draw(app: &mut InteractiveApp, frame: &mut Frame) {
     let ch = composer_height(&app.composer, frame.area().width);
-    let ac_h = if app.autocomplete_suggestions.is_empty() {
+    let ac_h = if !app.autocomplete.is_active() {
         0
     } else {
-        (app.autocomplete_suggestions.len() as u16).min(8)
+        (app.autocomplete.suggestions().len() as u16).min(8)
     };
 
     let outer = Layout::default()
@@ -84,13 +84,13 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     } else {
         "🔒"
     };
-    let state = current_state_label(app.active_turn_id.is_some(), app.pending_approval.is_some());
+    let state = current_state_label(app.active_turn_id.is_some(), app.approval.has_pending());
 
     let state_color = if app.error_message.is_some() {
         COLOR_ERROR
     } else if app.active_turn_id.is_some() {
         COLOR_ACCENT
-    } else if app.pending_approval.is_some() {
+    } else if app.approval.has_pending() {
         COLOR_APPROVAL
     } else {
         COLOR_MUTED
@@ -98,16 +98,16 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
 
     // State indicator: spinning dot or static
     let state_sigil = if app.active_turn_id.is_some() {
-        spinner_frame(app.spinner_tick)
+        spinner_frame(app.activity.spinner_tick())
     } else {
         "●"
     };
 
-    // Live activity label: prefer the precise tool/action string, fall back to state label.
+    // Live activity label: prefer the structured header (tool name + elapsed
+    // time, multi-tool summary when parallel), fall back to the state label.
     let live_label: String = if app.active_turn_id.is_some() {
-        app.live_activity
-            .as_deref()
-            .map(ToOwned::to_owned)
+        app.activity
+            .header_line(std::time::Instant::now(), "◆ generating…")
             .unwrap_or_else(|| state.to_string())
     } else {
         state.to_string()
@@ -200,7 +200,7 @@ fn render_separator(frame: &mut Frame, area: Rect) {
 // ─── Transcript ───────────────────────────────────────────────────────────────
 
 fn render_transcript(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
-    let transcript_area = if app.pending_approval.is_some() && area.height >= 10 {
+    let transcript_area = if app.approval.has_pending() && area.height >= 10 {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(4), Constraint::Length(8)])
@@ -229,17 +229,12 @@ fn render_transcript(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
     let total_lines = app.transcript_total_lines(content_area.width);
     let max_scroll = (total_lines.saturating_sub(viewport_height)) as u16;
 
-    if app.auto_scroll || app.transcript_scroll >= max_scroll {
-        // At the bottom (or already in follow mode) — clamp and re-engage auto-scroll
-        // so that manually scrolling down to the last line re-attaches follow mode.
-        app.transcript_scroll = max_scroll;
-        app.auto_scroll = true;
-    }
+    let effective_scroll = app.transcript_view.settle_at(max_scroll);
 
     // Pass area.width so body lines are hard-wrapped here rather than by ratatui.
     // This guarantees 1 Line in the vec == 1 terminal row, making drag coords exact.
     let overscan = 8usize;
-    let start_line = app.transcript_scroll as usize;
+    let start_line = effective_scroll as usize;
     let window_start = start_line.saturating_sub(overscan);
     let window_height = viewport_height.saturating_add(overscan * 2);
     let (lines, _) =
@@ -488,7 +483,7 @@ fn render_composer(app: &mut InteractiveApp, frame: &mut Frame, area: Rect) {
 
     // Cursor position — x_offset is always `prefix` (5) because every row
     // starts at the same column.
-    if app.pending_approval.is_none() {
+    if !app.approval.has_pending() {
         let visible_row = row.saturating_sub(composer_scroll);
         let cursor_x =
             input_area.x + prefix + (col as u16).min(input_area.width.saturating_sub(prefix + 1));
@@ -624,7 +619,7 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
 // Uses the same gutter prefix pattern as transcript entries.
 
 fn render_approval_panel(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
-    let Some(approval) = &app.pending_approval else {
+    let Some(approval) = app.approval.pending() else {
         return;
     };
 
@@ -734,10 +729,9 @@ fn render_autocomplete(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
-    let suggestions = &app.autocomplete_suggestions;
-    let selected = app.autocomplete_selected;
-
-    let scroll = app.autocomplete_scroll;
+    let suggestions = app.autocomplete.suggestions();
+    let selected = app.autocomplete.selected_index();
+    let scroll = app.autocomplete.scroll_offset();
     let lines: Vec<Line> = suggestions
         .iter()
         .enumerate()

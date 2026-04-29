@@ -12,9 +12,9 @@ use ratatui::{
 use super::markdown::{md_to_lines, md_to_lines_with_source_map};
 
 use super::super::domain::{
-    ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalPolicyKind, ApprovalResolution,
-    ConversationItem, ItemKind, PendingApproval, RuntimeEvent, RuntimeEventKind, ThreadMetadata,
-    TokenUsage, ToolResult, TurnStatus, UserInput,
+    ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalResolution, ConversationItem,
+    ItemKind, PendingApproval, RuntimeEvent, RuntimeEventKind, ThreadMetadata, TokenUsage,
+    ToolResult, TurnStatus, UserInput,
 };
 use super::super::error as cod_error;
 use super::super::runtime::{
@@ -64,24 +64,26 @@ pub struct InteractiveApp {
     pub runtime: ConversationRuntime,
     pub current_thread_id: String,
     pub current_thread_meta: Option<ThreadMetadata>,
-    pub threads: Vec<ThreadMetadata>,
-    pub selected_thread_id: Option<String>,
+    /// Cached thread list + selection cursor reducer.
+    pub threads: super::threads::ThreadListState,
     pub transcript: Vec<TranscriptEntry>,
     pub transcript_index: HashMap<String, usize>,
-    pub transcript_scroll: u16,
-    pub auto_scroll: bool,
+    /// Transcript scroll cursor + auto-follow flag reducer.
+    pub transcript_view: super::transcript_view::TranscriptViewState,
     pub focus: FocusPane,
     pub composer: ComposerState,
-    pub pending_approval: Option<PendingApprovalView>,
-    pub approval_policy_override: Option<ApprovalPolicy>,
+    /// Approval modal + policy-override reducer.
+    pub approval: super::approval::ApprovalState,
     pub active_turn_id: Option<String>,
     /// Cumulative token usage for the current thread (input + output tokens).
     pub token_usage: TokenUsage,
     pub status_message: String,
     pub error_message: Option<String>,
     pub should_quit: bool,
-    /// Monotonically increasing frame counter — drives the spinner animation.
-    pub spinner_tick: u64,
+    /// Structured tracking of agent work in flight (tools, streaming flag,
+    /// turn-elapsed timer, spinner tick). Drives the header line and any
+    /// future activity tree.
+    pub activity: super::activity::ActivityState,
     /// Whether mouse capture is active (wheel scroll on, native select off).
     pub mouse_capture_enabled: bool,
     /// Whether the user has pressed Ctrl+Q and is awaiting confirmation.
@@ -121,12 +123,8 @@ pub struct InteractiveApp {
     /// Composer input area rect — written by the renderer each frame.
     pub composer_area: Rect,
     transcript_render_cache: TranscriptRenderCache,
-    /// Slash-command autocomplete suggestions for the current composer text.
-    pub autocomplete_suggestions: Vec<AutocompleteItem>,
-    /// Index into `autocomplete_suggestions` of the highlighted entry.
-    pub autocomplete_selected: usize,
-    /// First visible row in the autocomplete list (scroll offset).
-    pub autocomplete_scroll: usize,
+    /// Slash-command autocomplete reducer (suggestions + selection + scroll).
+    pub autocomplete: super::autocomplete::AutocompleteState,
     /// Per-session model/reasoning override (None = use thread metadata + config defaults).
     pub model_settings_override: Option<super::super::domain::ModelSettings>,
     composer_history: Vec<String>,
@@ -134,9 +132,6 @@ pub struct InteractiveApp {
     composer_history_saved_input: Option<String>,
     /// Background compaction task result receiver. Set when /compact is running.
     pub(super) pending_compact: Option<oneshot::Receiver<anyhow::Result<ThreadCompactResult>>>,
-    /// Live activity description for the header — e.g. "⚙ read_file src/main.rs".
-    /// Set when a tool-call/command/file-change item starts; cleared on turn end.
-    pub live_activity: Option<String>,
 }
 
 impl InteractiveApp {
@@ -148,22 +143,23 @@ impl InteractiveApp {
             runtime,
             current_thread_id: initial_thread_id.clone(),
             current_thread_meta: None,
-            threads: Vec::new(),
-            selected_thread_id: Some(initial_thread_id),
+            threads: {
+                let mut s = super::threads::ThreadListState::new();
+                s.set_selected(Some(initial_thread_id));
+                s
+            },
             transcript: Vec::new(),
             transcript_index: HashMap::new(),
-            transcript_scroll: 0,
-            auto_scroll: true,
+            transcript_view: super::transcript_view::TranscriptViewState::new(),
             focus: FocusPane::Composer,
             composer: ComposerState::default(),
-            pending_approval: None,
-            approval_policy_override: None,
+            approval: super::approval::ApprovalState::new(),
             active_turn_id: None,
             token_usage: TokenUsage::default(),
             status_message: "Ready".into(),
             error_message: None,
             should_quit: false,
-            spinner_tick: 0,
+            activity: super::activity::ActivityState::new(),
             quit_requested: false,
             composer_clear_requested: false,
             mouse_capture_enabled: true,
@@ -185,15 +181,12 @@ impl InteractiveApp {
                 dirty: true,
                 ..TranscriptRenderCache::default()
             },
-            autocomplete_suggestions: Vec::new(),
-            autocomplete_selected: 0,
-            autocomplete_scroll: 0,
+            autocomplete: super::autocomplete::AutocompleteState::new(),
             model_settings_override: None,
             composer_history: Vec::new(),
             composer_history_index: None,
             composer_history_saved_input: None,
             pending_compact: None,
-            live_activity: None,
         };
         app.refresh_threads().await?;
         let current = app.current_thread_id.clone();
@@ -202,7 +195,7 @@ impl InteractiveApp {
     }
 
     pub async fn refresh_threads(&mut self) -> Result<()> {
-        self.threads = self
+        let listed = self
             .runtime
             .list_threads(ThreadListParams {
                 cwd: None,
@@ -213,22 +206,9 @@ impl InteractiveApp {
             })
             .await?
             .threads;
-
-        if self.threads.is_empty() {
-            self.selected_thread_id = None;
-            return Ok(());
-        }
-
-        let fallback = self.current_thread_id.clone();
-        let desired = self
-            .selected_thread_id
-            .clone()
-            .unwrap_or_else(|| fallback.clone());
-        if self.threads.iter().any(|t| t.thread_id == desired) {
-            self.selected_thread_id = Some(desired);
-        } else {
-            self.selected_thread_id = Some(fallback);
-        }
+        self.threads.set_threads(listed);
+        self.threads
+            .reconcile_selection(Some(self.current_thread_id.clone()));
         Ok(())
     }
 
@@ -248,7 +228,7 @@ impl InteractiveApp {
 
         self.current_thread_id = thread_id.to_string();
         self.current_thread_meta = Some(persisted.metadata.clone());
-        self.selected_thread_id = Some(thread_id.to_string());
+        self.threads.set_selected(Some(thread_id.to_string()));
         self.transcript.clear();
         self.transcript_index.clear();
         for item in &persisted.items {
@@ -275,10 +255,10 @@ impl InteractiveApp {
                 output_tokens: acc.output_tokens + t.token_usage.output_tokens,
                 cached_tokens: acc.cached_tokens + t.token_usage.cached_tokens,
             });
-        self.pending_approval = None;
+        self.approval.set_pending(None);
         self.drag_start = None;
         self.drag_end = None;
-        self.auto_scroll = true;
+        self.transcript_view.jump_to_bottom();
         self.error_message = None;
         self.reset_composer_history_navigation();
         self.composer_history = self.build_composer_history(&persisted).await?;
@@ -425,7 +405,7 @@ impl InteractiveApp {
                 col: usize::MAX / 2,
             });
             self.transcript_selection_locked = true;
-            self.auto_scroll = false;
+            self.transcript_view.set_auto_scroll(false);
             // Reset so triple-click doesn't extend
             self.transcript_last_click = None;
         } else {
@@ -436,7 +416,7 @@ impl InteractiveApp {
             self.drag_start = Some(point);
             self.drag_end = Some(point);
             self.transcript_selection_locked = false;
-            self.auto_scroll = false;
+            self.transcript_view.set_auto_scroll(false);
             self.transcript_last_click = Some(now);
             self.transcript_last_click_col = col;
             self.transcript_last_click_row = row;
@@ -486,7 +466,7 @@ impl InteractiveApp {
         };
 
         Some(SelectionPoint {
-            line: self.transcript_scroll as usize + (row as usize - area.y as usize),
+            line: self.transcript_view.scroll() as usize + (row as usize - area.y as usize),
             col: col.saturating_sub(area.x) as usize,
         })
     }
@@ -740,21 +720,11 @@ impl InteractiveApp {
     }
 
     pub fn scroll_transcript(&mut self, delta: i32) {
-        if delta < 0 {
-            // Scrolling up — detach from the bottom.
-            self.auto_scroll = false;
-            self.transcript_scroll = self
-                .transcript_scroll
-                .saturating_sub(delta.unsigned_abs() as u16);
-        } else {
-            // Scrolling down — just advance; render.rs will detect if we've
-            // reached max_scroll and re-engage auto-scroll there.
-            self.transcript_scroll = self.transcript_scroll.saturating_add(delta as u16);
-        }
+        self.transcript_view.scroll_by(delta);
     }
 
     pub fn jump_transcript_to_bottom(&mut self) {
-        self.auto_scroll = true;
+        self.transcript_view.jump_to_bottom();
     }
 
     pub fn composer_wrap_widths(&self) -> (usize, usize) {
@@ -967,7 +937,7 @@ impl InteractiveApp {
             return Ok(());
         }
 
-        if self.pending_approval.is_some() {
+        if self.approval.has_pending() {
             self.error_message =
                 Some("Resolve the approval request before sending more input".into());
             return Ok(());
@@ -996,7 +966,7 @@ impl InteractiveApp {
                 pending: true,
             });
         }
-        self.auto_scroll = true;
+        self.transcript_view.jump_to_bottom();
 
         if let Some(turn_id) = self.active_turn_id.clone() {
             self.runtime
@@ -1096,6 +1066,7 @@ impl InteractiveApp {
 
         if let Some(previous_thread) = self
             .threads
+            .threads()
             .iter()
             .find(|thread| thread.thread_id != persisted.metadata.thread_id)
         {
@@ -1327,9 +1298,7 @@ impl InteractiveApp {
     pub fn update_autocomplete(&mut self) {
         let text = self.composer.trimmed_text();
         if !text.starts_with('/') {
-            self.autocomplete_suggestions.clear();
-            self.autocomplete_selected = 0;
-            self.autocomplete_scroll = 0;
+            self.autocomplete.clear();
             return;
         }
 
@@ -1383,7 +1352,7 @@ impl InteractiveApp {
         }
 
         // ── /threads: list known threads as /resume <id> entries ─────────────
-        for thread in &self.threads {
+        for thread in self.threads.threads() {
             let title = thread_label(thread);
             let dir = thread
                 .cwd
@@ -1404,52 +1373,26 @@ impl InteractiveApp {
             all.push(AutocompleteItem::labeled(value, display));
         }
 
-        self.autocomplete_suggestions = all
+        let filtered: Vec<AutocompleteItem> = all
             .into_iter()
             .filter(|item| {
                 item.label.starts_with(text.as_str()) || item.value.starts_with(text.as_str())
             })
             .collect();
-        self.autocomplete_selected = 0;
-        self.autocomplete_scroll = 0;
+        self.autocomplete.set_suggestions(filtered);
     }
 
-    /// Move selection down (or wrap), fill the composer, scroll to keep selected visible.
+    /// Move selection down (or wrap), fill the composer.
     pub fn autocomplete_select_next(&mut self) {
-        if self.autocomplete_suggestions.is_empty() {
-            return;
+        if let Some(value) = self.autocomplete.select_next() {
+            self.composer.set_text(value);
         }
-        self.autocomplete_selected =
-            (self.autocomplete_selected + 1) % self.autocomplete_suggestions.len();
-        let v = self.autocomplete_suggestions[self.autocomplete_selected]
-            .value
-            .clone();
-        self.composer.set_text(v);
-        self.autocomplete_clamp_scroll();
     }
 
-    /// Move selection up (or wrap), fill the composer, scroll to keep selected visible.
+    /// Move selection up (or wrap), fill the composer.
     pub fn autocomplete_select_prev(&mut self) {
-        if self.autocomplete_suggestions.is_empty() {
-            return;
-        }
-        let len = self.autocomplete_suggestions.len();
-        self.autocomplete_selected = (self.autocomplete_selected + len - 1) % len;
-        let v = self.autocomplete_suggestions[self.autocomplete_selected]
-            .value
-            .clone();
-        self.composer.set_text(v);
-        self.autocomplete_clamp_scroll();
-    }
-
-    fn autocomplete_clamp_scroll(&mut self) {
-        const MAX_VISIBLE: usize = 8;
-        let viewport = MAX_VISIBLE.min(self.autocomplete_suggestions.len());
-        let sel = self.autocomplete_selected;
-        if sel < self.autocomplete_scroll {
-            self.autocomplete_scroll = sel;
-        } else if sel >= self.autocomplete_scroll + viewport {
-            self.autocomplete_scroll = sel + 1 - viewport;
+        if let Some(value) = self.autocomplete.select_prev() {
+            self.composer.set_text(value);
         }
     }
 
@@ -1459,21 +1402,15 @@ impl InteractiveApp {
     }
 
     pub async fn set_auto_approve_tools(&mut self, enabled: bool) {
-        self.approval_policy_override = if enabled {
-            Some(ApprovalPolicy {
-                kind: ApprovalPolicyKind::Never,
-                granular: None,
-            })
-        } else {
-            None
-        };
+        self.approval
+            .set_policy_override(super::approval::ApprovalState::override_for_auto(enabled));
         // Propagate immediately to any running turn so it takes effect on the
         // next tool-call evaluation without needing to restart.
         let _ = self
             .runtime
             .set_thread_approval_policy(
                 &self.current_thread_id,
-                self.approval_policy_override.clone(),
+                self.approval.policy_override().cloned(),
             )
             .await;
         self.status_message = format!("Approvals: {}", self.approval_mode_label());
@@ -1481,28 +1418,17 @@ impl InteractiveApp {
     }
 
     pub fn auto_approve_tools_enabled(&self) -> bool {
-        matches!(
-            self.effective_approval_policy().kind,
-            ApprovalPolicyKind::Never
-        )
+        self.approval
+            .auto_enabled(&self.runtime.effective_config().approval_policy)
     }
 
     pub fn approval_mode_label(&self) -> &'static str {
-        if self.auto_approve_tools_enabled() {
-            "auto"
-        } else {
-            "ask"
-        }
+        self.approval
+            .mode_label(&self.runtime.effective_config().approval_policy)
     }
 
     fn current_approval_policy_override(&self) -> Option<ApprovalPolicy> {
-        self.approval_policy_override.clone()
-    }
-
-    fn effective_approval_policy(&self) -> ApprovalPolicy {
-        self.approval_policy_override
-            .clone()
-            .unwrap_or_else(|| self.runtime.effective_config().approval_policy.clone())
+        self.approval.policy_override().cloned()
     }
 
     pub async fn interrupt_active_turn(&mut self) -> Result<()> {
@@ -1523,7 +1449,7 @@ impl InteractiveApp {
     }
 
     pub async fn resolve_pending_approval(&mut self, decision: ApprovalDecision) -> Result<()> {
-        let Some(approval) = self.pending_approval.clone() else {
+        let Some(approval) = self.approval.pending().cloned() else {
             return Ok(());
         };
         self.runtime
@@ -1534,7 +1460,7 @@ impl InteractiveApp {
             approval.approval.request.title.to_lowercase()
         );
         self.error_message = None;
-        self.pending_approval = None;
+        self.approval.set_pending(None);
         Ok(())
     }
 
@@ -1572,6 +1498,7 @@ impl InteractiveApp {
             }
             RuntimeEventKind::TurnStarted => {
                 self.active_turn_id = event.turn_id.clone();
+                self.activity.start_turn(std::time::Instant::now());
                 self.status_message = "Thinking…".into();
                 self.error_message = None;
                 self.push_status_entry(
@@ -1593,10 +1520,10 @@ impl InteractiveApp {
                     .next()
                     .unwrap_or(&pending.request.justification)
                     .to_string();
-                self.pending_approval = Some(PendingApprovalView {
+                self.approval.set_pending(Some(PendingApprovalView {
                     approval: pending.clone(),
                     action_preview: preview,
-                });
+                }));
                 self.status_message = format!("Approval required: {}", pending.request.title);
                 self.error_message = None;
                 self.push_status_entry(
@@ -1612,8 +1539,8 @@ impl InteractiveApp {
                     serde_json::from_value::<ApprovalResolution>(event.payload.clone())?;
                 self.remove_latest_approval_request_entry();
                 let summary = self
-                    .pending_approval
-                    .as_ref()
+                    .approval
+                    .pending()
                     .map(|approval| {
                         format!(
                             "{:?}: {}",
@@ -1626,7 +1553,7 @@ impl InteractiveApp {
                         )
                     })
                     .unwrap_or_else(|| format!("{:?}", resolution.decision));
-                self.pending_approval = None;
+                self.approval.set_pending(None);
                 self.status_message = format!("Approval {:?}", resolution.decision);
                 self.error_message = None;
                 self.push_status_entry(
@@ -1639,8 +1566,8 @@ impl InteractiveApp {
             }
             RuntimeEventKind::TurnCompleted => {
                 self.active_turn_id = None;
-                self.pending_approval = None;
-                self.live_activity = None;
+                self.approval.set_pending(None);
+                self.activity.end_turn();
                 self.remove_thinking_placeholder();
                 if let Some(thread) = self.current_thread_meta.as_mut() {
                     thread.status = super::super::domain::ThreadStatus::Idle;
@@ -1658,8 +1585,8 @@ impl InteractiveApp {
             }
             RuntimeEventKind::TurnFailed => {
                 self.active_turn_id = None;
-                self.pending_approval = None;
-                self.live_activity = None;
+                self.approval.set_pending(None);
+                self.activity.end_turn();
                 self.remove_thinking_placeholder();
                 // Prefer "kind" (the structured label) as the title; fall back to "reason".
                 let kind_label = event
@@ -1762,17 +1689,23 @@ impl InteractiveApp {
             });
         }
 
-        // ── Contextual status + live activity messages ─────────────────────
-        // `live_activity` drives the header; `status_message` drives the status bar.
-        let (activity, status) = match kind {
+        // ── Contextual status + structured activity tracking ───────────────
+        // `activity` (the reducer) tracks tool calls in flight as a set with
+        // start times; `status_message` drives the status bar.
+        let status = match kind {
             "TOOL_CALL" => {
                 let tool_name = event
                     .payload
                     .get("toolName")
                     .and_then(|v| v.as_str())
                     .unwrap_or("tool");
+                let tool_call_id = event
+                    .payload
+                    .get("toolCallId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(item_id);
                 // Best-effort short label: first arg (path/command) if present.
-                let arg_hint = event
+                let hint = event
                     .payload
                     .get("arguments")
                     .and_then(|a| {
@@ -1790,11 +1723,17 @@ impl InteractiveApp {
                             short.to_string()
                         }
                     });
-                let activity_str = match arg_hint {
-                    Some(hint) => format!("⚙ {} {}", tool_name, hint),
+                self.activity.start_tool(
+                    tool_call_id,
+                    tool_name,
+                    hint.clone(),
+                    std::time::Instant::now(),
+                );
+                let label = match &hint {
+                    Some(h) => format!("⚙ {} {}", tool_name, h),
                     None => format!("⚙ {}", tool_name),
                 };
-                (activity_str.clone(), format!("{}…", activity_str))
+                format!("{}…", label)
             }
             "COMMAND_EXECUTION" => {
                 let cmd = event
@@ -1807,8 +1746,7 @@ impl InteractiveApp {
                 } else {
                     cmd.to_string()
                 };
-                let activity_str = format!("$ {}", short_cmd);
-                (activity_str.clone(), activity_str)
+                format!("$ {}", short_cmd)
             }
             "FILE_CHANGE" => {
                 let path = event
@@ -1816,16 +1754,9 @@ impl InteractiveApp {
                     .get("path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("file");
-                let short_path = path.rsplit('/').next().unwrap_or(path);
-                let activity_str = format!("✏ {}", short_path);
-                (activity_str.clone(), format!("✏  {path}"))
+                format!("✏  {path}")
             }
-            _ => (String::new(), "Streaming response…".into()),
-        };
-        self.live_activity = if activity.is_empty() {
-            None
-        } else {
-            Some(activity)
+            _ => "Streaming response…".into(),
         };
         self.status_message = status;
         self.error_message = None;
@@ -1858,10 +1789,10 @@ impl InteractiveApp {
             });
         }
         self.status_message = "Streaming response…".into();
-        // While streaming text, keep live_activity as-is (shows last tool) or set generic.
-        if self.live_activity.is_none() {
-            self.live_activity = Some("◆ generating…".to_string());
-        }
+        // Mark the assistant as actively streaming so the header shows
+        // "◆ generating…" when no tool is in flight (the reducer falls back
+        // to the streaming label automatically — see ActivityState::header_line).
+        self.activity.set_streaming(true);
         // Do NOT force auto_scroll here — if the user scrolled up, respect that.
     }
 
@@ -1900,11 +1831,12 @@ impl InteractiveApp {
                     self.upsert_transcript_entry(entry_from_item(&item));
                 }
             }
-            // Clear tool activity once the result is in.
-            self.live_activity = None;
+            // Remove this tool from the in-flight tracker; the reducer keeps
+            // any other tools that started in the same parallel batch alive.
+            self.activity.finish_tool(&result.tool_call_id);
         } else if matches!(item.kind, ItemKind::AgentMessage) {
             self.upsert_transcript_entry(entry_from_item(&item));
-            self.live_activity = None;
+            self.activity.set_streaming(false);
         } else if matches!(item.kind, ItemKind::UserMessage) {
             // Replace the eager placeholder from submit_composer with the
             // real persisted entry (correct item_id, non-pending).
@@ -2049,7 +1981,12 @@ impl InteractiveApp {
     ) -> (Vec<Line<'static>>, usize) {
         self.ensure_transcript_render_cache(width);
         if self.transcript_render_cache.entries.is_empty() {
-            return transcript_lines(&self.transcript, self.spinner_tick, width, selection);
+            return transcript_lines(
+                &self.transcript,
+                self.activity.spinner_tick(),
+                width,
+                selection,
+            );
         }
 
         let end_line = start_line.saturating_add(max_lines);
@@ -2072,7 +2009,7 @@ impl InteractiveApp {
             append_cached_transcript_entry_lines(
                 &mut lines,
                 entry,
-                self.spinner_tick,
+                self.activity.spinner_tick(),
                 body_width,
                 start_line,
                 end_line,
