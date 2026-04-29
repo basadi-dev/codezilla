@@ -167,6 +167,32 @@ impl ActivityState {
             .map(|idx| self.tools.remove(idx))
     }
 
+    /// How many rows the activity panel should reserve in the layout.
+    /// Zero means "don't show the panel"; otherwise one row per tool, capped
+    /// so a runaway parallel batch can't push the transcript off-screen.
+    /// The single-tool case is already covered by the header line.
+    pub fn panel_height(&self) -> u16 {
+        const MAX_PANEL_ROWS: u16 = 5;
+        if self.tools.len() <= 1 {
+            return 0;
+        }
+        (self.tools.len() as u16).min(MAX_PANEL_ROWS)
+    }
+
+    /// One row per in-flight tool: `"⚙ tool_name hint (Xs)"`. Capped at
+    /// [`panel_height`] entries — older entries (lower index) drop first if
+    /// there are more parallel tools than rows.
+    pub fn panel_rows(&self, now: Instant) -> Vec<String> {
+        const MAX_PANEL_ROWS: usize = 5;
+        let total = self.tools.len();
+        let skip = total.saturating_sub(MAX_PANEL_ROWS);
+        self.tools
+            .iter()
+            .skip(skip)
+            .map(|t| format!("{} ({}s)", t.label(), t.elapsed(now).as_secs()))
+            .collect()
+    }
+
     /// Build the header label string for the current activity. Falls back to
     /// `streaming_fallback` if no tools are in flight but the assistant is
     /// streaming text. Returns `None` when truly idle.
@@ -355,5 +381,61 @@ mod tests {
             started_at: t0,
         };
         assert_eq!(without.label(), "⚙ bash_exec");
+    }
+
+    #[test]
+    fn panel_height_hides_for_zero_or_one_tool() {
+        let mut s = ActivityState::new();
+        assert_eq!(s.panel_height(), 0);
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_tool("c1", "list_dir", None, t0);
+        assert_eq!(
+            s.panel_height(),
+            0,
+            "single tool is shown in the header line, not the panel"
+        );
+    }
+
+    #[test]
+    fn panel_height_grows_with_tool_count_up_to_cap() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        for i in 0..10 {
+            s.start_tool(format!("c{i}"), format!("tool{i}"), None, t0);
+        }
+        assert_eq!(s.panel_height(), 5, "panel is capped at 5 rows");
+    }
+
+    #[test]
+    fn panel_rows_format_matches_header_with_elapsed() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_tool("c1", "list_dir", Some("src".into()), t0);
+        s.start_tool("c2", "read_file", None, t0);
+        let rows = s.panel_rows(t0 + Duration::from_secs(4));
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("list_dir"));
+        assert!(rows[0].contains("src"));
+        assert!(rows[0].contains("4s"));
+        assert!(rows[1].contains("read_file"));
+        assert!(rows[1].contains("4s"));
+    }
+
+    #[test]
+    fn panel_rows_keeps_most_recent_when_overflowed() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        for i in 0..8 {
+            s.start_tool(format!("c{i}"), format!("tool{i}"), None, t0);
+        }
+        let rows = s.panel_rows(t0);
+        assert_eq!(rows.len(), 5);
+        // First retained row should be tool3 (8 - 5 = skip 3); last is tool7.
+        assert!(rows[0].contains("tool3"), "got {:?}", rows[0]);
+        assert!(rows[4].contains("tool7"), "got {:?}", rows[4]);
     }
 }
