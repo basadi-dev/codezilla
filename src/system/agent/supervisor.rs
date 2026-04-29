@@ -167,10 +167,10 @@ impl AgentSupervisor {
                 break TurnCompletionOutcome::TimedOut;
             }
             match tokio::time::timeout(remaining, sub.receiver.recv()).await {
-                Ok(Ok(event)) => {
-                    if event.thread_id.as_deref() != Some(thread_id) {
-                        continue;
-                    }
+                Ok(Some(event)) => {
+                    // Bus filters by thread_id at publish time, but the sub-agent
+                    // sends turn-level events tagged with the *child* turn — we
+                    // still want to spin until that specific turn finishes.
                     match event.kind {
                         RuntimeEventKind::TurnCompleted | RuntimeEventKind::TurnFailed => {
                             if event.turn_id.as_deref() == Some(turn_id) {
@@ -180,7 +180,7 @@ impl AgentSupervisor {
                         _ => continue,
                     }
                 }
-                Ok(Err(_)) => break TurnCompletionOutcome::Failed("event_bus_closed".into()),
+                Ok(None) => break TurnCompletionOutcome::Failed("event_bus_closed".into()),
                 Err(_) => break TurnCompletionOutcome::TimedOut,
             }
         };

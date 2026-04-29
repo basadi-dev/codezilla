@@ -147,7 +147,10 @@ impl ExecSurface {
         let mut last_message = String::new();
         let exit_code = loop {
             match subscription.receiver.recv().await {
-                Ok(event) => {
+                Some(event) => {
+                    // Bus filters by thread_id at publish time, but the
+                    // subscription was created with `thread_id: None` (bus
+                    // listens to everything) so retain the local guard.
                     if event.thread_id.as_deref() != Some(thread_id.as_str()) {
                         continue;
                     }
@@ -194,7 +197,7 @@ impl ExecSurface {
                         },
                     }
                 }
-                Err(_) => break 1,
+                None => break 1,
             }
         };
 

@@ -3,6 +3,7 @@ pub mod bench;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod event_payload;
 pub mod intel;
 pub mod mcp;
 pub mod persistence;

@@ -989,13 +989,13 @@ mod fake_model_tests {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             assert!(!remaining.is_zero(), "timed out waiting for turn end");
             match tokio::time::timeout(remaining, sub.receiver.recv()).await {
-                Ok(Ok(evt)) => match evt.kind {
+                Ok(Some(evt)) => match evt.kind {
                     RuntimeEventKind::TurnCompleted | RuntimeEventKind::TurnFailed => {
                         return (thread_id, evt);
                     }
                     _ => continue,
                 },
-                Ok(Err(_)) => panic!("event_bus closed before turn ended"),
+                Ok(None) => panic!("event_bus closed before turn ended"),
                 Err(_) => panic!("timed out waiting for turn end"),
             }
         }
@@ -1189,7 +1189,7 @@ mod fake_model_tests {
         let approval_seen = Arc::new(tokio::sync::Notify::new());
         let approval_seen_clone = approval_seen.clone();
         let handler = tokio::spawn(async move {
-            while let Ok(evt) = sub.receiver.recv().await {
+            while let Some(evt) = sub.receiver.recv().await {
                 if evt.kind == RuntimeEventKind::ApprovalRequested {
                     let approval_id = evt
                         .payload
@@ -1332,5 +1332,230 @@ mod fake_model_tests {
             last_call_pos < first_result_pos,
             "all ToolCall items must precede all ToolResult items; positions={positions:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn event_ordering_for_tool_round_is_stable() {
+        // Verifies the runtime emits events in a predictable sequence that
+        // consumers (TUI, server, benchmarks) rely on:
+        //   TurnStarted → ItemStarted(ToolCall) → ItemCompleted(ToolCall)
+        //              → ItemStarted(ToolResult) → ItemCompleted(ToolResult)
+        //              → ItemStarted(AgentMessage) → ItemUpdated* → ItemCompleted
+        //              → TurnCompleted
+        // Also exercises the typed payload API end-to-end.
+        use crate::system::domain::ItemKind as IK;
+        use crate::system::event_payload::RuntimeEventPayload;
+
+        let (runtime, home) = build_runtime(vec![
+            ScriptedResponse::ToolCalls(vec![(
+                "list_dir".into(),
+                serde_json::json!({ "path": "." }),
+            )]),
+            ScriptedResponse::Text("done".into()),
+        ])
+        .await;
+        std::fs::write(home.join("file.txt"), "x").unwrap();
+
+        let mut sub = runtime.event_bus().subscribe(
+            "ordering-test".into(),
+            crate::system::agent::EventFilter { thread_id: None },
+        );
+
+        let started = runtime
+            .start_thread(ThreadStartParams {
+                cwd: Some(runtime.inner.effective_config.working_directory.clone()),
+                model_settings: None,
+                approval_policy: None,
+                permission_profile: None,
+                ephemeral: true,
+            })
+            .await
+            .unwrap();
+        runtime
+            .start_turn(
+                TurnStartParams {
+                    thread_id: started.metadata.thread_id.clone(),
+                    input: vec![UserInput::from_text("go")],
+                    cwd: None,
+                    model_settings: None,
+                    approval_policy: None,
+                    permission_profile: None,
+                    output_schema: None,
+                    agent_depth: 0,
+                },
+                SurfaceKind::Exec,
+            )
+            .await
+            .unwrap();
+
+        // Collect events filtered to this turn (drops ThreadStarted from
+        // the earlier start_thread call so we assert only the turn's stream).
+        let mut kinds: Vec<RuntimeEventKind> = Vec::new();
+        // For each item-lifecycle event, record (kind_of_event, item_kind).
+        let mut item_events: Vec<(RuntimeEventKind, IK)> = Vec::new();
+        let turn_completed_payload: crate::system::event_payload::TurnCompletedPayload;
+        let mut got_turn_started = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!remaining.is_zero(), "timed out collecting events");
+            let event = match tokio::time::timeout(remaining, sub.receiver.recv()).await {
+                Ok(Some(e)) => e,
+                Ok(None) => panic!("event_bus closed"),
+                Err(_) => panic!("timeout"),
+            };
+            // Skip ThreadStarted and anything else not tied to this thread.
+            if event.thread_id.as_deref() != Some(started.metadata.thread_id.as_str()) {
+                continue;
+            }
+            if !got_turn_started {
+                if event.kind == RuntimeEventKind::TurnStarted {
+                    got_turn_started = true;
+                } else {
+                    continue;
+                }
+            }
+            kinds.push(event.kind);
+            let parsed = event
+                .parsed_payload()
+                .unwrap_or_else(|e| panic!("typed decode failed for {:?}: {e}", event.kind));
+            match parsed {
+                RuntimeEventPayload::ItemStarted(env) | RuntimeEventPayload::ItemCompleted(env) => {
+                    item_events.push((event.kind, env.kind));
+                }
+                RuntimeEventPayload::TurnCompleted(p) => {
+                    turn_completed_payload = p;
+                    break;
+                }
+                RuntimeEventPayload::TurnFailed(p) => {
+                    panic!("unexpected TurnFailed: {p:?}");
+                }
+                _ => {}
+            }
+        }
+        // The turn-level frame: starts with TurnStarted, ends with TurnCompleted.
+        assert_eq!(
+            kinds.first(),
+            Some(&RuntimeEventKind::TurnStarted),
+            "first turn event should be TurnStarted, got {kinds:?}"
+        );
+        assert_eq!(
+            kinds.last(),
+            Some(&RuntimeEventKind::TurnCompleted),
+            "last turn event should be TurnCompleted, got {kinds:?}"
+        );
+
+        // Item-completion ordering: ToolCall completes before ToolResult,
+        // and both complete before the final AgentMessage. (Tool items are
+        // persisted in one shot — single ItemCompleted, no Started event.)
+        let completed_in_order: Vec<IK> = item_events
+            .iter()
+            .filter(|(k, _)| *k == RuntimeEventKind::ItemCompleted)
+            .map(|(_, ik)| *ik)
+            .collect();
+        let first_pos = |target: IK| completed_in_order.iter().position(|k| *k == target);
+        let tool_call_pos = first_pos(IK::ToolCall).expect("ToolCall ItemCompleted missing");
+        let tool_result_pos = first_pos(IK::ToolResult).expect("ToolResult ItemCompleted missing");
+        let agent_msg_pos =
+            first_pos(IK::AgentMessage).expect("AgentMessage ItemCompleted missing");
+        assert!(
+            tool_call_pos < tool_result_pos && tool_result_pos < agent_msg_pos,
+            "expected ToolCall < ToolResult < AgentMessage in completion order; got {completed_in_order:?}"
+        );
+
+        // The streaming AgentMessage should also have an ItemStarted *before*
+        // its ItemCompleted (proves the streaming lifecycle is intact).
+        let agent_started_idx = item_events
+            .iter()
+            .position(|(k, ik)| *k == RuntimeEventKind::ItemStarted && *ik == IK::AgentMessage)
+            .expect("AgentMessage ItemStarted missing");
+        let agent_completed_idx = item_events
+            .iter()
+            .position(|(k, ik)| *k == RuntimeEventKind::ItemCompleted && *ik == IK::AgentMessage)
+            .expect("AgentMessage ItemCompleted missing");
+        assert!(
+            agent_started_idx < agent_completed_idx,
+            "AgentMessage ItemStarted must precede ItemCompleted; events={item_events:?}"
+        );
+
+        // Typed TurnCompleted payload should round-trip the stable fields.
+        let payload = turn_completed_payload;
+        assert_eq!(payload.status, TurnStatus::Completed);
+        assert_eq!(payload.thread_id, started.metadata.thread_id);
+    }
+
+    #[tokio::test]
+    async fn late_subscriber_replays_completed_turn_from_ring() {
+        // No subscription before/during the turn. After it completes, a
+        // late subscriber asks for replay from sequence 0 and should see
+        // the entire event stream of the turn reconstructed from the bus's
+        // in-memory ring.
+        let (runtime, home) = build_runtime(vec![
+            ScriptedResponse::ToolCalls(vec![(
+                "list_dir".into(),
+                serde_json::json!({ "path": "." }),
+            )]),
+            ScriptedResponse::Text("done".into()),
+        ])
+        .await;
+        std::fs::write(home.join("present.txt"), "x").unwrap();
+
+        // Drive the turn synchronously (the helper subscribes briefly and
+        // tears down; the bus's replay ring keeps a copy of every event).
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "list it").await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted);
+
+        // Now subscribe with replay from before-the-beginning. Should
+        // immediately receive every retained event for this thread.
+        let mut late = runtime.event_bus().subscribe_with_replay(
+            "late".into(),
+            crate::system::agent::EventFilter {
+                thread_id: Some(thread_id.clone()),
+            },
+            Some(0),
+        );
+
+        let mut kinds = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, late.receiver.recv()).await {
+                Ok(Some(e)) => {
+                    kinds.push(e.kind);
+                    if e.kind == RuntimeEventKind::TurnCompleted {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // The replay must contain (at minimum) TurnStarted at the front and
+        // TurnCompleted at the back. Item lifecycle in between proves we
+        // got the full transcript.
+        assert!(
+            kinds.contains(&RuntimeEventKind::TurnStarted),
+            "replay missing TurnStarted: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&RuntimeEventKind::TurnCompleted),
+            "replay missing TurnCompleted: {kinds:?}"
+        );
+        let item_completed = kinds
+            .iter()
+            .filter(|k| **k == RuntimeEventKind::ItemCompleted)
+            .count();
+        assert!(
+            item_completed >= 3,
+            "expected ≥3 ItemCompleted events (user msg, tool call, tool result, agent msg); got {kinds:?}"
+        );
+
+        // The cursor helper should report the same final sequence the
+        // subscription saw, so a follow-up subscriber can resume cleanly.
+        let last_seq = runtime.event_bus().last_sequence_for_thread(&thread_id);
+        assert!(last_seq.is_some(), "expected a recorded last sequence");
     }
 }

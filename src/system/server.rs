@@ -247,7 +247,7 @@ impl AppServer {
             .subscribe("app_server".into(), EventFilter { thread_id: None });
         let writer = stdout.clone();
         tokio::spawn(async move {
-            while let Ok(event) = subscription.receiver.recv().await {
+            while let Some(event) = subscription.receiver.recv().await {
                 let method = match event.kind {
                     RuntimeEventKind::ThreadStarted => "thread/started",
                     RuntimeEventKind::TurnStarted => "turn/started",

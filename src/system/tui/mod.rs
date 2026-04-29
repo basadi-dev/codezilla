@@ -19,7 +19,7 @@ use std::{
     io,
     time::{Duration, Instant},
 };
-use tokio::sync::broadcast::error::TryRecvError;
+use tokio::sync::mpsc::error::TryRecvError;
 use tracing::warn;
 
 use super::runtime::{ConversationRuntime, EventFilter};
@@ -128,14 +128,7 @@ pub async fn run_interactive_tui(
                     dirty = true;
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Lagged(count)) => {
-                    warn!(dropped = count, "tui lagged runtime events");
-                    app.error_message =
-                        Some(format!("UI dropped {count} runtime events while rendering"));
-                    dirty = true;
-                    break;
-                }
-                Err(TryRecvError::Closed) => {
+                Err(TryRecvError::Disconnected) => {
                     warn!("tui runtime event stream closed");
                     app.error_message = Some("Runtime event stream closed".into());
                     dirty = true;
