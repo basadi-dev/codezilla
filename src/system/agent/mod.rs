@@ -5,7 +5,11 @@ pub mod extensions;
 pub mod model_gateway;
 pub mod permission;
 pub mod sandbox;
+pub mod supervisor;
 pub mod tools;
+
+#[cfg(test)]
+pub mod fake_model;
 
 #[allow(unused_imports)]
 pub use approval::{ApprovalManager, AutoReviewer};

@@ -1142,8 +1142,17 @@ impl ToolProvider for RequestUserInputToolProvider {
 
 // ─── ToolOrchestrator ─────────────────────────────────────────────────────────
 
+/// Cached snapshot of every registered tool definition keyed by name.
+/// Rebuilt lazily after `register_provider` invalidates it.
+struct ToolIndex {
+    /// Tool name → (provider index, full definition).
+    by_name: HashMap<String, (usize, ToolDefinition)>,
+}
+
 pub struct ToolOrchestrator {
     registry: Arc<RwLock<Vec<Arc<dyn ToolProvider>>>>,
+    /// `None` while invalid; `Some(idx)` after the first lookup rebuilds it.
+    index: Arc<RwLock<Option<ToolIndex>>>,
     running_tool_calls: Arc<AsyncRwLock<HashMap<ToolCallId, ToolExecutionContext>>>,
 }
 
@@ -1151,33 +1160,81 @@ impl ToolOrchestrator {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(RwLock::new(Vec::new())),
+            index: Arc::new(RwLock::new(None)),
             running_tool_calls: Arc::new(AsyncRwLock::new(HashMap::new())),
         }
     }
 
     pub fn register_provider(&self, provider: Arc<dyn ToolProvider>) {
         self.registry.write().unwrap().push(provider);
+        // Any cached lookup is now stale.
+        *self.index.write().unwrap() = None;
+    }
+
+    /// Build the name index from all currently registered providers.
+    /// Called under the index write lock to avoid duplicate work.
+    fn rebuild_index(&self, context: &ToolListingContext) -> ToolIndex {
+        let providers = self.registry.read().unwrap().clone();
+        let mut by_name: HashMap<String, (usize, ToolDefinition)> = HashMap::new();
+        for (idx, provider) in providers.iter().enumerate() {
+            for def in provider.list_tools(context) {
+                // Last-registered wins on collision (preserves the existing
+                // linear-scan ordering where the first match returned, but
+                // since we walk in registration order the first registration
+                // also takes precedence — match that behaviour).
+                by_name.entry(def.name.clone()).or_insert((idx, def));
+            }
+        }
+        ToolIndex { by_name }
+    }
+
+    /// Resolve a tool definition from the cache, rebuilding lazily.
+    fn lookup_definition(
+        &self,
+        tool_name: &str,
+        context: &ToolListingContext,
+    ) -> Option<(usize, ToolDefinition)> {
+        // Fast path: cache hit under read lock.
+        if let Some(index) = self.index.read().unwrap().as_ref() {
+            if let Some(entry) = index.by_name.get(tool_name) {
+                return Some(entry.clone());
+            }
+            // Cache present but tool not found — could be because the tool
+            // wasn't registered, or because a dynamic provider (e.g. MCP)
+            // returns an empty static list. Fall through to the slow path.
+        }
+        // Slow path: rebuild under write lock.
+        let mut guard = self.index.write().unwrap();
+        if guard.is_none() {
+            *guard = Some(self.rebuild_index(context));
+        }
+        guard
+            .as_ref()
+            .and_then(|idx| idx.by_name.get(tool_name).cloned())
     }
 
     pub fn list_available_tools(&self, context: &ToolListingContext) -> Vec<ToolDefinition> {
-        self.registry
+        // The cached index already holds the full set; rebuild it if missing
+        // so callers see consistent definitions.
+        {
+            let mut guard = self.index.write().unwrap();
+            if guard.is_none() {
+                *guard = Some(self.rebuild_index(context));
+            }
+        }
+        self.index
             .read()
             .unwrap()
-            .iter()
-            .flat_map(|p| p.list_tools(context))
-            .collect()
+            .as_ref()
+            .map(|idx| idx.by_name.values().map(|(_, def)| def.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Returns `true` if the named tool is registered and has `supports_parallel_calls = true`.
     /// Unknown tools default to `false` (safest assumption).
     pub fn is_parallel_safe(&self, tool_name: &str, context: &ToolListingContext) -> bool {
-        self.registry
-            .read()
-            .unwrap()
-            .iter()
-            .flat_map(|p| p.list_tools(context))
-            .find(|def| def.name == tool_name)
-            .map(|def| def.supports_parallel_calls)
+        self.lookup_definition(tool_name, context)
+            .map(|(_, def)| def.supports_parallel_calls)
             .unwrap_or(false)
     }
 
@@ -1190,14 +1247,33 @@ impl ToolOrchestrator {
             .write()
             .await
             .insert(call.tool_call_id.clone(), context.clone());
+
+        let listing_ctx = ToolListingContext {
+            thread_id: context.thread_id.clone(),
+            cwd: context.cwd.clone(),
+            features: HashMap::new(),
+        };
+
+        // Fast path — cached name → provider lookup.
+        if let Some((provider_idx, _)) = self.lookup_definition(&call.tool_name, &listing_ctx) {
+            let provider = self.registry.read().unwrap().get(provider_idx).cloned();
+            if let Some(provider) = provider {
+                let result = provider.execute(call, &context).await;
+                self.running_tool_calls
+                    .write()
+                    .await
+                    .remove(&call.tool_call_id);
+                return result;
+            }
+        }
+
+        // Slow path — some providers (MCP) return an empty static tool list
+        // and only resolve their tools at execute time. Fall back to a linear
+        // scan that lets each provider attempt the call.
         let providers = self.registry.read().unwrap().clone();
         for provider in providers {
             if provider
-                .list_tools(&ToolListingContext {
-                    thread_id: context.thread_id.clone(),
-                    cwd: context.cwd.clone(),
-                    features: HashMap::new(),
-                })
+                .list_tools(&listing_ctx)
                 .iter()
                 .any(|t| t.name == call.tool_name)
             {
@@ -1209,6 +1285,7 @@ impl ToolOrchestrator {
                 return result;
             }
         }
+
         self.running_tool_calls
             .write()
             .await
@@ -1347,4 +1424,165 @@ fn make_unified_diff(path: &str, old: Option<&str>, new: &str) -> (String, usize
     }
 
     (out, lines_added, lines_removed)
+}
+
+// ─── ToolOrchestrator tests ───────────────────────────────────────────────────
+
+#[cfg(test)]
+mod orchestrator_tests {
+    use super::*;
+    use crate::system::domain::{
+        ApprovalPolicy, PermissionProfile, ToolCall, ToolExecutionContext, ToolListingContext,
+        ToolProviderKind, ToolResult,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Tool provider that records how many times `list_tools` is called and
+    /// reports a fixed set of tools.
+    struct CountingProvider {
+        tools: Vec<ToolDefinition>,
+        list_calls: AtomicUsize,
+        execute_calls: AtomicUsize,
+    }
+
+    impl CountingProvider {
+        fn new(names: &[&str], parallel: bool) -> Arc<Self> {
+            let tools = names
+                .iter()
+                .map(|n| ToolDefinition {
+                    name: (*n).to_string(),
+                    provider_kind: ToolProviderKind::Builtin,
+                    description: String::new(),
+                    input_schema: json!({}),
+                    requires_approval: false,
+                    supports_parallel_calls: parallel,
+                })
+                .collect();
+            Arc::new(Self {
+                tools,
+                list_calls: AtomicUsize::new(0),
+                execute_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ToolProvider for CountingProvider {
+        fn get_kind(&self) -> ToolProviderKind {
+            ToolProviderKind::Builtin
+        }
+
+        fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            self.tools.clone()
+        }
+
+        async fn execute(
+            &self,
+            call: &ToolCall,
+            _ctx: &ToolExecutionContext,
+        ) -> Result<ToolResult> {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: true,
+                output: json!({"echo": call.tool_name.clone()}),
+                error_message: None,
+            })
+        }
+    }
+
+    fn list_ctx() -> ToolListingContext {
+        ToolListingContext {
+            thread_id: "t".into(),
+            cwd: ".".into(),
+            features: HashMap::new(),
+        }
+    }
+
+    fn exec_ctx() -> ToolExecutionContext {
+        ToolExecutionContext {
+            thread_id: "t".into(),
+            turn_id: "u".into(),
+            cwd: ".".into(),
+            permission_profile: PermissionProfile::default(),
+            approval_policy: ApprovalPolicy::default(),
+            agent_depth: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_lookup_avoids_repeated_list_tools_scans() {
+        let orch = ToolOrchestrator::new();
+        let p = CountingProvider::new(&["alpha", "beta"], true);
+        orch.register_provider(p.clone());
+
+        // First call rebuilds the cache (1 list_tools call).
+        assert!(orch.is_parallel_safe("alpha", &list_ctx()));
+        assert!(orch.is_parallel_safe("beta", &list_ctx()));
+        // Subsequent lookups must hit the cache — no further list_tools.
+        for _ in 0..10 {
+            assert!(orch.is_parallel_safe("alpha", &list_ctx()));
+        }
+        assert_eq!(
+            p.list_calls.load(Ordering::SeqCst),
+            1,
+            "cache should keep list_tools calls at 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_provider_invalidates_cache() {
+        let orch = ToolOrchestrator::new();
+        let p1 = CountingProvider::new(&["alpha"], false);
+        orch.register_provider(p1.clone());
+        // Prime the cache.
+        assert!(!orch.is_parallel_safe("alpha", &list_ctx()));
+        assert_eq!(p1.list_calls.load(Ordering::SeqCst), 1);
+
+        // Registering a new provider must invalidate the cache so the
+        // next lookup sees the new tools.
+        let p2 = CountingProvider::new(&["gamma"], true);
+        orch.register_provider(p2.clone());
+        assert!(orch.is_parallel_safe("gamma", &list_ctx()));
+        // Both providers had to be re-listed during the rebuild.
+        assert_eq!(p1.list_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(p2.list_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_dispatches_to_correct_provider_via_cache() {
+        let orch = ToolOrchestrator::new();
+        let p1 = CountingProvider::new(&["read_file"], true);
+        let p2 = CountingProvider::new(&["write_file"], false);
+        orch.register_provider(p1.clone());
+        orch.register_provider(p2.clone());
+
+        let call = ToolCall {
+            tool_call_id: "c1".into(),
+            provider_kind: ToolProviderKind::Builtin,
+            tool_name: "write_file".into(),
+            arguments: json!({}),
+        };
+        let result = orch.execute(&call, exec_ctx()).await.unwrap();
+        assert!(result.ok);
+        assert_eq!(p1.execute_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(p2.execute_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_errors_after_slow_path_scan() {
+        let orch = ToolOrchestrator::new();
+        let p = CountingProvider::new(&["alpha"], true);
+        orch.register_provider(p.clone());
+
+        let call = ToolCall {
+            tool_call_id: "c1".into(),
+            provider_kind: ToolProviderKind::Builtin,
+            tool_name: "nonexistent".into(),
+            arguments: json!({}),
+        };
+        let err = orch.execute(&call, exec_ctx()).await.unwrap_err();
+        assert!(err.to_string().contains("tool_not_found"));
+    }
 }

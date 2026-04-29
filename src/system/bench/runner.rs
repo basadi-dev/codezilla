@@ -54,6 +54,15 @@ pub struct TaskResult {
     pub validation_output: String,
     #[serde(default)]
     pub error: Option<String>,
+    /// Configured timeout for this task attempt.
+    #[serde(default)]
+    pub timeout_secs: u64,
+    /// True when the agent subprocess was killed by the benchmark timeout.
+    #[serde(default)]
+    pub timed_out: bool,
+    /// Human-readable failure context for timeouts and subprocess failures.
+    #[serde(default)]
+    pub diagnostic: Option<String>,
     /// How many times this task was attempted (only >1 when --runs N is used).
     #[serde(default = "default_one")]
     pub run_count: usize,
@@ -90,6 +99,8 @@ pub struct BenchSummary {
     pub passed: usize,
     pub failed: usize,
     pub errors: usize,
+    #[serde(default)]
+    pub timed_out: usize,
     pub pass_rate: f64,
     pub total_elapsed_ms: u64,
     pub avg_iterations: f64,
@@ -109,22 +120,22 @@ fn default_one() -> usize {
 /// Matched by substring of the model ID (lower-cased).
 const PRICING: &[(&str, f64, f64, f64)] = &[
     // Claude 4 family
-    ("claude-opus-4",     15.0,  75.0, 0.10),
-    ("claude-sonnet-4",    3.0,  15.0, 0.10),
+    ("claude-opus-4", 15.0, 75.0, 0.10),
+    ("claude-sonnet-4", 3.0, 15.0, 0.10),
     // Claude 3.7 / 3.5 family
-    ("claude-opus-3",     15.0,  75.0, 0.10),
-    ("claude-sonnet-3-7",  3.0,  15.0, 0.10),
-    ("claude-sonnet-3-5",  3.0,  15.0, 0.10),
-    ("claude-haiku-3",     0.25,  1.25, 0.10),
+    ("claude-opus-3", 15.0, 75.0, 0.10),
+    ("claude-sonnet-3-7", 3.0, 15.0, 0.10),
+    ("claude-sonnet-3-5", 3.0, 15.0, 0.10),
+    ("claude-haiku-3", 0.25, 1.25, 0.10),
     // GPT-4o family
-    ("gpt-4o-mini",        0.15,  0.60, 0.10),
-    ("gpt-4o",             2.50, 10.00, 0.10),
-    ("gpt-4-turbo",       10.00, 30.00, 0.10),
+    ("gpt-4o-mini", 0.15, 0.60, 0.10),
+    ("gpt-4o", 2.50, 10.00, 0.10),
+    ("gpt-4-turbo", 10.00, 30.00, 0.10),
     // Gemini family
-    ("gemini-2.5-pro",     1.25, 10.00, 0.25),
-    ("gemini-2.0-flash",   0.10,  0.40, 0.25),
-    ("gemini-1.5-pro",     3.50, 10.50, 0.25),
-    ("gemini-1.5-flash",   0.075, 0.30, 0.25),
+    ("gemini-2.5-pro", 1.25, 10.00, 0.25),
+    ("gemini-2.0-flash", 0.10, 0.40, 0.25),
+    ("gemini-1.5-pro", 3.50, 10.50, 0.25),
+    ("gemini-1.5-flash", 0.075, 0.30, 0.25),
 ];
 
 /// Returns estimated cost in USD for a completed task run.
@@ -217,15 +228,23 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
                 None => break,
             };
             let (task_dir, task) = &tasks[ti];
+            let timeout_secs = effective_timeout_secs(task);
             let label = if runs > 1 {
-                format!("{} (run {}/{})", task.id, ri + 1, runs)
+                format!(
+                    "{} (run {}/{}, timeout {}s)",
+                    task.id,
+                    ri + 1,
+                    runs,
+                    timeout_secs
+                )
             } else {
-                task.id.clone()
+                format!("{} (timeout {}s)", task.id, timeout_secs)
             };
 
             // Build a deterministic per-run log directory.
             // Layout: <output_dir>/logs/<task_id>/run_<N>/
-            let log_dir = config.output_dir
+            let log_dir = config
+                .output_dir
                 .join("logs")
                 .join(&task.id)
                 .join(format!("run_{}", ri + 1));
@@ -238,19 +257,22 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
                 match &result {
                     Ok(r) if r.passed => eprintln!(
                         "  [{}/{}] {} … ✅ PASS ({:.1}s, ${:.4})",
-                        done, total_attempts, label,
+                        done,
+                        total_attempts,
+                        label,
                         r.elapsed_ms as f64 / 1000.0,
                         r.estimated_cost_usd
                     ),
                     Ok(r) => eprintln!(
                         "  [{}/{}] {} … ❌ FAIL ({:.1}s)",
-                        done, total_attempts, label,
+                        done,
+                        total_attempts,
+                        label,
                         r.elapsed_ms as f64 / 1000.0
                     ),
-                    Err(e) => eprintln!(
-                        "  [{}/{}] {} … 💥 ERROR: {e}",
-                        done, total_attempts, label
-                    ),
+                    Err(e) => {
+                        eprintln!("  [{}/{}] {} … 💥 ERROR: {e}", done, total_attempts, label)
+                    }
                 }
             }
 
@@ -268,6 +290,9 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
                 estimated_cost_usd: 0.0,
                 file_changes: Vec::new(),
                 validation_output: String::new(),
+                timeout_secs: effective_timeout_secs(task),
+                timed_out: false,
+                diagnostic: Some(e.to_string()),
                 run_count: 1,
                 pass_count: 0,
                 log_dir: Some(log_dir.to_string_lossy().into_owned()),
@@ -302,14 +327,36 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
             let n_pass = run_results.iter().filter(|r| r.passed).count();
             let total_cost: f64 = run_results.iter().map(|r| r.estimated_cost_usd).sum();
             let total_in: i64 = run_results.iter().map(|r| r.token_usage.input_tokens).sum();
-            let total_out: i64 = run_results.iter().map(|r| r.token_usage.output_tokens).sum();
-            let total_cached: i64 = run_results.iter().map(|r| r.token_usage.cached_tokens).sum();
+            let total_out: i64 = run_results
+                .iter()
+                .map(|r| r.token_usage.output_tokens)
+                .sum();
+            let total_cached: i64 = run_results
+                .iter()
+                .map(|r| r.token_usage.cached_tokens)
+                .sum();
+            let any_timed_out = run_results.iter().any(|r| r.timed_out);
+            let diagnostics: Vec<String> = run_results
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, r)| {
+                    r.diagnostic
+                        .as_ref()
+                        .map(|d| format!("run {}: {d}", idx + 1))
+                })
+                .collect();
 
             // Canonical = last result; overwrite aggregated fields.
             let mut c = run_results.pop().unwrap();
             c.run_count = n_runs;
             c.pass_count = n_pass;
             c.passed = n_pass == n_runs; // passes only if ALL runs pass
+            c.timed_out = any_timed_out;
+            c.diagnostic = if diagnostics.is_empty() {
+                None
+            } else {
+                Some(diagnostics.join("\n\n"))
+            };
             c.estimated_cost_usd = total_cost;
             c.token_usage = TokenUsageSummary {
                 input_tokens: total_in,
@@ -324,12 +371,20 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
 
     let total = results.len();
     let passed = results.iter().filter(|r| r.passed).count();
-    let failed = results.iter().filter(|r| !r.passed && r.error.is_none()).count();
+    let failed = results
+        .iter()
+        .filter(|r| !r.passed && r.error.is_none())
+        .count();
     let errors = results.iter().filter(|r| r.error.is_some()).count();
+    let timed_out = results.iter().filter(|r| r.timed_out).count();
     let total_cost_usd: f64 = results.iter().map(|r| r.estimated_cost_usd).sum();
 
     let avg = |f: fn(&TaskResult) -> f64| -> f64 {
-        if total > 0 { results.iter().map(f).sum::<f64>() / total as f64 } else { 0.0 }
+        if total > 0 {
+            results.iter().map(f).sum::<f64>() / total as f64
+        } else {
+            0.0
+        }
     };
     let avg_iterations = avg(|r| r.agent_iterations as f64);
     let avg_tool_calls = avg(|r| r.tool_call_count as f64);
@@ -339,7 +394,12 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
         passed,
         failed,
         errors,
-        pass_rate: if total > 0 { passed as f64 / total as f64 * 100.0 } else { 0.0 },
+        timed_out,
+        pass_rate: if total > 0 {
+            passed as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        },
         total_elapsed_ms: total_elapsed,
         avg_iterations,
         avg_tool_calls,
@@ -356,7 +416,9 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
     );
     let line2 = format!(
         "Time: {:.1}s  Avg iter: {:.1}  Avg tools: {:.1}",
-        total_elapsed as f64 / 1000.0, avg_iterations, avg_tool_calls
+        total_elapsed as f64 / 1000.0,
+        avg_iterations,
+        avg_tool_calls
     );
     eprintln!("│ {:<56} │", line2);
     let line3 = format!(
@@ -364,6 +426,10 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
         total_cost_usd, total, runs
     );
     eprintln!("│ {:<56} │", line3);
+    if timed_out > 0 {
+        let line4 = format!("Timeouts: {timed_out}");
+        eprintln!("│ {:<56} │", line4);
+    }
     eprintln!("╰──────────────────────────────────────────────────────────╯");
 
     // ── Persist results ──────────────────────────────────────────────────────
@@ -424,8 +490,19 @@ fn run_single_task(
 
     // 4. Run codezilla exec.
     let start = Instant::now();
-    let (exit_code, events, stderr_lines) = run_codezilla(config, task, &workdir)?;
+    let run = run_codezilla(config, task, &workdir)?;
+    let CodezillaRun {
+        exit_code,
+        events,
+        stderr_lines,
+        timed_out,
+        mut diagnostic,
+    } = run;
     let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    if let Some(diagnostic) = diagnostic.as_mut() {
+        append_workspace_state(diagnostic, &workdir);
+    }
 
     // 4a. Persist raw event stream.
     let events_path = log_dir.join("events.jsonl");
@@ -451,6 +528,10 @@ fn run_single_task(
     let transcript = generate_transcript(&events, task);
     let _ = std::fs::write(log_dir.join("transcript.md"), &transcript);
 
+    if let Some(diagnostic) = &diagnostic {
+        let _ = std::fs::write(log_dir.join("diagnostic.txt"), diagnostic);
+    }
+
     // 5. Extract metrics from the event stream.
     let metrics = extract_metrics(&events);
 
@@ -458,13 +539,19 @@ fn run_single_task(
 
     if exit_code != 0 {
         let cost = estimate_cost_usd(&metrics.token_usage, config.model.as_deref());
-        let error_msg = extract_terminal_error(&events)
-            .unwrap_or_else(|| format!("codezilla exec failed with exit code {exit_code}"));
+        let error_msg = diagnostic.clone().unwrap_or_else(|| {
+            extract_terminal_error(&events)
+                .unwrap_or_else(|| format!("codezilla exec failed with exit code {exit_code}"))
+        });
 
         // Persist validation placeholder so log dir is always consistent.
         let _ = std::fs::write(
             log_dir.join("validation.txt"),
             format!("Skipped — agent did not complete successfully.\nError: {error_msg}\n"),
+        );
+        let _ = std::fs::write(
+            log_dir.join("workspace_path.txt"),
+            format!("{}", workdir.display()),
         );
 
         return Ok(TaskResult {
@@ -481,6 +568,9 @@ fn run_single_task(
             estimated_cost_usd: cost,
             file_changes: metrics.file_changes,
             validation_output: String::new(),
+            timeout_secs: effective_timeout_secs(task),
+            timed_out,
+            diagnostic,
             run_count: 1,
             pass_count: 0,
             log_dir: log_dir_str,
@@ -527,6 +617,9 @@ fn run_single_task(
         estimated_cost_usd: cost,
         file_changes: metrics.file_changes,
         validation_output,
+        timeout_secs: effective_timeout_secs(task),
+        timed_out,
+        diagnostic,
         run_count: 1,
         pass_count: if passed { 1 } else { 0 },
         log_dir: log_dir_str,
@@ -598,11 +691,15 @@ fn run_shell(cwd: &Path, command: &str) -> Result<String> {
     Ok(format!("{stdout}{stderr}"))
 }
 
-fn run_codezilla(
-    config: &BenchConfig,
-    task: &BenchTask,
-    workdir: &Path,
-) -> Result<(i32, Vec<Value>, Vec<String>)> {
+struct CodezillaRun {
+    exit_code: i32,
+    events: Vec<Value>,
+    stderr_lines: Vec<String>,
+    timed_out: bool,
+    diagnostic: Option<String>,
+}
+
+fn run_codezilla(config: &BenchConfig, task: &BenchTask, workdir: &Path) -> Result<CodezillaRun> {
     let mut cmd = Command::new(&config.codezilla_bin);
     cmd.arg("--cd")
         .arg(workdir.to_string_lossy().as_ref())
@@ -691,12 +788,9 @@ fn run_codezilla(
     });
 
     // Poll for completion: child exit, done signal, or timeout.
-    let timeout = Duration::from_secs(if task.timeout_secs == 0 {
-        300
-    } else {
-        task.timeout_secs
-    });
+    let timeout = Duration::from_secs(effective_timeout_secs(task));
     let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
     let exit_code = loop {
         // Terminal events mean the child can exit normally.
         if done_flag.load(std::sync::atomic::Ordering::Acquire) {
@@ -714,7 +808,8 @@ fn run_codezilla(
                     );
                     let _ = child.kill();
                     let _ = child.wait();
-                    anyhow::bail!("task timed out after {}s", timeout.as_secs());
+                    timed_out = true;
+                    break -1;
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
@@ -732,7 +827,406 @@ fn run_codezilla(
         .into_inner()
         .unwrap_or_default();
 
-    Ok((exit_code, events, stderr_lines))
+    let diagnostic = if timed_out {
+        Some(build_timeout_diagnostic(
+            task,
+            timeout.as_secs(),
+            &events,
+            &stderr_lines,
+        ))
+    } else if exit_code != 0 {
+        Some(build_failure_diagnostic(exit_code, &events, &stderr_lines))
+    } else {
+        None
+    };
+
+    Ok(CodezillaRun {
+        exit_code,
+        events,
+        stderr_lines,
+        timed_out,
+        diagnostic,
+    })
+}
+
+fn effective_timeout_secs(task: &BenchTask) -> u64 {
+    if task.timeout_secs == 0 {
+        300
+    } else {
+        task.timeout_secs
+    }
+}
+
+fn build_timeout_diagnostic(
+    task: &BenchTask,
+    timeout_secs: u64,
+    events: &[Value],
+    stderr_lines: &[String],
+) -> String {
+    let mut out = format!("Task `{}` timed out after {}s.\n\n", task.id, timeout_secs);
+    out.push_str(&format!("Captured runtime events: {}\n", events.len()));
+    append_last_event_summary(&mut out, events);
+    append_pending_approval_summary(&mut out, events);
+    append_pending_tool_summary(&mut out, events);
+    append_recent_warning_summary(&mut out, events);
+    append_recent_agent_summary(&mut out, events);
+    append_recent_stderr_summary(&mut out, stderr_lines);
+    out
+}
+
+fn build_failure_diagnostic(exit_code: i32, events: &[Value], stderr_lines: &[String]) -> String {
+    let mut out = format!("codezilla exec failed with exit code {exit_code}.\n\n");
+    if let Some(reason) = extract_terminal_error(events) {
+        out.push_str(&format!("Terminal error: {reason}\n"));
+    }
+    out.push_str(&format!("Captured runtime events: {}\n", events.len()));
+    append_last_event_summary(&mut out, events);
+    append_recent_warning_summary(&mut out, events);
+    append_recent_stderr_summary(&mut out, stderr_lines);
+    out
+}
+
+fn append_workspace_state(out: &mut String, workdir: &Path) {
+    out.push_str(&format!("\nWorkspace: {}\n", workdir.display()));
+
+    match run_shell(workdir, "git status --short") {
+        Ok(status) if status.trim().is_empty() => {
+            out.push_str("Workspace changes: <none>\n");
+        }
+        Ok(status) => {
+            out.push_str("Workspace changes:\n");
+            for line in status.lines().take(40) {
+                out.push_str("- ");
+                out.push_str(&truncate_chars(line, 300));
+                out.push('\n');
+            }
+        }
+        Err(e) => {
+            out.push_str(&format!("Workspace status unavailable: {e}\n"));
+        }
+    }
+
+    match run_shell(workdir, "git diff --stat HEAD") {
+        Ok(stat) if stat.trim().is_empty() => {}
+        Ok(stat) => {
+            out.push_str("Workspace diff stat:\n");
+            for line in stat.lines().take(40) {
+                out.push_str("- ");
+                out.push_str(&truncate_chars(line, 300));
+                out.push('\n');
+            }
+        }
+        Err(e) => {
+            out.push_str(&format!("Workspace diff stat unavailable: {e}\n"));
+        }
+    }
+}
+
+fn append_last_event_summary(out: &mut String, events: &[Value]) {
+    let Some(event) = events.last() else {
+        out.push_str("Last event: <none>\n");
+        return;
+    };
+
+    let kind = event.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+    let sequence = event.get("sequence").and_then(|v| v.as_i64()).unwrap_or(0);
+    out.push_str(&format!("Last event: {kind} (sequence {sequence})\n"));
+
+    if let Some(payload) = event.get("payload") {
+        let preview = compact_json_preview(payload, 500);
+        if !preview.is_empty() {
+            out.push_str(&format!("Last event payload: {preview}\n"));
+        }
+    }
+}
+
+fn append_pending_approval_summary(out: &mut String, events: &[Value]) {
+    let last_request = events
+        .iter()
+        .rfind(|e| e.get("kind").and_then(|v| v.as_str()) == Some("APPROVAL_REQUESTED"));
+    let last_resolve_seq = events
+        .iter()
+        .filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("APPROVAL_RESOLVED"))
+        .filter_map(event_sequence)
+        .max()
+        .unwrap_or(-1);
+
+    let Some(request) = last_request else {
+        return;
+    };
+
+    let request_seq = event_sequence(request).unwrap_or(-1);
+    if request_seq <= last_resolve_seq {
+        return;
+    }
+
+    let payload = request.get("payload").unwrap_or(&Value::Null);
+    let title = payload
+        .get("request")
+        .and_then(|r| r.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("approval requested");
+    let action = payload
+        .get("request")
+        .and_then(|r| r.get("action"))
+        .map(|v| compact_json_preview(v, 500))
+        .unwrap_or_default();
+
+    out.push_str(&format!("Pending approval: {title}\n"));
+    if !action.is_empty() {
+        out.push_str(&format!("Approval action: {action}\n"));
+    }
+}
+
+fn append_pending_tool_summary(out: &mut String, events: &[Value]) {
+    let mut pending: std::collections::BTreeMap<String, (i64, String, String)> =
+        std::collections::BTreeMap::new();
+
+    for event in events {
+        if event.get("kind").and_then(|v| v.as_str()) != Some("ITEM_COMPLETED") {
+            continue;
+        }
+        let payload = event.get("payload").unwrap_or(&Value::Null);
+        let item_kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let item_payload = payload.get("payload").unwrap_or(&Value::Null);
+        match item_kind {
+            "TOOL_CALL" => {
+                let id = item_payload
+                    .get("toolCallId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let name = item_payload
+                    .get("toolName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let args = item_payload
+                    .get("arguments")
+                    .map(|v| compact_json_preview(v, 500))
+                    .unwrap_or_default();
+                pending.insert(id, (event_sequence(event).unwrap_or(0), name, args));
+            }
+            "TOOL_RESULT" => {
+                if let Some(id) = item_payload.get("toolCallId").and_then(|v| v.as_str()) {
+                    pending.remove(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Some((id, (_, name, args))) = pending.iter().max_by_key(|(_, (seq, _, _))| *seq) else {
+        return;
+    };
+
+    out.push_str(&format!("Pending tool call: {name} ({id})\n"));
+    if !args.is_empty() {
+        out.push_str(&format!("Pending tool args: {args}\n"));
+    }
+}
+
+fn append_recent_warning_summary(out: &mut String, events: &[Value]) {
+    let Some(event) = events
+        .iter()
+        .rev()
+        .find(|e| e.get("kind").and_then(|v| v.as_str()) == Some("WARNING"))
+    else {
+        return;
+    };
+
+    let msg = event
+        .get("payload")
+        .and_then(|p| p.get("message"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !msg.is_empty() {
+        out.push_str(&format!("Last warning: {}\n", truncate_chars(msg, 500)));
+    }
+}
+
+fn append_recent_agent_summary(out: &mut String, events: &[Value]) {
+    let Some(item_payload) = events.iter().rev().find_map(|event| {
+        if event.get("kind").and_then(|v| v.as_str()) != Some("ITEM_COMPLETED") {
+            return None;
+        }
+        let payload = event.get("payload")?;
+        if payload.get("kind").and_then(|v| v.as_str()) != Some("AGENT_MESSAGE") {
+            return None;
+        }
+        payload.get("payload")
+    }) else {
+        return;
+    };
+
+    let text = item_payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !text.trim().is_empty() {
+        out.push_str(&format!(
+            "Last agent message: {}\n",
+            truncate_chars(text.trim(), 700)
+        ));
+    }
+}
+
+fn append_recent_stderr_summary(out: &mut String, stderr_lines: &[String]) {
+    if stderr_lines.is_empty() {
+        return;
+    }
+
+    out.push_str("Recent stderr:\n");
+    let start = stderr_lines.len().saturating_sub(8);
+    for line in &stderr_lines[start..] {
+        out.push_str("- ");
+        out.push_str(&truncate_chars(line, 500));
+        out.push('\n');
+    }
+}
+
+fn event_sequence(event: &Value) -> Option<i64> {
+    event.get("sequence").and_then(|v| v.as_i64())
+}
+
+fn compact_json_preview(value: &Value, max_chars: usize) -> String {
+    let text = if let Some(s) = value.as_str() {
+        s.to_string()
+    } else {
+        serde_json::to_string(value).unwrap_or_default()
+    };
+    truncate_chars(&text, max_chars)
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= max_chars {
+            out.push_str("...");
+            return out;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::bench::task::{TaskSetup, TaskValidation};
+
+    fn test_task(timeout_secs: u64) -> BenchTask {
+        BenchTask {
+            id: "diagnostic-test".into(),
+            title: "Diagnostic Test".into(),
+            difficulty: "easy".into(),
+            category: "test".into(),
+            prompt: "do the thing".into(),
+            setup: TaskSetup {
+                fixtures: None,
+                commands: Vec::new(),
+                assert_fails: None,
+            },
+            validate: TaskValidation {
+                command: None,
+                expected_files: Vec::new(),
+                no_extra_changes: false,
+            },
+            timeout_secs,
+            max_cost_usd: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn timeout_diagnostic_reports_pending_approval_and_tool() {
+        let task = test_task(90);
+        let events = vec![
+            serde_json::json!({
+                "kind": "APPROVAL_REQUESTED",
+                "sequence": 1,
+                "payload": {
+                    "request": {
+                        "title": "Approve write_file",
+                        "action": { "actionType": "write_file", "paths": ["hello.txt"] }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "kind": "ITEM_COMPLETED",
+                "sequence": 2,
+                "payload": {
+                    "kind": "TOOL_CALL",
+                    "payload": {
+                        "toolCallId": "call_1",
+                        "toolName": "write_file",
+                        "arguments": { "path": "hello.txt", "content": "hello" }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "kind": "WARNING",
+                "sequence": 3,
+                "payload": { "message": "still waiting" }
+            }),
+        ];
+
+        let diagnostic = build_timeout_diagnostic(&task, 90, &events, &[]);
+
+        assert!(diagnostic.contains("timed out after 90s"));
+        assert!(diagnostic.contains("Pending approval: Approve write_file"));
+        assert!(diagnostic.contains("Pending tool call: write_file (call_1)"));
+        assert!(diagnostic.contains("Last warning: still waiting"));
+    }
+
+    #[test]
+    fn timeout_diagnostic_omits_resolved_approval_and_finished_tool() {
+        let task = test_task(90);
+        let events = vec![
+            serde_json::json!({
+                "kind": "APPROVAL_REQUESTED",
+                "sequence": 1,
+                "payload": { "request": { "title": "Approve bash_exec" } }
+            }),
+            serde_json::json!({
+                "kind": "APPROVAL_RESOLVED",
+                "sequence": 2,
+                "payload": { "decision": "APPROVED" }
+            }),
+            serde_json::json!({
+                "kind": "ITEM_COMPLETED",
+                "sequence": 3,
+                "payload": {
+                    "kind": "TOOL_CALL",
+                    "payload": {
+                        "toolCallId": "call_2",
+                        "toolName": "bash_exec",
+                        "arguments": { "command": "cargo test" }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "kind": "ITEM_COMPLETED",
+                "sequence": 4,
+                "payload": {
+                    "kind": "TOOL_RESULT",
+                    "payload": {
+                        "toolCallId": "call_2",
+                        "ok": true,
+                        "output": {}
+                    }
+                }
+            }),
+        ];
+
+        let diagnostic = build_timeout_diagnostic(&task, 90, &events, &[]);
+
+        assert!(!diagnostic.contains("Pending approval"));
+        assert!(!diagnostic.contains("Pending tool call"));
+    }
 }
 
 // ── Metrics extraction ───────────────────────────────────────────────────────
@@ -933,8 +1427,8 @@ fn run_validation(validation: &TaskValidation, workdir: &Path) -> Result<(bool, 
     if validation.no_extra_changes {
         // Stage all changes so `git diff --name-only HEAD` picks up new files too.
         let _ = run_shell(workdir, "git add -A");
-        let diff_output = run_shell(workdir, "git diff --name-only --cached HEAD")
-            .unwrap_or_default();
+        let diff_output =
+            run_shell(workdir, "git diff --name-only --cached HEAD").unwrap_or_default();
         let changed_files: HashSet<&str> = diff_output
             .lines()
             .map(|l| l.trim())
@@ -1027,10 +1521,16 @@ pub fn run_compare(base_dir: &str, head_dir: &str) -> Result<()> {
                 let bl = if b.passed { "PASS" } else { "FAIL" };
                 let hl = if h.passed { "PASS" } else { "FAIL" };
                 let m = match (b.passed, h.passed) {
-                    (true, false) => { regressions += 1; "🔴 REGRESSED" }
-                    (false, true) => { improvements += 1; "🟢 IMPROVED " }
-                    (true, true)  => "✅ stable    ",
-                    (false, false)=> "❌ still-fail",
+                    (true, false) => {
+                        regressions += 1;
+                        "🔴 REGRESSED"
+                    }
+                    (false, true) => {
+                        improvements += 1;
+                        "🟢 IMPROVED "
+                    }
+                    (true, true) => "✅ stable    ",
+                    (false, false) => "❌ still-fail",
                 };
                 (bl.to_string(), hl.to_string(), m)
             }
@@ -1046,7 +1546,10 @@ pub fn run_compare(base_dir: &str, head_dir: &str) -> Result<()> {
         };
         eprintln!(
             "│ {:<36} │ {:<6} │ {:<8} │  {}",
-            &id[..id.len().min(36)], base_label, head_label, marker
+            &id[..id.len().min(36)],
+            base_label,
+            head_label,
+            marker
         );
     }
 
@@ -1109,8 +1612,7 @@ fn load_summary(dir: &str) -> Result<BenchSummary> {
     let summary_file = latest.join("summary.json");
     let content = std::fs::read_to_string(&summary_file)
         .with_context(|| format!("reading {}", summary_file.display()))?;
-    serde_json::from_str(&content)
-        .with_context(|| format!("parsing {}", summary_file.display()))
+    serde_json::from_str(&content).with_context(|| format!("parsing {}", summary_file.display()))
 }
 
 // ── Transcript generation ─────────────────────────────────────────────────────
@@ -1145,10 +1647,7 @@ fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
             "ITEM_COMPLETED" => {
                 // The item's own kind is camelCase (serde serialises ItemKind as
                 // SCREAMING_SNAKE_CASE; check both for safety).
-                let item_kind = payload
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let item_kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 // The per-item payload lives one level deeper.
                 let item_payload = payload.get("payload").unwrap_or(&Value::Null);
 
@@ -1206,9 +1705,7 @@ fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
                             .unwrap_or("unknown");
                         let args = item_payload
                             .get("arguments")
-                            .map(|v| {
-                                serde_json::to_string_pretty(v).unwrap_or_default()
-                            })
+                            .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
                             .unwrap_or_default();
                         out.push_str(&format!("### 🔧 Tool Call: `{tool_name}`\n\n"));
                         if !args.is_empty() && args != "null" {
@@ -1229,9 +1726,7 @@ fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
                         } else {
                             serde_json::to_string_pretty(output).unwrap_or_default()
                         };
-                        let error_msg = item_payload
-                            .get("errorMessage")
-                            .and_then(|v| v.as_str());
+                        let error_msg = item_payload.get("errorMessage").and_then(|v| v.as_str());
 
                         out.push_str(&format!("### {icon} Tool Result\n\n"));
                         if let Some(err) = error_msg {
@@ -1265,9 +1760,7 @@ fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
                                     .join(" ")
                             })
                             .unwrap_or_default();
-                        let exit_code = item_payload
-                            .get("exitCode")
-                            .and_then(|v| v.as_i64());
+                        let exit_code = item_payload.get("exitCode").and_then(|v| v.as_i64());
                         let ok = exit_code.map(|c| c == 0).unwrap_or(true);
                         let icon = if ok { "▶️" } else { "💥" };
                         let stdout = item_payload
@@ -1283,13 +1776,21 @@ fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
                         out.push_str(&format!("```\n{cmd}\n```\n\n"));
                         if !stdout.is_empty() {
                             out.push_str("**stdout:**\n```\n");
-                            let s = if stdout.len() > 1_500 { &stdout[..1_500] } else { stdout };
+                            let s = if stdout.len() > 1_500 {
+                                &stdout[..1_500]
+                            } else {
+                                stdout
+                            };
                             out.push_str(s);
                             out.push_str("\n```\n\n");
                         }
                         if !stderr_out.is_empty() {
                             out.push_str("**stderr:**\n```\n");
-                            let s = if stderr_out.len() > 1_500 { &stderr_out[..1_500] } else { stderr_out };
+                            let s = if stderr_out.len() > 1_500 {
+                                &stderr_out[..1_500]
+                            } else {
+                                stderr_out
+                            };
                             out.push_str(s);
                             out.push_str("\n```\n\n");
                         }
@@ -1310,7 +1811,11 @@ fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
 
                         out.push_str(&format!("### 📝 File {change_kind}: `{path}`\n\n"));
                         if !diff.is_empty() {
-                            let d = if diff.len() > 3_000 { &diff[..3_000] } else { diff };
+                            let d = if diff.len() > 3_000 {
+                                &diff[..3_000]
+                            } else {
+                                diff
+                            };
                             out.push_str("```diff\n");
                             out.push_str(d);
                             out.push_str("\n```\n\n");
@@ -1368,10 +1873,7 @@ fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
 
             // ── TURN_FAILED ───────────────────────────────────────────────────
             "TURN_FAILED" => {
-                let kind = payload
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
                 let reason = payload
                     .get("reason")
                     .and_then(|v| v.as_str())

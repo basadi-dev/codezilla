@@ -8,6 +8,124 @@ use std::sync::{Arc, RwLock};
 
 use super::intel::CodebaseIntelConfig;
 
+// ── Agent orchestration config ────────────────────────────────────────────────
+
+/// Controls the agent loop, child-agent fan-out, and model-output guards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentConfig {
+    /// Absolute per-turn loop backstop.
+    #[serde(default = "default_agent_max_iterations")]
+    pub max_iterations: usize,
+    /// Stop after this many consecutive all-failed tool rounds.
+    #[serde(default = "default_agent_max_consecutive_failures")]
+    pub max_consecutive_failures: usize,
+    /// Number of intent-without-tool retries before accepting the response.
+    #[serde(default = "default_agent_max_no_tool_nudges")]
+    pub max_no_tool_nudges: usize,
+    /// Read-only rounds before nudging the model to act.
+    #[serde(default = "default_agent_max_consecutive_read_only_rounds")]
+    pub max_consecutive_read_only_rounds: usize,
+    /// Empty model responses before failing the turn.
+    #[serde(default = "default_agent_max_empty_responses")]
+    pub max_empty_responses: usize,
+    /// Total nudges before failing the turn.
+    #[serde(default = "default_agent_max_total_nudges")]
+    pub max_total_nudges: usize,
+    /// Streaming text guard for a single model response.
+    #[serde(default = "default_agent_max_response_chars")]
+    pub max_response_chars: usize,
+    /// Maximum concurrent child agents spawned by one runtime.
+    #[serde(default = "default_agent_max_child_agents")]
+    pub max_child_agents: usize,
+    /// Maximum nesting depth for `spawn_agent`.
+    #[serde(default = "default_agent_max_spawn_depth")]
+    pub max_spawn_depth: u32,
+    /// Default child-agent timeout.
+    #[serde(default = "default_agent_child_timeout_secs")]
+    pub child_timeout_secs: u64,
+    /// Upper bound accepted from a `spawn_agent` tool call.
+    #[serde(default = "default_agent_max_child_timeout_secs")]
+    pub max_child_timeout_secs: u64,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_agent_max_iterations(),
+            max_consecutive_failures: default_agent_max_consecutive_failures(),
+            max_no_tool_nudges: default_agent_max_no_tool_nudges(),
+            max_consecutive_read_only_rounds: default_agent_max_consecutive_read_only_rounds(),
+            max_empty_responses: default_agent_max_empty_responses(),
+            max_total_nudges: default_agent_max_total_nudges(),
+            max_response_chars: default_agent_max_response_chars(),
+            max_child_agents: default_agent_max_child_agents(),
+            max_spawn_depth: default_agent_max_spawn_depth(),
+            child_timeout_secs: default_agent_child_timeout_secs(),
+            max_child_timeout_secs: default_agent_max_child_timeout_secs(),
+        }
+    }
+}
+
+impl AgentConfig {
+    fn normalized(mut self) -> Self {
+        self.max_iterations = self.max_iterations.max(1);
+        self.max_consecutive_failures = self.max_consecutive_failures.max(1);
+        self.max_consecutive_read_only_rounds = self.max_consecutive_read_only_rounds.max(1);
+        self.max_empty_responses = self.max_empty_responses.max(1);
+        self.max_total_nudges = self.max_total_nudges.max(1);
+        self.max_response_chars = self.max_response_chars.max(1);
+        self.max_child_agents = self.max_child_agents.max(1);
+        self.child_timeout_secs = self.child_timeout_secs.max(1);
+        self.max_child_timeout_secs = self.max_child_timeout_secs.max(self.child_timeout_secs);
+        self
+    }
+}
+
+fn default_agent_max_iterations() -> usize {
+    150
+}
+
+fn default_agent_max_consecutive_failures() -> usize {
+    5
+}
+
+fn default_agent_max_no_tool_nudges() -> usize {
+    2
+}
+
+fn default_agent_max_consecutive_read_only_rounds() -> usize {
+    4
+}
+
+fn default_agent_max_empty_responses() -> usize {
+    2
+}
+
+fn default_agent_max_total_nudges() -> usize {
+    4
+}
+
+fn default_agent_max_response_chars() -> usize {
+    256_000
+}
+
+fn default_agent_max_child_agents() -> usize {
+    4
+}
+
+fn default_agent_max_spawn_depth() -> u32 {
+    3
+}
+
+fn default_agent_child_timeout_secs() -> u64 {
+    120
+}
+
+fn default_agent_max_child_timeout_secs() -> u64 {
+    600
+}
+
 // ── Auto-compaction config ────────────────────────────────────────────────────
 
 /// Controls automatic context compaction triggered after each completed turn.
@@ -186,6 +304,8 @@ pub struct EffectiveConfig {
     pub auto_compaction: AutoCompactionConfig,
     #[serde(default)]
     pub codebase_intel: CodebaseIntelConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +354,8 @@ struct RawSpecConfig {
     pub auto_compaction: AutoCompactionConfig,
     #[serde(default)]
     pub codebase_intel: CodebaseIntelConfig,
+    #[serde(default)]
+    pub agent: Option<AgentConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -250,6 +372,8 @@ struct RawSpecProfile {
     pub features: HashMap<FeatureKey, bool>,
     #[serde(default)]
     pub trusted_projects: Vec<PathString>,
+    #[serde(default)]
+    pub agent: Option<AgentConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -321,7 +445,11 @@ impl ConfigManager {
         // backfill any fields that weren't explicitly set in model_settings.
         // This means context_window (and other per-model settings) only need
         // to be defined once in the models list — not duplicated in model_settings.
-        if let Some(preset) = raw.models.iter().find(|m| m.model_id == model_settings.model_id) {
+        if let Some(preset) = raw
+            .models
+            .iter()
+            .find(|m| m.model_id == model_settings.model_id)
+        {
             if model_settings.context_window.is_none() {
                 model_settings.context_window = preset.context_window;
             }
@@ -356,6 +484,7 @@ impl ConfigManager {
             models: raw.models,
             auto_compaction: raw.auto_compaction,
             codebase_intel: raw.codebase_intel,
+            agent: raw.agent.unwrap_or_default().normalized(),
         };
 
         *self.cached_effective_config.write().unwrap() = Some(effective.clone());
@@ -601,6 +730,19 @@ fn default_spec_config_json() -> Value {
         "notifications_enabled": true,
         "plugins_enabled": true,
         "apps_enabled": true,
+        "agent": {
+            "max_iterations": 150,
+            "max_consecutive_failures": 5,
+            "max_no_tool_nudges": 2,
+            "max_consecutive_read_only_rounds": 4,
+            "max_empty_responses": 2,
+            "max_total_nudges": 4,
+            "max_response_chars": 256000,
+            "max_child_agents": 4,
+            "max_spawn_depth": 3,
+            "child_timeout_secs": 120,
+            "max_child_timeout_secs": 600
+        },
         "features": {},
         "trusted_projects": []
     })

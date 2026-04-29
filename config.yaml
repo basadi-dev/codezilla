@@ -4,7 +4,7 @@
 
 # Model selection
 model_settings:
-  model_id: "glm-5.1:cloud"
+  model_id: "deepseek-v4-pro:cloud"
   provider_id: "ollama"
   # reasoning_effort: "medium"   # low | medium | high  (Anthropic / OpenAI o-series only)
 
@@ -158,6 +158,21 @@ system_prompt: |
 
 log_level: "debug"
 log_file: "logs/codezilla.log"
+
+# Agent orchestration limits. These defaults match the built-in behavior and can
+# be tuned per machine/model if benchmarks show looping or under-exploration.
+agent:
+  max_iterations: 150
+  max_consecutive_failures: 5
+  max_no_tool_nudges: 2
+  max_consecutive_read_only_rounds: 4
+  max_empty_responses: 2
+  max_total_nudges: 4
+  max_response_chars: 256000
+  max_child_agents: 4
+  max_spawn_depth: 3
+  child_timeout_secs: 120
+  max_child_timeout_secs: 600
 
 # Auto-compaction: automatically summarise the conversation context after each
 # turn when usage exceeds the threshold, keeping plenty of room for new work.

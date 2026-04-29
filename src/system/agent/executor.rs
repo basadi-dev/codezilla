@@ -142,21 +142,20 @@ impl TurnExecutor {
         // trim this turn. We only retry once to avoid an infinite loop.
         let mut auto_trim_attempted = false;
 
+        let agent_cfg = self.runtime.inner.effective_config.agent.clone();
+
         // ── Loop-break guards ─────────────────────────────────────────────────
         //
         // Guard 1 — consecutive failures: incremented each iteration where
         // every tool call in that round returned ok:false; reset to 0 as soon
         // as any tool succeeds. Catches stuck loops (e.g. bad args that keep
         // failing) without harming legitimate long tasks.
-        const MAX_CONSECUTIVE_FAILURES: usize = 5;
         let mut consecutive_failures: usize = 0;
 
         // Guard 2 — absolute backstop: a very high ceiling that only fires
         // when the model loops *successfully* without ever finishing. Legitimate
         // agentic tasks rarely need more than ~100 rounds.
-        const MAX_AGENT_ITERATIONS: usize = 150;
         let mut agent_iterations: usize = 0;
-        const MAX_NO_TOOL_NUDGES: usize = 2;
         let mut no_tool_nudges: usize = 0;
         let mut no_tool_nudge_instruction: Option<String> = None;
         let mut completed_tool_rounds: usize = 0;
@@ -173,7 +172,6 @@ impl TurnExecutor {
         // turn start, so the model already knows the file tree and top-level
         // symbols.  Excessive reading beyond 4 rounds is a sign of context bloat
         // or confusion, not legitimate exploration.
-        const MAX_CONSECUTIVE_READ_ONLY_ROUNDS: usize = 4;
         let mut consecutive_read_only_rounds: usize = 0;
 
         // Guard 4 — empty-response circuit breaker: a model response that
@@ -182,18 +180,16 @@ impl TurnExecutor {
         // saturation, reasoning-only output that wasn't surfaced, or a confused
         // model state. We retry once with an explicit prompt then fail the turn
         // so the user sees a clear error rather than a silent non-completion.
-        const MAX_EMPTY_RESPONSES: usize = 2;
         let mut consecutive_empty_responses: usize = 0;
 
         // Guard 5 — cumulative nudge escalation: counts ALL nudges (intent,
         // read-only, empty-response). If the model keeps needing correction
         // it won't self-correct. Fail fast rather than burning tokens.
-        const MAX_TOTAL_NUDGES: usize = 4;
         let mut total_nudges: usize = 0;
 
         loop {
             agent_iterations += 1;
-            if agent_iterations > MAX_AGENT_ITERATIONS {
+            if agent_iterations > agent_cfg.max_iterations {
                 tracing::error!(
                     turn_id = %turn_id,
                     agent_iterations,
@@ -205,8 +201,9 @@ impl TurnExecutor {
                         &turn_id,
                         "loop_limit",
                         &format!(
-                            "Agent exceeded {MAX_AGENT_ITERATIONS} tool-call iterations without \
-                             finishing. The turn has been stopped to prevent an infinite loop."
+                            "Agent exceeded {} tool-call iterations without \
+                             finishing. The turn has been stopped to prevent an infinite loop.",
+                            agent_cfg.max_iterations
                         ),
                     )
                     .await;
@@ -293,7 +290,6 @@ impl TurnExecutor {
             // Some local models enter degenerate token loops (repeating the
             // same pattern forever). This cap prevents unbounded memory growth
             // and runaway streaming.
-            const MAX_RESPONSE_CHARS: usize = 256_000; // ~64k tokens
 
             while let Some(event) = response.recv().await {
                 if turn_ctx.cancel_token.is_cancelled() {
@@ -313,18 +309,19 @@ impl TurnExecutor {
                         assistant_text.push_str(&delta);
 
                         // ── Degeneration guards ───────────────────────────────
-                        if assistant_text.len() > MAX_RESPONSE_CHARS {
+                        if assistant_text.len() > agent_cfg.max_response_chars {
                             tracing::warn!(
                                 turn_id,
                                 chars = assistant_text.len(),
-                                "streaming guard: response exceeded {MAX_RESPONSE_CHARS} chars — truncating"
+                                max_response_chars = agent_cfg.max_response_chars,
+                                "streaming guard: response exceeded configured char limit — truncating"
                             );
                             self.runtime.publish_event(
                                 RuntimeEventKind::Warning,
                                 Some(params.thread_id.clone()), Some(turn_id.clone()),
                                 json!({"message": "Model response was too long and has been truncated."}),
                             ).await?;
-                            assistant_text.truncate(MAX_RESPONSE_CHARS);
+                            assistant_text.truncate(agent_cfg.max_response_chars);
                             break;
                         }
                         if is_degenerate_repetition(&assistant_text) {
@@ -424,7 +421,7 @@ impl TurnExecutor {
             // by reinforcing the model's plan-without-acting pattern.
             let will_nudge_intent = tool_calls.is_empty()
                 && !assistant_text.is_empty()
-                && no_tool_nudges < MAX_NO_TOOL_NUDGES
+                && no_tool_nudges < agent_cfg.max_no_tool_nudges
                 && should_retry_no_tool_completion(
                     &assistant_text,
                     &turn_ctx.items,
@@ -490,10 +487,10 @@ impl TurnExecutor {
                     tracing::warn!(
                         turn_id = %turn_id,
                         consecutive_empty_responses,
-                        MAX_EMPTY_RESPONSES,
+                        max_empty_responses = agent_cfg.max_empty_responses,
                         "executor: model returned empty response (no text, no tool calls)"
                     );
-                    if consecutive_empty_responses >= MAX_EMPTY_RESPONSES {
+                    if consecutive_empty_responses >= agent_cfg.max_empty_responses {
                         return self
                             .fail_turn(
                                 &params.thread_id,
@@ -531,7 +528,7 @@ impl TurnExecutor {
                 consecutive_empty_responses = 0;
 
                 // ── Intent-narration guard ────────────────────────────────────
-                if no_tool_nudges < MAX_NO_TOOL_NUDGES
+                if no_tool_nudges < agent_cfg.max_no_tool_nudges
                     && should_retry_no_tool_completion(
                         &assistant_text,
                         &turn_ctx.items,
@@ -540,7 +537,7 @@ impl TurnExecutor {
                 {
                     no_tool_nudges += 1;
                     total_nudges += 1;
-                    if total_nudges >= MAX_TOTAL_NUDGES {
+                    if total_nudges >= agent_cfg.max_total_nudges {
                         tracing::error!(
                             turn_id = %turn_id,
                             total_nudges,
@@ -561,7 +558,7 @@ impl TurnExecutor {
                     tracing::warn!(
                         turn_id = %turn_id,
                         no_tool_nudges,
-                        MAX_NO_TOOL_NUDGES,
+                        max_no_tool_nudges = agent_cfg.max_no_tool_nudges,
                         "executor: nudging model to emit tool call (described intent but no call)"
                     );
                     let recent_files = recently_read_paths(&turn_ctx.items);
@@ -578,7 +575,8 @@ impl TurnExecutor {
                     no_tool_nudge_instruction = Some(format!(
                         "You described a plan but emitted no tool call — nothing ran. \
                          Do not narrate. Emit exactly one tool call now.{file_hint} \
-                         Retry {no_tool_nudges}/{MAX_NO_TOOL_NUDGES}."
+                         Retry {}/{}.",
+                        no_tool_nudges, agent_cfg.max_no_tool_nudges
                     ));
                     self.runtime
                         .publish_event(
@@ -627,9 +625,9 @@ impl TurnExecutor {
             // reset so a follow-up nudge fires again if the model ignores it.
             if round_is_read_only {
                 consecutive_read_only_rounds += 1;
-                // Effective threshold shrinks with each nudge: 8 → 4 → 2 → 1
+                // Effective threshold shrinks with each nudge.
                 let effective_read_only_limit =
-                    (MAX_CONSECUTIVE_READ_ONLY_ROUNDS >> total_nudges).max(1);
+                    (agent_cfg.max_consecutive_read_only_rounds >> total_nudges).max(1);
                 tracing::debug!(
                     turn_id = %turn_id,
                     consecutive_read_only_rounds,
@@ -639,7 +637,7 @@ impl TurnExecutor {
                 if consecutive_read_only_rounds >= effective_read_only_limit {
                     consecutive_read_only_rounds = 0;
                     total_nudges += 1;
-                    if total_nudges >= MAX_TOTAL_NUDGES {
+                    if total_nudges >= agent_cfg.max_total_nudges {
                         tracing::error!(
                             turn_id = %turn_id,
                             total_nudges,
@@ -707,7 +705,7 @@ impl TurnExecutor {
 
             // ── Consecutive-failure guard ─────────────────────────────────────
             // Reset counter if any tool succeeded this round; bump it if every
-            // tool failed. Trips the break after MAX_CONSECUTIVE_FAILURES all-fail
+            // tool failed. Trips the break after the configured all-fail
             // rounds in a row — catches stuck loops without harming legitimate
             // long tasks where tools normally succeed.
             if had_any_success {
@@ -717,11 +715,11 @@ impl TurnExecutor {
                 tracing::warn!(
                     turn_id = %turn_id,
                     consecutive_failures,
-                    MAX_CONSECUTIVE_FAILURES,
+                    max_consecutive_failures = agent_cfg.max_consecutive_failures,
                     completed_tool_rounds,
-                    "executor: all tools in this round FAILED (consecutive_failures={consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})"
+                    "executor: all tools in this round FAILED"
                 );
-                if consecutive_failures > MAX_CONSECUTIVE_FAILURES {
+                if consecutive_failures > agent_cfg.max_consecutive_failures {
                     tracing::error!(
                         turn_id = %turn_id,
                         consecutive_failures,

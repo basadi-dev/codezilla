@@ -51,8 +51,7 @@ async fn async_main() -> Result<i32> {
         if let Some(("compare", csub)) = sub.subcommand() {
             let base = csub.get_one::<String>("base").unwrap();
             let head = csub.get_one::<String>("head").unwrap();
-            return system::bench::runner::run_compare(base, head)
-                .map(|_| 0);
+            return system::bench::runner::run_compare(base, head).map(|_| 0);
         }
 
         // ── bench run ───────────────────────────────────────────────────────

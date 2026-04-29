@@ -1,10 +1,12 @@
-use anyhow::{anyhow, bail, Result};
+mod discovery;
+mod turn;
+
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, RwLock as AsyncRwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock as AsyncRwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -13,11 +15,12 @@ use crate::llm::LlmClient;
 
 // Agent subsystem — types used only internally in this file
 use super::agent::model_gateway::build_compaction_messages;
+use super::agent::supervisor::{AgentSupervisor, SpawnAgentToolProviderReal};
 use super::agent::{
     ApprovalManager, BashToolProvider, EventBus, ExtensionManager, FileToolProvider,
     ImageToolProvider, ListDirToolProvider, ModelGateway, PermissionManager,
     RequestUserInputToolProvider, SandboxManager, SearchToolProvider, ShellToolProvider,
-    ToolOrchestrator, TurnExecutor, WebToolProvider,
+    ToolOrchestrator, WebToolProvider,
 };
 use super::intel::RepoMap;
 // Agent types re-exported for callers outside runtime.rs
@@ -26,12 +29,10 @@ pub use super::agent::{AutoReviewer, EventFilter, EventSubscription, ModelDescri
 
 use super::config::EffectiveConfig;
 use super::domain::{
-    now_millis, now_seconds, AccountSession, ApprovalDecision, ApprovalPolicy, ApprovalResolution,
-    CompactionStrategy, ConnectorDefinition, ConversationItem, ItemId, ItemKind,
-    McpServerDefinition, MemoryMode, ModelSettings, PathString, PermissionProfile, PersistedThread,
-    PluginDefinition, PrefixRule, RuntimeEvent, RuntimeEventKind, SessionId, SkillDefinition,
-    SurfaceKind, ThreadFilter, ThreadId, ThreadMetadata, ThreadStatus, TokenUsage, ToolCall,
-    ToolCallId, TurnId, TurnMetadata, TurnStatus, UserInput,
+    now_millis, now_seconds, AccountSession, ApprovalPolicy, CompactionStrategy, ConversationItem,
+    ItemId, ItemKind, MemoryMode, ModelSettings, PathString, PermissionProfile, PersistedThread,
+    RuntimeEvent, RuntimeEventKind, SessionId, ThreadFilter, ThreadId, ThreadMetadata,
+    ThreadStatus, ToolCall, ToolCallId, TurnId, TurnMetadata, TurnStatus, UserInput,
 };
 use super::persistence::PersistenceManager;
 
@@ -263,16 +264,27 @@ impl ConversationRuntime {
         effective_config: EffectiveConfig,
         account_session: AccountSession,
     ) -> Result<Self> {
+        let llm_client: Arc<dyn LlmClient> = Arc::new(
+            UnifiedClient::new(effective_config.llm.clone())
+                .map_err(|e| anyhow!("llm_client_init_failed: {e}"))?,
+        );
+        Self::new_with_llm_client(effective_config, account_session, llm_client).await
+    }
+
+    /// Construct a runtime with a caller-supplied `LlmClient`.
+    ///
+    /// Used by the fake-model test harness to drive deterministic agent loops
+    /// without contacting a real LLM provider.
+    pub async fn new_with_llm_client(
+        effective_config: EffectiveConfig,
+        account_session: AccountSession,
+        llm_client: Arc<dyn LlmClient>,
+    ) -> Result<Self> {
         let persistence = Arc::new(PersistenceManager::new(
             std::path::Path::new(&effective_config.app_home).join("state"),
             std::path::Path::new(&effective_config.app_home).join("memories"),
             std::path::Path::new(&effective_config.app_home).join("logs"),
         )?);
-
-        let llm_client: Arc<dyn LlmClient> = Arc::new(
-            UnifiedClient::new(effective_config.llm.clone())
-                .map_err(|e| anyhow!("llm_client_init_failed: {e}"))?,
-        );
 
         let sandbox = Arc::new(SandboxManager::new());
         let permissions = Arc::new(PermissionManager::new(&effective_config.trusted_projects));
@@ -342,11 +354,27 @@ impl ConversationRuntime {
             inner: Arc::new(inner),
         };
 
+        let agent_cfg = &me.inner.effective_config.agent;
+        tracing::debug!(
+            max_iterations = agent_cfg.max_iterations,
+            max_consecutive_failures = agent_cfg.max_consecutive_failures,
+            max_no_tool_nudges = agent_cfg.max_no_tool_nudges,
+            max_consecutive_read_only_rounds = agent_cfg.max_consecutive_read_only_rounds,
+            max_empty_responses = agent_cfg.max_empty_responses,
+            max_total_nudges = agent_cfg.max_total_nudges,
+            max_response_chars = agent_cfg.max_response_chars,
+            max_child_agents = agent_cfg.max_child_agents,
+            max_spawn_depth = agent_cfg.max_spawn_depth,
+            child_timeout_secs = agent_cfg.child_timeout_secs,
+            max_child_timeout_secs = agent_cfg.max_child_timeout_secs,
+            "runtime: agent config loaded"
+        );
+
         // Late-register the real SpawnAgentToolProvider with a runtime clone.
         me.inner
             .tool_orchestrator
             .register_provider(Arc::new(SpawnAgentToolProviderReal::new(
-                AgentSupervisor::new(me.clone(), 4),
+                AgentSupervisor::new(me.clone(), me.inner.effective_config.agent.max_child_agents),
             )));
 
         Ok(me)
@@ -504,148 +532,6 @@ impl ConversationRuntime {
                 limit: params.limit.unwrap_or(20),
                 cursor: params.cursor,
             })?,
-        })
-    }
-
-    pub async fn start_turn(
-        &self,
-        params: TurnStartParams,
-        surface: SurfaceKind,
-    ) -> Result<TurnStartResult> {
-        let thread = self
-            .load_thread(&params.thread_id)
-            .await?
-            .ok_or_else(|| anyhow!("thread_not_found: {}", params.thread_id))?;
-
-        let turn = {
-            let mut thread_guard = thread.lock().await;
-            if thread_guard.metadata.archived {
-                bail!("thread_archived: {}", thread_guard.metadata.thread_id);
-            }
-            if thread_guard.active_turn_id.is_some() {
-                bail!("turn_already_active: {}", thread_guard.metadata.thread_id);
-            }
-            let turn = TurnMetadata {
-                turn_id: format!("turn_{}", Uuid::new_v4().simple()),
-                thread_id: thread_guard.metadata.thread_id.clone(),
-                created_at: now_seconds(),
-                updated_at: now_seconds(),
-                status: TurnStatus::Created,
-                started_by_surface: surface,
-                token_usage: TokenUsage::default(),
-            };
-            self.inner.persistence_manager.create_turn(&turn)?;
-            thread_guard.active_turn_id = Some(turn.turn_id.clone());
-            thread_guard.metadata.status = ThreadStatus::Running;
-            thread_guard.approval_policy_override = params.approval_policy.clone();
-            thread_guard.turns.push(LoadedTurn {
-                metadata: turn.clone(),
-                items: Vec::new(),
-                status: TurnStatus::Created,
-                pending_tool_calls: HashMap::new(),
-                stream_buffer: Vec::new(),
-                cancel_token: CancellationToken::new(),
-            });
-            turn
-        };
-
-        self.publish_event(
-            RuntimeEventKind::TurnStarted,
-            Some(params.thread_id.clone()),
-            Some(turn.turn_id.clone()),
-            serde_json::to_value(&turn)?,
-        )
-        .await?;
-
-        let runtime = self.clone();
-        let params_clone = params.clone();
-        let thread_id_for_task = params.thread_id.clone();
-        let turn_id = turn.turn_id.clone();
-        let turn_for_result = turn.clone();
-        tokio::spawn(async move {
-            let executor = TurnExecutor { runtime };
-            if let Err(error) = executor.run_turn(params_clone, turn_id.clone()).await {
-                let error_text = error.to_string();
-                let err = crate::system::error::from_raw(&error_text);
-                let _ = executor
-                    .fail_turn(
-                        &thread_id_for_task,
-                        &turn_id,
-                        err.kind.label(),
-                        &err.message,
-                    )
-                    .await;
-            }
-        });
-
-        Ok(TurnStartResult {
-            turn: turn_for_result,
-        })
-    }
-
-    pub async fn interrupt_turn(&self, params: TurnInterruptParams) -> Result<TurnInterruptResult> {
-        let thread = self
-            .load_thread(&params.thread_id)
-            .await?
-            .ok_or_else(|| anyhow!("thread_not_found: {}", params.thread_id))?;
-        let cancelled = {
-            let mut thread_guard = thread.lock().await;
-            let Some(active_id) = &thread_guard.active_turn_id else {
-                return Ok(TurnInterruptResult {
-                    turn_id: params.turn_id,
-                    interrupted: false,
-                });
-            };
-            if active_id != &params.turn_id {
-                bail!("turn_not_found: {}", params.turn_id);
-            }
-            let turn = thread_guard
-                .turns
-                .iter_mut()
-                .find(|t| t.metadata.turn_id == params.turn_id)
-                .ok_or_else(|| anyhow!("turn_not_found: {}", params.turn_id))?;
-            turn.cancel_token.cancel();
-            true
-        };
-
-        let approvals = self
-            .inner
-            .approval_manager
-            .cancel_for_turn(&params.thread_id, &params.turn_id)
-            .await;
-        for resolution in approvals {
-            self.publish_event(
-                RuntimeEventKind::ApprovalResolved,
-                Some(params.thread_id.clone()),
-                Some(params.turn_id.clone()),
-                serde_json::to_value(&resolution)?,
-            )
-            .await?;
-        }
-
-        Ok(TurnInterruptResult {
-            turn_id: params.turn_id,
-            interrupted: cancelled,
-        })
-    }
-
-    pub async fn steer_turn(&self, params: TurnSteerParams) -> Result<TurnSteerResult> {
-        let thread = self
-            .load_thread(&params.thread_id)
-            .await?
-            .ok_or_else(|| anyhow!("thread_not_found: {}", params.thread_id))?;
-        let queued = {
-            let mut guard = thread.lock().await;
-            if guard.active_turn_id.as_deref() != Some(params.expected_turn_id.as_str()) {
-                bail!("turn_mismatch: {}", params.expected_turn_id);
-            }
-            let count = params.input.len();
-            guard.pending_steering.extend(params.input);
-            count
-        };
-        Ok(TurnSteerResult {
-            turn_id: params.expected_turn_id,
-            queued_items: queued,
         })
     }
 
@@ -818,48 +704,6 @@ impl ConversationRuntime {
         Ok(())
     }
 
-    pub async fn resolve_approval(
-        &self,
-        approval_id: &str,
-        decision: ApprovalDecision,
-        rule: Option<PrefixRule>,
-    ) -> Result<Option<ApprovalResolution>> {
-        Ok(self
-            .inner
-            .approval_manager
-            .resolve_approval(approval_id, decision, rule)
-            .await)
-    }
-
-    pub fn list_models(&self) -> Vec<ModelDescription> {
-        self.inner
-            .model_gateway
-            .list_models(&self.inner.effective_config.model_settings)
-    }
-
-    pub async fn list_skills(&self) -> Vec<SkillDefinition> {
-        self.inner
-            .extension_manager
-            .list_skills(&self.inner.effective_config.working_directory)
-            .await
-    }
-
-    pub async fn list_plugins(&self) -> Vec<PluginDefinition> {
-        self.inner.extension_manager.list_plugins().await
-    }
-
-    pub async fn list_connectors(&self) -> Vec<ConnectorDefinition> {
-        self.inner.extension_manager.list_connectors().await
-    }
-
-    pub async fn list_mcp_servers(&self) -> Vec<McpServerDefinition> {
-        self.inner.extension_manager.list_mcp_servers().await
-    }
-
-    pub fn reset_memories(&self) -> Result<()> {
-        self.inner.persistence_manager.reset_memories()
-    }
-
     pub async fn archive_thread(&self, thread_id: &str) -> Result<()> {
         self.inner.persistence_manager.archive_thread(thread_id)?;
         if let Some(thread) = self.load_thread(thread_id).await? {
@@ -981,120 +825,6 @@ impl ConversationRuntime {
         Ok(())
     }
 
-    // ── Sub-agent support ──────────────────────────────────────────────────────
-
-    /// Subscribe to the event bus and block until a specific child turn reaches
-    /// a terminal state. The persisted turn status is authoritative; events only
-    /// wake this waiter so fast terminal transitions cannot be missed.
-    pub async fn await_child_turn_completion(
-        &self,
-        thread_id: &str,
-        turn_id: &str,
-        timeout_secs: u64,
-    ) -> Result<TurnCompletionOutcome> {
-        if let Some(outcome) = self.child_turn_terminal_outcome(thread_id, turn_id)? {
-            return Ok(outcome);
-        }
-
-        let subscriber_id = format!("spawn_agent_{}", Uuid::new_v4().simple());
-        let mut sub = self.inner.event_bus.subscribe(
-            subscriber_id.clone(),
-            super::agent::EventFilter {
-                thread_id: Some(thread_id.to_string()),
-            },
-        );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-
-        let outcome = loop {
-            if let Some(outcome) = self.child_turn_terminal_outcome(thread_id, turn_id)? {
-                break outcome;
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                break TurnCompletionOutcome::TimedOut;
-            }
-            match tokio::time::timeout(remaining, sub.receiver.recv()).await {
-                Ok(Ok(event)) => {
-                    if event.thread_id.as_deref() != Some(thread_id) {
-                        continue;
-                    }
-                    match event.kind {
-                        RuntimeEventKind::TurnCompleted => {
-                            if event.turn_id.as_deref() == Some(turn_id) {
-                                continue;
-                            }
-                        }
-                        RuntimeEventKind::TurnFailed => {
-                            if event.turn_id.as_deref() == Some(turn_id) {
-                                continue;
-                            }
-                        }
-                        _ => continue,
-                    }
-                }
-                Ok(Err(_)) => break TurnCompletionOutcome::Failed("event_bus_closed".into()),
-                Err(_) => break TurnCompletionOutcome::TimedOut,
-            }
-        };
-
-        self.inner.event_bus.unsubscribe(&subscriber_id);
-        Ok(outcome)
-    }
-
-    fn child_turn_terminal_outcome(
-        &self,
-        thread_id: &str,
-        turn_id: &str,
-    ) -> Result<Option<TurnCompletionOutcome>> {
-        let persisted = self.inner.persistence_manager.read_thread(thread_id)?;
-        let Some(turn) = persisted.turns.iter().find(|turn| turn.turn_id == turn_id) else {
-            return Ok(Some(TurnCompletionOutcome::Failed(format!(
-                "child turn not found: {turn_id}"
-            ))));
-        };
-
-        let outcome = match turn.status {
-            TurnStatus::Completed => Some(TurnCompletionOutcome::Completed),
-            TurnStatus::Failed => Some(TurnCompletionOutcome::Failed(
-                last_error_message(&persisted.items, turn_id).unwrap_or_else(|| "failed".into()),
-            )),
-            TurnStatus::Interrupted => Some(TurnCompletionOutcome::Interrupted),
-            TurnStatus::Created | TurnStatus::Running | TurnStatus::WaitingForApproval => None,
-        };
-        Ok(outcome)
-    }
-
-    async fn cancel_child_turn(
-        &self,
-        thread_id: &str,
-        turn_id: &str,
-        grace_secs: u64,
-    ) -> Result<TurnCompletionOutcome> {
-        let _ = self
-            .interrupt_turn(TurnInterruptParams {
-                thread_id: thread_id.into(),
-                turn_id: turn_id.into(),
-            })
-            .await?;
-
-        self.await_child_turn_completion(thread_id, turn_id, grace_secs)
-            .await
-            .or_else(|_| Ok(TurnCompletionOutcome::TimedOut))
-    }
-
-    /// Read the last `AgentMessage` item from a thread's persisted history.
-    pub fn read_last_agent_message(&self, thread_id: &str) -> Result<Option<String>> {
-        let persisted = self.inner.persistence_manager.read_thread(thread_id)?;
-        let text = persisted
-            .items
-            .iter()
-            .rev()
-            .find(|i| i.kind == ItemKind::AgentMessage)
-            .and_then(|i| i.payload.get("text").and_then(Value::as_str))
-            .map(|s| s.to_string());
-        Ok(text)
-    }
-
     pub async fn delete_thread(&self, thread_id: &str) -> Result<()> {
         self.inner.loaded_threads.write().await.remove(thread_id);
         self.inner.persistence_manager.delete_thread(thread_id)?;
@@ -1102,267 +832,505 @@ impl ConversationRuntime {
     }
 }
 
-/// Outcome of awaiting a sub-agent turn.
-pub enum TurnCompletionOutcome {
-    Completed,
-    Failed(String),
-    Interrupted,
-    TimedOut,
-}
+// ─── Fake-model end-to-end harness tests ──────────────────────────────────────
 
-fn last_error_message(items: &[ConversationItem], turn_id: &str) -> Option<String> {
-    items
-        .iter()
-        .rev()
-        .find(|item| item.turn_id == turn_id && item.kind == ItemKind::Error)
-        .and_then(|item| {
-            item.payload
-                .get("message")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-}
+#[cfg(test)]
+mod fake_model_tests {
+    use super::*;
+    use crate::system::agent::fake_model::{FakeLlmClient, ScriptedResponse};
+    use crate::system::config::{AgentConfig, AutoCompactionConfig, EffectiveConfig, LlmConfig};
+    use crate::system::domain::{
+        ApprovalDecision, ApprovalPolicy, ApprovalsReviewerKind, ItemKind, ModelSettings,
+        PermissionProfile, SandboxMode, SurfaceKind, UserInput,
+    };
+    use crate::system::intel::CodebaseIntelConfig;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
-#[derive(Clone)]
-pub(crate) struct AgentSupervisor {
-    runtime: ConversationRuntime,
-    child_slots: Arc<Semaphore>,
-}
+    /// Per-test scratch space under the OS temp directory.
+    fn unique_app_home() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "codezilla-test-{}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        dir
+    }
 
-pub(crate) struct ChildAgentRequest {
-    prompt: String,
-    cwd: String,
-    approval_policy: ApprovalPolicy,
-    permission_profile: PermissionProfile,
-    timeout_secs: u64,
-    agent_depth: u32,
-}
-
-pub(crate) struct ChildAgentRun {
-    child_thread_id: ThreadId,
-    child_turn_id: TurnId,
-    result_text: String,
-    outcome: TurnCompletionOutcome,
-}
-
-impl AgentSupervisor {
-    pub fn new(runtime: ConversationRuntime, max_concurrent_children: usize) -> Self {
-        Self {
-            runtime,
-            child_slots: Arc::new(Semaphore::new(max_concurrent_children.max(1))),
+    fn test_config(app_home: &std::path::Path) -> EffectiveConfig {
+        let app_home_str = app_home.to_string_lossy().to_string();
+        EffectiveConfig {
+            app_home: app_home_str.clone(),
+            sqlite_home: app_home.join("state").to_string_lossy().to_string(),
+            model_settings: ModelSettings {
+                model_id: "fake-model".into(),
+                provider_id: "fake".into(),
+                reasoning_effort: None,
+                summary_mode: None,
+                service_tier: None,
+                web_search_enabled: false,
+                context_window: Some(32_000),
+            },
+            approval_policy: ApprovalPolicy::default(),
+            approvals_reviewer: ApprovalsReviewerKind::User,
+            permission_profile: PermissionProfile {
+                sandbox_mode: SandboxMode::WorkspaceWrite,
+                writable_roots: Vec::new(),
+                network_enabled: false,
+                allowed_domains: Vec::new(),
+                allowed_unix_sockets: Vec::new(),
+            },
+            add_dirs: Vec::new(),
+            notifications_enabled: false,
+            mcp_servers: Vec::new(),
+            plugins_enabled: false,
+            apps_enabled: false,
+            features: Default::default(),
+            trusted_projects: vec![app_home_str.clone()],
+            working_directory: app_home_str,
+            system_prompt: String::new(),
+            llm: LlmConfig::default(),
+            log_level: "off".into(),
+            log_file: app_home.join("test.log").to_string_lossy().to_string(),
+            models: Vec::new(),
+            auto_compaction: AutoCompactionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            codebase_intel: CodebaseIntelConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            agent: AgentConfig {
+                // Tighten limits so loop tests fail fast.
+                max_iterations: 8,
+                max_empty_responses: 2,
+                ..Default::default()
+            },
         }
     }
 
-    pub async fn run_child(&self, request: ChildAgentRequest) -> Result<ChildAgentRun> {
-        let _slot = self
-            .child_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| anyhow!("child_agent_slots_closed: {e}"))?;
+    async fn build_runtime(script: Vec<ScriptedResponse>) -> (ConversationRuntime, PathBuf) {
+        build_runtime_with(script, |_| {}).await
+    }
 
-        let child = self
-            .runtime
+    /// Build a runtime, applying `tweak` to the test config before construction.
+    async fn build_runtime_with(
+        script: Vec<ScriptedResponse>,
+        tweak: impl FnOnce(&mut EffectiveConfig),
+    ) -> (ConversationRuntime, PathBuf) {
+        let app_home = unique_app_home();
+        let mut cfg = test_config(&app_home);
+        tweak(&mut cfg);
+        let client = Arc::new(FakeLlmClient::new(script));
+        let runtime =
+            ConversationRuntime::new_with_llm_client(cfg, AccountSession::default(), client)
+                .await
+                .expect("runtime build");
+        (runtime, app_home)
+    }
+
+    /// Drive a single user message through the runtime and wait for the turn
+    /// to terminate. Returns the final event so callers can assert on its kind
+    /// and payload.
+    async fn run_turn_and_wait(
+        runtime: &ConversationRuntime,
+        user_text: &str,
+    ) -> (ThreadId, RuntimeEvent) {
+        run_turn_and_wait_at_depth(runtime, user_text, 0).await
+    }
+
+    async fn run_turn_and_wait_at_depth(
+        runtime: &ConversationRuntime,
+        user_text: &str,
+        agent_depth: u32,
+    ) -> (ThreadId, RuntimeEvent) {
+        let mut sub = runtime.event_bus().subscribe(
+            "test".into(),
+            crate::system::agent::EventFilter { thread_id: None },
+        );
+
+        let started = runtime
             .start_thread(ThreadStartParams {
-                cwd: Some(request.cwd),
+                cwd: Some(runtime.inner.effective_config.working_directory.clone()),
                 model_settings: None,
-                approval_policy: Some(request.approval_policy.clone()),
-                permission_profile: Some(request.permission_profile.clone()),
+                approval_policy: None,
+                permission_profile: None,
                 ephemeral: true,
             })
-            .await?;
-        let child_thread_id = child.metadata.thread_id;
+            .await
+            .expect("start_thread");
+        let thread_id = started.metadata.thread_id.clone();
 
-        let child_turn = self
-            .runtime
+        runtime
             .start_turn(
                 TurnStartParams {
-                    thread_id: child_thread_id.clone(),
-                    input: vec![UserInput::from_text(&request.prompt)],
+                    thread_id: thread_id.clone(),
+                    input: vec![UserInput::from_text(user_text)],
                     cwd: None,
                     model_settings: None,
-                    approval_policy: Some(request.approval_policy),
-                    permission_profile: Some(request.permission_profile),
+                    approval_policy: None,
+                    permission_profile: None,
                     output_schema: None,
-                    agent_depth: request.agent_depth + 1,
+                    agent_depth,
                 },
                 SurfaceKind::Exec,
             )
-            .await?;
-        let child_turn_id = child_turn.turn.turn_id;
+            .await
+            .expect("start_turn");
 
-        let mut outcome = self
-            .runtime
-            .await_child_turn_completion(&child_thread_id, &child_turn_id, request.timeout_secs)
-            .await?;
-
-        if matches!(outcome, TurnCompletionOutcome::TimedOut) {
-            let _ = self
-                .runtime
-                .cancel_child_turn(&child_thread_id, &child_turn_id, 5)
-                .await;
-            outcome = TurnCompletionOutcome::TimedOut;
-        }
-
-        let result_text = self
-            .runtime
-            .read_last_agent_message(&child_thread_id)?
-            .unwrap_or_else(|| "[sub-agent produced no output]".into());
-
-        if matches!(outcome, TurnCompletionOutcome::Completed) {
-            if let Err(e) = self.runtime.delete_thread(&child_thread_id).await {
-                tracing::warn!(thread_id = %child_thread_id, "failed to delete successful ephemeral sub-agent thread: {e}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!remaining.is_zero(), "timed out waiting for turn end");
+            match tokio::time::timeout(remaining, sub.receiver.recv()).await {
+                Ok(Ok(evt)) => match evt.kind {
+                    RuntimeEventKind::TurnCompleted | RuntimeEventKind::TurnFailed => {
+                        return (thread_id, evt);
+                    }
+                    _ => continue,
+                },
+                Ok(Err(_)) => panic!("event_bus closed before turn ended"),
+                Err(_) => panic!("timed out waiting for turn end"),
             }
         }
-
-        Ok(ChildAgentRun {
-            child_thread_id,
-            child_turn_id,
-            result_text,
-            outcome,
-        })
-    }
-}
-
-// ─── SpawnAgentToolProviderReal ───────────────────────────────────────────────
-//
-// Registered *after* ConversationRuntime is constructed so it can hold a
-// runtime clone without creating a circular dependency.
-
-use crate::system::agent::tools::ToolProvider;
-use crate::system::domain::{
-    ToolDefinition, ToolExecutionContext, ToolListingContext, ToolProviderKind, ToolResult,
-};
-use async_trait::async_trait;
-
-pub(crate) struct SpawnAgentToolProviderReal {
-    supervisor: AgentSupervisor,
-}
-
-impl SpawnAgentToolProviderReal {
-    pub fn new(supervisor: AgentSupervisor) -> Self {
-        Self { supervisor }
-    }
-}
-
-#[async_trait]
-impl ToolProvider for SpawnAgentToolProviderReal {
-    fn get_kind(&self) -> ToolProviderKind {
-        ToolProviderKind::Builtin
     }
 
-    fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "spawn_agent".into(),
-            description: "Spawn an independent sub-agent to work on a task in parallel. \
-                The sub-agent runs with full tool access and returns its final answer as text. \
-                Use this to parallelise independent sub-tasks — for example, analysing multiple \
-                files simultaneously. Multiple spawn_agent calls in the same response run \
-                concurrently."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "The task description for the sub-agent. Be specific and self-contained."
-                    },
-                    "timeout_secs": {
-                        "type": "integer",
-                        "description": "Maximum seconds to wait for the sub-agent (default 120, max 600)."
-                    }
-                },
-                "required": ["prompt"]
-            }),
-            requires_approval: false,
-            supports_parallel_calls: true,
-            provider_kind: ToolProviderKind::Builtin,
-        }]
-    }
+    #[tokio::test]
+    async fn fake_model_completes_text_only_turn() {
+        let (runtime, _home) =
+            build_runtime(vec![ScriptedResponse::Text("hello there".into())]).await;
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "hello").await;
 
-    async fn execute(&self, call: &ToolCall, ctx: &ToolExecutionContext) -> Result<ToolResult> {
-        use anyhow::anyhow;
+        assert_eq!(
+            evt.kind,
+            RuntimeEventKind::TurnCompleted,
+            "expected TurnCompleted, got {:?}",
+            evt
+        );
 
-        // Depth guard: prevent unbounded recursive agent spawning.
-        if ctx.agent_depth >= 3 {
-            return Ok(ToolResult {
-                tool_call_id: call.tool_call_id.clone(),
-                ok: false,
-                output: json!({ "error": "max sub-agent depth reached" }),
-                error_message: Some("spawn_agent cannot be nested more than 3 levels deep".into()),
-            });
-        }
-
-        let prompt = call
-            .arguments
-            .get("prompt")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("spawn_agent: prompt is required"))?
-            .to_string();
-
-        let timeout_secs = call
-            .arguments
-            .get("timeout_secs")
-            .and_then(Value::as_u64)
-            .unwrap_or(120)
-            .min(600);
-
-        let run = self
-            .supervisor
-            .run_child(ChildAgentRequest {
-                prompt,
-                cwd: ctx.cwd.clone(),
-                approval_policy: ctx.approval_policy.clone(),
-                permission_profile: ctx.permission_profile.clone(),
-                timeout_secs,
-                agent_depth: ctx.agent_depth,
+        let read = runtime
+            .read_thread(ThreadReadParams { thread_id })
+            .await
+            .unwrap();
+        let agent_texts: Vec<String> = read
+            .thread
+            .items
+            .iter()
+            .filter(|i| i.kind == ItemKind::AgentMessage)
+            .filter_map(|i| {
+                i.payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
             })
-            .await?;
+            .collect();
+        assert!(
+            agent_texts.iter().any(|t| t.contains("hello there")),
+            "expected assistant text in items, got {agent_texts:?}",
+        );
+    }
 
-        match run.outcome {
-            TurnCompletionOutcome::Completed => Ok(ToolResult {
-                tool_call_id: call.tool_call_id.clone(),
-                ok: true,
-                output: json!({
-                    "thread_id": run.child_thread_id,
-                    "turn_id": run.child_turn_id,
-                    "result": run.result_text,
-                }),
-                error_message: None,
-            }),
-            TurnCompletionOutcome::Failed(reason) => Ok(ToolResult {
-                tool_call_id: call.tool_call_id.clone(),
-                ok: false,
-                output: json!({
-                    "thread_id": run.child_thread_id,
-                    "turn_id": run.child_turn_id,
-                    "result": run.result_text,
-                    "error": reason,
-                }),
-                error_message: Some(format!("sub-agent failed: {reason}")),
-            }),
-            TurnCompletionOutcome::Interrupted => Ok(ToolResult {
-                tool_call_id: call.tool_call_id.clone(),
-                ok: false,
-                output: json!({
-                    "thread_id": run.child_thread_id,
-                    "turn_id": run.child_turn_id,
-                    "result": run.result_text,
-                    "error": "interrupted",
-                }),
-                error_message: Some("sub-agent interrupted".into()),
-            }),
-            TurnCompletionOutcome::TimedOut => Ok(ToolResult {
-                tool_call_id: call.tool_call_id.clone(),
-                ok: false,
-                output: json!({
-                    "thread_id": run.child_thread_id,
-                    "turn_id": run.child_turn_id,
-                    "result": run.result_text,
-                    "error": "timeout",
-                }),
-                error_message: Some(format!("sub-agent timed out after {timeout_secs}s")),
-            }),
+    #[tokio::test]
+    async fn fake_model_executes_tool_call_then_finishes() {
+        let (runtime, home) = build_runtime(vec![
+            ScriptedResponse::ToolCalls(vec![(
+                "list_dir".into(),
+                serde_json::json!({ "path": "." }),
+            )]),
+            ScriptedResponse::Text("done listing".into()),
+        ])
+        .await;
+        // list_dir reads the cwd. Make sure there's at least one entry so the
+        // tool succeeds deterministically.
+        std::fs::write(home.join("marker.txt"), "x").unwrap();
+
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "list this directory").await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted, "got {:?}", evt);
+
+        let read = runtime
+            .read_thread(ThreadReadParams { thread_id })
+            .await
+            .unwrap();
+        let mut tool_calls = 0;
+        let mut tool_results = 0;
+        let mut final_text = String::new();
+        for item in &read.thread.items {
+            match item.kind {
+                ItemKind::ToolCall => {
+                    tool_calls += 1;
+                    assert_eq!(
+                        item.payload.get("toolName").and_then(|v| v.as_str()),
+                        Some("list_dir")
+                    );
+                }
+                ItemKind::ToolResult => tool_results += 1,
+                ItemKind::AgentMessage => {
+                    if let Some(t) = item.payload.get("text").and_then(|v| v.as_str()) {
+                        final_text = t.to_string();
+                    }
+                }
+                _ => {}
+            }
         }
+        assert_eq!(tool_calls, 1, "expected exactly one tool call");
+        assert_eq!(tool_results, 1, "expected exactly one tool result");
+        assert!(
+            final_text.contains("done listing"),
+            "expected final assistant text, got {final_text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_model_empty_responses_fail_turn() {
+        // max_empty_responses = 2 → after the 2nd empty response the turn fails.
+        let (runtime, _home) = build_runtime(vec![
+            ScriptedResponse::Empty,
+            ScriptedResponse::Empty,
+            ScriptedResponse::Empty,
+        ])
+        .await;
+
+        let (_thread_id, evt) = run_turn_and_wait(&runtime, "hello").await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnFailed, "got {:?}", evt);
+
+        let kind = evt
+            .payload
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let reason = evt
+            .payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert_eq!(
+            kind, "empty_response",
+            "expected empty_response failure, got kind={kind:?} reason={reason:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_at_max_depth_returns_capped_error() {
+        // max_spawn_depth = 1; start the turn at agent_depth = 1 so the
+        // spawn_agent guard fires immediately on the first tool call.
+        let (runtime, _home) = build_runtime_with(
+            vec![
+                ScriptedResponse::ToolCalls(vec![(
+                    "spawn_agent".into(),
+                    serde_json::json!({ "prompt": "do a thing" }),
+                )]),
+                ScriptedResponse::Text("can't go deeper, finishing up".into()),
+            ],
+            |cfg| {
+                cfg.agent.max_spawn_depth = 1;
+            },
+        )
+        .await;
+
+        let (thread_id, evt) = run_turn_and_wait_at_depth(&runtime, "kick off", 1).await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted, "got {:?}", evt);
+
+        let read = runtime
+            .read_thread(ThreadReadParams { thread_id })
+            .await
+            .unwrap();
+
+        // The spawn_agent tool call must produce a ToolResult with ok=false
+        // and an error message that mentions the depth cap.
+        let tool_result = read
+            .thread
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::ToolResult)
+            .expect("tool result item missing");
+        assert_eq!(
+            tool_result.payload.get("ok").and_then(|v| v.as_bool()),
+            Some(false),
+            "spawn_agent should fail at the depth cap, payload={}",
+            tool_result.payload
+        );
+        let err_msg = tool_result
+            .payload
+            .get("errorMessage")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            err_msg.contains("nested") && err_msg.contains("1"),
+            "expected depth-cap error, got {err_msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_exec_blocks_on_approval_and_denied_short_circuits() {
+        // OnRequest is the default; bash_exec maps to SandboxEscalation,
+        // so the executor must wait for a resolution before running the tool.
+        let (runtime, _home) = build_runtime(vec![
+            ScriptedResponse::ToolCalls(vec![(
+                "bash_exec".into(),
+                serde_json::json!({ "command": "echo unreached" }),
+            )]),
+            ScriptedResponse::Text("acknowledged the deny".into()),
+        ])
+        .await;
+
+        // Handler task: deny every ApprovalRequested event the runtime emits.
+        // This MUST be subscribed before start_turn so we don't miss the event.
+        let mut sub = runtime.event_bus().subscribe(
+            "test-approver".into(),
+            crate::system::agent::EventFilter { thread_id: None },
+        );
+        let runtime_for_handler = runtime.clone();
+        let approval_seen = Arc::new(tokio::sync::Notify::new());
+        let approval_seen_clone = approval_seen.clone();
+        let handler = tokio::spawn(async move {
+            while let Ok(evt) = sub.receiver.recv().await {
+                if evt.kind == RuntimeEventKind::ApprovalRequested {
+                    let approval_id = evt
+                        .payload
+                        .get("request")
+                        .and_then(|r| r.get("approvalId"))
+                        .and_then(|v| v.as_str())
+                        .expect("ApprovalRequested payload missing approvalId")
+                        .to_string();
+                    runtime_for_handler
+                        .resolve_approval(&approval_id, ApprovalDecision::Denied, None)
+                        .await
+                        .expect("resolve_approval");
+                    approval_seen_clone.notify_one();
+                }
+                if matches!(
+                    evt.kind,
+                    RuntimeEventKind::TurnCompleted | RuntimeEventKind::TurnFailed
+                ) {
+                    break;
+                }
+            }
+        });
+
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "run a command").await;
+        // Make sure the handler actually saw and resolved the approval before
+        // we tear down — otherwise a regression that bypasses approval would
+        // race with the wait helper and look like a pass.
+        tokio::time::timeout(Duration::from_secs(2), approval_seen.notified())
+            .await
+            .expect("ApprovalRequested event was never emitted");
+        let _ = handler.await;
+
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted, "got {:?}", evt);
+
+        let read = runtime
+            .read_thread(ThreadReadParams { thread_id })
+            .await
+            .unwrap();
+        let tool_result = read
+            .thread
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::ToolResult)
+            .expect("tool result item missing");
+        assert_eq!(
+            tool_result.payload.get("ok").and_then(|v| v.as_bool()),
+            Some(false),
+            "denied bash_exec should report ok=false, payload={}",
+            tool_result.payload
+        );
+        let err_msg = tool_result
+            .payload
+            .get("errorMessage")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            err_msg.contains("Denied"),
+            "expected Denied error, got {err_msg:?}"
+        );
+
+        // Final assistant text must come from the *second* scripted response,
+        // confirming the model saw the denied tool result and continued.
+        let final_text = read
+            .thread
+            .items
+            .iter()
+            .filter(|i| i.kind == ItemKind::AgentMessage)
+            .filter_map(|i| i.payload.get("text").and_then(|v| v.as_str()))
+            .last()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            final_text.contains("acknowledged the deny"),
+            "expected post-deny assistant text, got {final_text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_safe_tool_calls_in_one_round_all_dispatch() {
+        // Both list_dir calls are parallel-safe; the executor groups them into
+        // one batch and runs them via join_all. End-to-end we just verify both
+        // calls and both results made it into the transcript.
+        let (runtime, home) = build_runtime(vec![
+            ScriptedResponse::ToolCalls(vec![
+                ("list_dir".into(), serde_json::json!({ "path": "." })),
+                ("list_dir".into(), serde_json::json!({ "path": "." })),
+            ]),
+            ScriptedResponse::Text("listed twice".into()),
+        ])
+        .await;
+        std::fs::write(home.join("a.txt"), "x").unwrap();
+
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "list it twice").await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted, "got {:?}", evt);
+
+        let read = runtime
+            .read_thread(ThreadReadParams { thread_id })
+            .await
+            .unwrap();
+        let tool_call_count = read
+            .thread
+            .items
+            .iter()
+            .filter(|i| i.kind == ItemKind::ToolCall)
+            .count();
+        let tool_result_count = read
+            .thread
+            .items
+            .iter()
+            .filter(|i| i.kind == ItemKind::ToolResult)
+            .count();
+        assert_eq!(tool_call_count, 2, "expected 2 ToolCall items");
+        assert_eq!(tool_result_count, 2, "expected 2 ToolResult items");
+
+        // ToolCall items must precede their ToolResult items in the transcript
+        // — the executor persists all calls before any results regardless of
+        // batching.
+        let positions: Vec<(usize, ItemKind)> = read
+            .thread
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| match it.kind {
+                ItemKind::ToolCall | ItemKind::ToolResult => Some((i, it.kind)),
+                _ => None,
+            })
+            .collect();
+        let last_call_pos = positions
+            .iter()
+            .rev()
+            .find(|(_, k)| *k == ItemKind::ToolCall)
+            .map(|(p, _)| *p)
+            .unwrap();
+        let first_result_pos = positions
+            .iter()
+            .find(|(_, k)| *k == ItemKind::ToolResult)
+            .map(|(p, _)| *p)
+            .unwrap();
+        assert!(
+            last_call_pos < first_result_pos,
+            "all ToolCall items must precede all ToolResult items; positions={positions:?}"
+        );
     }
 }
