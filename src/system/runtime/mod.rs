@@ -1,8 +1,11 @@
+mod builder;
 mod discovery;
 mod thread;
 mod turn;
 
-use anyhow::{anyhow, Result};
+pub use builder::RuntimeBuilder;
+
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -11,7 +14,6 @@ use tokio::sync::{Mutex, RwLock as AsyncRwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::llm::client::UnifiedClient;
 use crate::llm::LlmClient;
 
 // Agent subsystem — types used only internally in this file
@@ -268,17 +270,20 @@ impl ConversationRuntime {
         effective_config: EffectiveConfig,
         account_session: AccountSession,
     ) -> Result<Self> {
-        let llm_client: Arc<dyn LlmClient> = Arc::new(
-            UnifiedClient::new(effective_config.llm.clone())
-                .map_err(|e| anyhow!("llm_client_init_failed: {e}"))?,
-        );
-        Self::new_with_llm_client(effective_config, account_session, llm_client).await
+        // Default constructor goes through the builder so the same path is
+        // exercised in production and tests; embedders can use `RuntimeBuilder`
+        // directly when they need to inject a custom client or extra tools.
+        RuntimeBuilder::new(effective_config, account_session)
+            .build()
+            .await
     }
 
     /// Construct a runtime with a caller-supplied `LlmClient`.
     ///
     /// Used by the fake-model test harness to drive deterministic agent loops
-    /// without contacting a real LLM provider.
+    /// without contacting a real LLM provider. New code should prefer
+    /// [`RuntimeBuilder::new(...).with_llm_client(...).build()`]; this
+    /// signature is kept for the existing call sites.
     pub async fn new_with_llm_client(
         effective_config: EffectiveConfig,
         account_session: AccountSession,
@@ -447,7 +452,7 @@ mod fake_model_tests {
     /// macOS's `/private/` symlink prefix doesn't mismatch the sandbox's
     /// writable-root check (the sandbox canonicalises target paths before
     /// validating, so writable_roots must use the same form).
-    fn unique_app_home() -> PathBuf {
+    pub(super) fn unique_app_home() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
@@ -460,7 +465,7 @@ mod fake_model_tests {
         std::fs::canonicalize(&dir).unwrap_or(dir)
     }
 
-    fn test_config(app_home: &std::path::Path) -> EffectiveConfig {
+    pub(super) fn test_config(app_home: &std::path::Path) -> EffectiveConfig {
         let app_home_str = app_home.to_string_lossy().to_string();
         EffectiveConfig {
             app_home: app_home_str.clone(),

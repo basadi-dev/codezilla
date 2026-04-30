@@ -5,6 +5,7 @@ pub mod autocomplete;
 pub mod input;
 pub mod markdown;
 pub mod render;
+pub mod selection;
 pub mod threads;
 pub mod transcript_view;
 pub mod types;
@@ -198,7 +199,7 @@ pub async fn run_interactive_tui(
                             dirty = true;
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
-                            if app.composer_drag_start.is_some() {
+                            if app.composer_selection.is_active() {
                                 app.update_composer_drag(mouse.column, mouse.row);
                             } else {
                                 app.update_transcript_drag(mouse.column, mouse.row);
@@ -206,7 +207,7 @@ pub async fn run_interactive_tui(
                             dirty = true;
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
-                            if app.composer_drag_start.is_some() {
+                            if app.composer_selection.is_active() {
                                 app.finish_composer_drag(mouse.column, mouse.row);
                             } else {
                                 app.finish_transcript_drag(mouse.column, mouse.row);

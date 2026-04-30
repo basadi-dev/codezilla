@@ -34,6 +34,23 @@
 
 use std::time::{Duration, Instant};
 
+/// What's currently holding up the agent. Set when the runtime emits an
+/// event that puts the loop in a wait state; cleared when the wait resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockedReason {
+    /// Waiting for the user to resolve an approval request.
+    Approval,
+}
+
+impl BlockedReason {
+    /// Short label used in the header.
+    pub fn label(&self) -> &'static str {
+        match self {
+            BlockedReason::Approval => "⏸ waiting on approval",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolActivity {
     pub tool_call_id: String,
@@ -66,6 +83,10 @@ pub struct ActivityState {
     turn_started_at: Option<Instant>,
     spinner_tick: u64,
     streaming: bool,
+    /// Set when the runtime is parked waiting on something the user controls
+    /// (approval, future: input request). The header shows this in place of
+    /// the tool list so the user sees *what they need to act on*.
+    blocked: Option<BlockedReason>,
 }
 
 impl ActivityState {
@@ -128,6 +149,19 @@ impl ActivityState {
         self.tools.clear();
         self.streaming = false;
         self.turn_started_at = None;
+        self.blocked = None;
+    }
+
+    pub fn blocked(&self) -> Option<&BlockedReason> {
+        self.blocked.as_ref()
+    }
+
+    pub fn set_blocked(&mut self, reason: BlockedReason) {
+        self.blocked = Some(reason);
+    }
+
+    pub fn clear_blocked(&mut self) {
+        self.blocked = None;
     }
 
     pub fn start_tool(
@@ -197,11 +231,17 @@ impl ActivityState {
     /// `streaming_fallback` if no tools are in flight but the assistant is
     /// streaming text. Returns `None` when truly idle.
     ///
+    /// Priority: blocked state → in-flight tools → streaming → idle.
+    ///
     /// Examples:
+    ///   - blocked on approval:      `"⏸ waiting on approval"`
     ///   - one tool, no hint:        `"⚙ list_dir (3s)"`
     ///   - one tool, with hint:      `"⚙ read_file src/main.rs (1s)"`
     ///   - multiple tools:           `"⚙ list_dir, read_file, bash_exec (3 in flight, 5s)"`
     pub fn header_line(&self, now: Instant, streaming_fallback: &str) -> Option<String> {
+        if let Some(reason) = &self.blocked {
+            return Some(reason.label().to_string());
+        }
         if let Some(elapsed) = self.turn_elapsed(now) {
             if !self.tools.is_empty() {
                 let count = self.tools.len();
@@ -422,6 +462,50 @@ mod tests {
         assert!(rows[0].contains("4s"));
         assert!(rows[1].contains("read_file"));
         assert!(rows[1].contains("4s"));
+    }
+
+    #[test]
+    fn blocked_state_dominates_header_line() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        // Even with tools in flight, a blocked state should take precedence
+        // — the user needs to see what they're being asked to act on.
+        s.start_tool("c1", "list_dir", None, t0);
+        s.set_blocked(BlockedReason::Approval);
+        let line = s
+            .header_line(t0 + Duration::from_secs(2), "thinking")
+            .unwrap();
+        assert!(line.contains("approval"), "got {line:?}");
+        assert!(
+            !line.contains("list_dir"),
+            "tools should not show while blocked: {line:?}"
+        );
+    }
+
+    #[test]
+    fn clear_blocked_returns_to_normal_header() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_tool("c1", "list_dir", None, t0);
+        s.set_blocked(BlockedReason::Approval);
+        s.clear_blocked();
+        let line = s
+            .header_line(t0 + Duration::from_secs(2), "thinking")
+            .unwrap();
+        assert!(line.contains("list_dir"));
+    }
+
+    #[test]
+    fn end_turn_clears_blocked_state() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.set_blocked(BlockedReason::Approval);
+        s.end_turn();
+        assert!(s.blocked().is_none());
+        assert!(s.header_line(t0, "thinking").is_none());
     }
 
     #[test]

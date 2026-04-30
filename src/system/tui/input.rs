@@ -73,10 +73,10 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
             app.error_message = None;
         }
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            if app.drag_start.is_some() {
+            if app.transcript_selection.is_active() {
                 app.copy_selection_to_clipboard();
                 app.clear_selection();
-            } else if app.composer_drag_start.is_some() {
+            } else if app.composer_selection.is_active() {
                 app.copy_composer_selection_to_clipboard();
                 app.clear_composer_selection();
             } else if app.focus == FocusPane::Composer && !app.composer.is_empty() {
