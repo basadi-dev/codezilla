@@ -250,6 +250,10 @@ pub(crate) struct RuntimeInner {
     pub(crate) extension_manager: Arc<ExtensionManager>,
     /// Codebase intelligence: repo map builder + SHA2-keyed symbol cache.
     pub(crate) repo_map: Arc<RepoMap>,
+    /// Phase 8: pre-state snapshots of file-changing tool calls. Lets the
+    /// caller `undo_tool_call(id)` after a bad edit.
+    #[allow(dead_code)]
+    pub(crate) checkpoint_store: Arc<super::agent::checkpoint::CheckpointStore>,
 }
 
 // ─── ConversationRuntime (thin coordinator) ───────────────────────────────────
@@ -303,10 +307,12 @@ impl ConversationRuntime {
         // after write operations.
         let repo_map = Arc::new(RepoMap::new(200));
         let intel_cache = repo_map.cache();
+        let checkpoint_store = Arc::new(super::agent::checkpoint::CheckpointStore::new());
 
         tool_orchestrator.register_provider(Arc::new(
             FileToolProvider::new(sandbox.clone(), permissions.clone())
-                .with_intel_cache(intel_cache),
+                .with_intel_cache(intel_cache)
+                .with_checkpoint_store(checkpoint_store.clone()),
         ));
         tool_orchestrator.register_provider(Arc::new(SearchToolProvider));
         tool_orchestrator.register_provider(Arc::new(ImageToolProvider));
@@ -349,6 +355,7 @@ impl ConversationRuntime {
             // Re-use the repo_map that shares its cache with FileToolProvider
             // so write invalidations are visible to the map builder.
             repo_map,
+            checkpoint_store,
         };
         let me = Self {
             inner: Arc::new(inner),
@@ -436,7 +443,10 @@ mod fake_model_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    /// Per-test scratch space under the OS temp directory.
+    /// Per-test scratch space under the OS temp directory. Canonicalised so
+    /// macOS's `/private/` symlink prefix doesn't mismatch the sandbox's
+    /// writable-root check (the sandbox canonicalises target paths before
+    /// validating, so writable_roots must use the same form).
     fn unique_app_home() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -447,7 +457,7 @@ mod fake_model_tests {
             n
         ));
         std::fs::create_dir_all(&dir).expect("create tempdir");
-        dir
+        std::fs::canonicalize(&dir).unwrap_or(dir)
     }
 
     fn test_config(app_home: &std::path::Path) -> EffectiveConfig {
@@ -1145,5 +1155,175 @@ mod fake_model_tests {
         // subscription saw, so a follow-up subscriber can resume cleanly.
         let last_seq = runtime.event_bus().last_sequence_for_thread(&thread_id);
         assert!(last_seq.is_some(), "expected a recorded last sequence");
+    }
+
+    // ── Phase 8: undo / rollback tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn undo_tool_call_restores_modified_file() {
+        let app_home = unique_app_home();
+        let path = app_home.join("modified.txt");
+        std::fs::write(&path, "ORIGINAL").unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+
+        // write_file requires approval under OnRequest; flip to Never so the
+        // turn runs unattended and we can exercise the undo path.
+        let mut cfg = test_config(&app_home);
+        cfg.approval_policy = ApprovalPolicy {
+            kind: crate::system::domain::ApprovalPolicyKind::Never,
+            granular: None,
+        };
+        let client = Arc::new(FakeLlmClient::new(vec![
+            ScriptedResponse::ToolCalls(vec![(
+                "write_file".into(),
+                serde_json::json!({
+                    "path": path_str,
+                    "content": "new bytes",
+                }),
+            )]),
+            ScriptedResponse::Text("wrote it".into()),
+        ]));
+        let runtime =
+            ConversationRuntime::new_with_llm_client(cfg, AccountSession::default(), client)
+                .await
+                .expect("runtime build");
+
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "modify the file").await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted, "got {:?}", evt);
+
+        // Diagnostic: look at the ToolResult to see if the write actually
+        // succeeded — failures here surface as a clearer error message than
+        // "left ≠ right" on the file-content compare.
+        let read = runtime
+            .read_thread(ThreadReadParams { thread_id })
+            .await
+            .unwrap();
+        let result_item = read
+            .thread
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::ToolResult)
+            .expect("expected a ToolResult");
+        let ok = result_item.payload.get("ok").and_then(|v| v.as_bool());
+        assert_eq!(
+            ok,
+            Some(true),
+            "write_file should have succeeded; payload={}",
+            result_item.payload
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new bytes");
+
+        // The fake client assigns call_1 for the first tool call.
+        let summary = runtime.undo_tool_call("call_1").unwrap();
+        assert_eq!(summary.restored.len(), 1, "expected one restore");
+        assert!(summary.deleted.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "ORIGINAL",
+            "undo should restore prior bytes"
+        );
+
+        // Idempotent: undoing again is a no-op.
+        let again = runtime.undo_tool_call("call_1").unwrap();
+        assert!(again.is_empty());
+    }
+
+    #[tokio::test]
+    async fn undo_tool_call_deletes_files_that_were_created() {
+        let app_home = unique_app_home();
+        let path = app_home.join("fresh.txt");
+        // Make sure it doesn't exist before the turn runs.
+        let _ = std::fs::remove_file(&path);
+        let path_str = path.to_string_lossy().into_owned();
+
+        let mut cfg = test_config(&app_home);
+        cfg.approval_policy = ApprovalPolicy {
+            kind: crate::system::domain::ApprovalPolicyKind::Never,
+            granular: None,
+        };
+        let client = Arc::new(FakeLlmClient::new(vec![
+            ScriptedResponse::ToolCalls(vec![(
+                "write_file".into(),
+                serde_json::json!({
+                    "path": path_str,
+                    "content": "new file",
+                }),
+            )]),
+            ScriptedResponse::Text("created".into()),
+        ]));
+        let runtime =
+            ConversationRuntime::new_with_llm_client(cfg, AccountSession::default(), client)
+                .await
+                .expect("runtime build");
+
+        let (_thread_id, evt) = run_turn_and_wait(&runtime, "create the file").await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted, "got {:?}", evt);
+        assert!(path.exists(), "fake model should have written the file");
+
+        let summary = runtime.undo_tool_call("call_1").unwrap();
+        assert!(summary.restored.is_empty());
+        assert_eq!(summary.deleted.len(), 1);
+        assert!(
+            !path.exists(),
+            "undo should delete files the tool call created"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_turn_undoes_every_tool_call_in_order() {
+        // Two write_file calls in one response → both snapshotted; rollback
+        // should restore both files.
+        let app_home = unique_app_home();
+        let path_a = app_home.join("a.txt");
+        let path_b = app_home.join("b.txt");
+        std::fs::write(&path_a, "ORIG-A").unwrap();
+        std::fs::write(&path_b, "ORIG-B").unwrap();
+        let a_str = path_a.to_string_lossy().into_owned();
+        let b_str = path_b.to_string_lossy().into_owned();
+
+        let mut cfg = test_config(&app_home);
+        cfg.approval_policy = ApprovalPolicy {
+            kind: crate::system::domain::ApprovalPolicyKind::Never,
+            granular: None,
+        };
+        let client = Arc::new(FakeLlmClient::new(vec![
+            ScriptedResponse::ToolCalls(vec![
+                (
+                    "write_file".into(),
+                    serde_json::json!({
+                        "path": a_str,
+                        "content": "new-a",
+                    }),
+                ),
+                (
+                    "write_file".into(),
+                    serde_json::json!({
+                        "path": b_str,
+                        "content": "new-b",
+                    }),
+                ),
+            ]),
+            ScriptedResponse::Text("done".into()),
+        ]));
+        let runtime =
+            ConversationRuntime::new_with_llm_client(cfg, AccountSession::default(), client)
+                .await
+                .expect("runtime build");
+
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "modify both").await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted, "got {:?}", evt);
+        let turn_id = evt.turn_id.clone().expect("TurnCompleted carries turn_id");
+
+        assert_eq!(std::fs::read_to_string(&path_a).unwrap(), "new-a");
+        assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "new-b");
+
+        let summary = runtime.rollback_turn(&thread_id, &turn_id).unwrap();
+        assert_eq!(
+            summary.restored.len(),
+            2,
+            "expected both files restored, got {summary:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path_a).unwrap(), "ORIG-A");
+        assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "ORIG-B");
     }
 }

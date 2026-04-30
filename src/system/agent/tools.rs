@@ -484,6 +484,9 @@ pub struct FileToolProvider {
     permissions: Arc<PermissionManager>,
     /// Optional intel cache — used to invalidate stale symbols after writes.
     intel_cache: Option<Arc<IntelCache>>,
+    /// Optional checkpoint store — captures pre-state bytes so a tool call
+    /// can be undone after the fact.
+    checkpoint_store: Option<Arc<super::checkpoint::CheckpointStore>>,
 }
 
 impl FileToolProvider {
@@ -492,12 +495,20 @@ impl FileToolProvider {
             sandbox,
             permissions,
             intel_cache: None,
+            checkpoint_store: None,
         }
     }
 
     /// Attach an intel cache so write/patch operations invalidate stale symbols.
     pub fn with_intel_cache(mut self, cache: Arc<IntelCache>) -> Self {
         self.intel_cache = Some(cache);
+        self
+    }
+
+    /// Attach a checkpoint store so write/patch/remove operations capture
+    /// the prior file content for later undo.
+    pub fn with_checkpoint_store(mut self, store: Arc<super::checkpoint::CheckpointStore>) -> Self {
+        self.checkpoint_store = Some(store);
         self
     }
 }
@@ -646,13 +657,22 @@ impl ToolProvider for FileToolProvider {
                     .ok_or_else(|| anyhow!("tool_invalid_arguments: missing content"))?;
 
                 // Read old content (if any) so we can produce a diff.
-                let old_content = self
-                    .sandbox
-                    .read_file(file_path, &sandbox)
-                    .await
-                    .ok()
-                    .map(|b| String::from_utf8_lossy(&b).into_owned());
+                let old_bytes = self.sandbox.read_file(file_path, &sandbox).await.ok();
+                let old_content = old_bytes
+                    .as_ref()
+                    .map(|b| String::from_utf8_lossy(b).into_owned());
                 let is_new_file = old_content.is_none();
+
+                // Phase 8: snapshot the prior state for later undo. Captures
+                // the raw bytes (not the lossy UTF-8 string) so binary files
+                // round-trip correctly through restore.
+                if let Some(store) = &self.checkpoint_store {
+                    store.snapshot_before(
+                        &call.tool_call_id,
+                        Path::new(file_path).to_path_buf(),
+                        old_bytes.clone(),
+                    );
+                }
 
                 self.sandbox
                     .write_file(file_path, content.as_bytes(), &sandbox)
@@ -710,6 +730,15 @@ impl ToolProvider for FileToolProvider {
                 let old_bytes = self.sandbox.read_file(file_path, &sandbox).await?;
                 let old_content = String::from_utf8_lossy(&old_bytes).into_owned();
                 let lines: Vec<&str> = old_content.lines().collect();
+
+                // Phase 8: snapshot the prior state for later undo.
+                if let Some(store) = &self.checkpoint_store {
+                    store.snapshot_before(
+                        &call.tool_call_id,
+                        Path::new(file_path).to_path_buf(),
+                        Some(old_bytes.clone()),
+                    );
+                }
 
                 if start_line > lines.len() {
                     return Ok(ToolResult {
@@ -786,10 +815,24 @@ impl ToolProvider for FileToolProvider {
                     .get("force")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let target = path("path")?;
+                // Phase 8: snapshot the file content before deletion. Only
+                // single-file deletes are reversible — directory removals are
+                // intentionally not snapshotted (would explode the byte cap
+                // and they're rarer in agent workflows).
+                if let Some(store) = &self.checkpoint_store {
+                    if let Ok(prior) = self.sandbox.read_file(target, &sandbox).await {
+                        store.snapshot_before(
+                            &call.tool_call_id,
+                            Path::new(target).to_path_buf(),
+                            Some(prior),
+                        );
+                    }
+                }
                 self.sandbox
-                    .remove_path(path("path")?, recursive, force, &sandbox)
+                    .remove_path(target, recursive, force, &sandbox)
                     .await?;
-                json!({ "ok": true, "path": path("path")? })
+                json!({ "ok": true, "path": target })
             }
             "copy_path" => {
                 let recursive = call

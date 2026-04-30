@@ -176,4 +176,111 @@ impl ConversationRuntime {
             .resolve_approval(approval_id, decision, rule)
             .await)
     }
+
+    // ── Phase 8: undo / rollback ──────────────────────────────────────────────
+    //
+    // Public API surface for callers (TUI, benchmarks, custom integrations).
+    // Currently used only by tests in this crate; live consumers can pick it
+    // up without further plumbing.
+
+    /// Restore every file the given tool call modified to its pre-call bytes.
+    ///
+    /// Returns the list of paths that were restored (file written back) or
+    /// removed (the file did not exist before the call). The snapshots are
+    /// consumed — calling `undo_tool_call(id)` twice for the same id is a
+    /// no-op the second time.
+    ///
+    /// Returns an error only when restoration itself fails (filesystem I/O).
+    /// Unknown tool-call ids return `Ok(UndoSummary::default())`.
+    #[allow(dead_code)]
+    pub fn undo_tool_call(&self, tool_call_id: &str) -> Result<UndoSummary> {
+        let Some(snapshots) = self.inner.checkpoint_store.take_snapshots(tool_call_id) else {
+            return Ok(UndoSummary::default());
+        };
+        apply_restore(&snapshots, &self.inner)
+    }
+
+    /// Undo every tool call that produced a snapshot during this turn.
+    /// Walks the persisted ToolCall items for the turn in reverse order
+    /// (most-recent first) so dependent edits unwind correctly.
+    #[allow(dead_code)]
+    pub fn rollback_turn(&self, thread_id: &str, turn_id: &str) -> Result<UndoSummary> {
+        let persisted = self.inner.persistence_manager.read_thread(thread_id)?;
+
+        let mut summary = UndoSummary::default();
+        for item in persisted.items.iter().rev() {
+            if item.turn_id != turn_id || item.kind != crate::system::domain::ItemKind::ToolCall {
+                continue;
+            }
+            let Some(call_id) = item.payload.get("toolCallId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let one = self.undo_tool_call(call_id)?;
+            summary.merge(one);
+        }
+        Ok(summary)
+    }
+}
+
+/// Result of an undo/rollback operation.
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct UndoSummary {
+    /// Files whose prior bytes were written back.
+    pub restored: Vec<std::path::PathBuf>,
+    /// Files removed because they didn't exist before the tool call.
+    pub deleted: Vec<std::path::PathBuf>,
+}
+
+#[allow(dead_code)]
+impl UndoSummary {
+    fn merge(&mut self, other: UndoSummary) {
+        self.restored.extend(other.restored);
+        self.deleted.extend(other.deleted);
+    }
+
+    /// Total number of paths affected.
+    #[allow(dead_code)] // public API surface; covered by tests, no live consumer yet
+    pub fn len(&self) -> usize {
+        self.restored.len() + self.deleted.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.restored.is_empty() && self.deleted.is_empty()
+    }
+}
+
+#[allow(dead_code)]
+fn apply_restore(
+    snapshots: &[crate::system::agent::checkpoint::FileSnapshot],
+    inner: &super::RuntimeInner,
+) -> Result<UndoSummary> {
+    let mut summary = UndoSummary::default();
+    for snap in snapshots {
+        match &snap.prior_content {
+            Some(bytes) => {
+                if let Some(parent) = snap.path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                }
+                std::fs::write(&snap.path, bytes)?;
+                summary.restored.push(snap.path.clone());
+            }
+            None => {
+                // The file did not exist before — remove what the tool created.
+                match std::fs::remove_file(&snap.path) {
+                    Ok(()) => summary.deleted.push(snap.path.clone()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Already gone — count as deleted for symmetry.
+                        summary.deleted.push(snap.path.clone());
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        // Invalidate any cached intel for restored files.
+        inner.repo_map.cache().invalidate(&snap.path);
+    }
+    Ok(summary)
 }

@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod checkpoint;
 pub mod event_bus;
 pub mod executor;
 pub mod extensions;
