@@ -60,6 +60,54 @@ pub struct ToolActivity {
     pub started_at: Instant,
 }
 
+/// Lifecycle status of a sub-agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildAgentStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    TimedOut,
+}
+
+impl ChildAgentStatus {
+    fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+/// In-flight (or recently-finished) sub-agent spawned via `spawn_agent`.
+#[derive(Debug, Clone)]
+pub struct ChildAgentActivity {
+    /// Parent's `tool_call_id` — links this child to a transcript entry.
+    pub parent_tool_call_id: String,
+    pub child_thread_id: String,
+    pub child_turn_id: String,
+    /// Short label (typically the first line of the spawn prompt).
+    pub label: String,
+    pub status: ChildAgentStatus,
+    pub started_at: Instant,
+    pub finished_at: Option<Instant>,
+}
+
+impl ChildAgentActivity {
+    pub fn elapsed(&self, now: Instant) -> Duration {
+        self.finished_at
+            .unwrap_or(now)
+            .saturating_duration_since(self.started_at)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SubAgentCounts {
+    queued: usize,
+    running: usize,
+    completed: usize,
+    failed: usize,
+    interrupted: usize,
+    timed_out: usize,
+}
+
 impl ToolActivity {
     pub fn elapsed(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.started_at)
@@ -87,6 +135,10 @@ pub struct ActivityState {
     /// (approval, future: input request). The header shows this in place of
     /// the tool list so the user sees *what they need to act on*.
     blocked: Option<BlockedReason>,
+    /// Sub-agents spawned via `spawn_agent`, in start order. Stays after a
+    /// child finishes so the user can still see its final outcome until the
+    /// parent turn ends; cleared by `end_turn`.
+    child_agents: Vec<ChildAgentActivity>,
 }
 
 impl ActivityState {
@@ -150,6 +202,80 @@ impl ActivityState {
         self.streaming = false;
         self.turn_started_at = None;
         self.blocked = None;
+        self.child_agents.clear();
+    }
+
+    pub fn child_agents(&self) -> &[ChildAgentActivity] {
+        &self.child_agents
+    }
+
+    /// Look up a child agent by its `child_thread_id`. Used by the event
+    /// handler to route a child's runtime events into the right tracker.
+    pub fn child_agent_for_thread(&self, child_thread_id: &str) -> Option<&ChildAgentActivity> {
+        self.child_agents
+            .iter()
+            .find(|c| c.child_thread_id == child_thread_id)
+    }
+
+    /// Returns true if `thread_id` belongs to a sub-agent we're tracking.
+    /// Used by the TUI to filter the global event stream.
+    pub fn is_known_child_thread(&self, thread_id: &str) -> bool {
+        self.child_agents
+            .iter()
+            .any(|c| c.child_thread_id == thread_id)
+    }
+
+    pub fn start_child_agent(
+        &mut self,
+        parent_tool_call_id: impl Into<String>,
+        child_thread_id: impl Into<String>,
+        child_turn_id: impl Into<String>,
+        label: impl Into<String>,
+        now: Instant,
+    ) {
+        let child_thread_id = child_thread_id.into();
+        // Idempotent on child_thread_id (defensive — duplicate ChildAgentSpawned
+        // events would otherwise stack).
+        if self
+            .child_agents
+            .iter()
+            .any(|c| c.child_thread_id == child_thread_id)
+        {
+            return;
+        }
+        self.child_agents.push(ChildAgentActivity {
+            parent_tool_call_id: parent_tool_call_id.into(),
+            child_thread_id,
+            child_turn_id: child_turn_id.into(),
+            label: label.into(),
+            status: ChildAgentStatus::Running,
+            started_at: now,
+            finished_at: None,
+        });
+    }
+
+    pub fn set_child_agent_status(&mut self, child_thread_id: &str, status: ChildAgentStatus) {
+        self.set_child_agent_status_at(child_thread_id, status, Instant::now());
+    }
+
+    fn set_child_agent_status_at(
+        &mut self,
+        child_thread_id: &str,
+        status: ChildAgentStatus,
+        now: Instant,
+    ) {
+        if let Some(child) = self
+            .child_agents
+            .iter_mut()
+            .find(|c| c.child_thread_id == child_thread_id)
+        {
+            child.status = status;
+            if status.is_terminal() {
+                child.finished_at.get_or_insert(now);
+            } else {
+                child.finished_at = None;
+            }
+        }
     }
 
     pub fn blocked(&self) -> Option<&BlockedReason> {
@@ -202,29 +328,32 @@ impl ActivityState {
     }
 
     /// How many rows the activity panel should reserve in the layout.
-    /// Zero means "don't show the panel"; otherwise one row per tool, capped
-    /// so a runaway parallel batch can't push the transcript off-screen.
-    /// The single-tool case is already covered by the header line.
+    /// Zero means "don't show the panel"; otherwise one row per tool +
+    /// child-agent, capped so a runaway parallel batch can't push the
+    /// transcript off-screen.
     pub fn panel_height(&self) -> u16 {
-        const MAX_PANEL_ROWS: u16 = 5;
+        const MAX_PANEL_ROWS: u16 = 6;
+        let total = self.tools.len();
+        // Single-tool case with no children is already covered by the header
+        // line; collapse the panel.
         if self.tools.len() <= 1 {
             return 0;
         }
-        (self.tools.len() as u16).min(MAX_PANEL_ROWS)
+        (total as u16).min(MAX_PANEL_ROWS)
     }
 
-    /// One row per in-flight tool: `"⚙ tool_name hint (Xs)"`. Capped at
-    /// [`panel_height`] entries — older entries (lower index) drop first if
-    /// there are more parallel tools than rows.
+    /// One row per in-flight tool, then one row per known child agent.
+    /// Child rows show their lifecycle status icon so the user can tell at
+    /// a glance whether a sub-agent is still running.
     pub fn panel_rows(&self, now: Instant) -> Vec<String> {
-        const MAX_PANEL_ROWS: usize = 5;
-        let total = self.tools.len();
-        let skip = total.saturating_sub(MAX_PANEL_ROWS);
-        self.tools
+        const MAX_PANEL_ROWS: usize = 6;
+        let rows: Vec<String> = self
+            .tools
             .iter()
-            .skip(skip)
             .map(|t| format!("{} ({}s)", t.label(), t.elapsed(now).as_secs()))
-            .collect()
+            .collect();
+        let skip = rows.len().saturating_sub(MAX_PANEL_ROWS);
+        rows.into_iter().skip(skip).collect()
     }
 
     /// Build the header label string for the current activity. Falls back to
@@ -263,6 +392,87 @@ impl ActivityState {
             }
         }
         None
+    }
+
+    fn spawn_tool_count(&self) -> usize {
+        self.tools.iter().filter(|t| is_spawn_agent_tool(t)).count()
+    }
+
+    fn regular_tool_count(&self) -> usize {
+        self.tools.len().saturating_sub(self.spawn_tool_count())
+    }
+
+    fn sub_agent_counts(&self) -> SubAgentCounts {
+        let mut counts = SubAgentCounts::default();
+        for child in &self.child_agents {
+            match child.status {
+                ChildAgentStatus::Running => counts.running += 1,
+                ChildAgentStatus::Completed => counts.completed += 1,
+                ChildAgentStatus::Failed => counts.failed += 1,
+                ChildAgentStatus::Interrupted => counts.interrupted += 1,
+                ChildAgentStatus::TimedOut => counts.timed_out += 1,
+            }
+        }
+
+        let linked_children = self
+            .tools
+            .iter()
+            .filter(|tool| {
+                is_spawn_agent_tool(tool)
+                    && self
+                        .child_agents
+                        .iter()
+                        .any(|child| child.parent_tool_call_id == tool.tool_call_id)
+            })
+            .count();
+        counts.queued = self.spawn_tool_count().saturating_sub(linked_children);
+        counts
+    }
+
+    fn sub_agent_summary(&self) -> String {
+        let counts = self.sub_agent_counts();
+        let total = counts.queued
+            + counts.running
+            + counts.completed
+            + counts.failed
+            + counts.interrupted
+            + counts.timed_out;
+        let mut parts = Vec::new();
+        push_count(&mut parts, counts.running, "running");
+        push_count(&mut parts, counts.queued, "queued");
+        push_count(&mut parts, counts.completed, "done");
+        push_count(&mut parts, counts.failed, "failed");
+        push_count(&mut parts, counts.timed_out, "timed out");
+        push_count(&mut parts, counts.interrupted, "stopped");
+        if parts.is_empty() {
+            parts.push("starting".to_string());
+        }
+        format!(
+            "{} sub-agent{}: {}",
+            total.max(1),
+            if total == 1 { "" } else { "s" },
+            parts.join(", ")
+        )
+    }
+}
+
+fn is_spawn_agent_tool(tool: &ToolActivity) -> bool {
+    tool.tool_name == "spawn_agent"
+}
+
+fn push_count(parts: &mut Vec<String>, count: usize, label: &str) {
+    if count > 0 {
+        parts.push(format!("{count} {label}"));
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
 
@@ -445,7 +655,7 @@ mod tests {
         for i in 0..10 {
             s.start_tool(format!("c{i}"), format!("tool{i}"), None, t0);
         }
-        assert_eq!(s.panel_height(), 5, "panel is capped at 5 rows");
+        assert_eq!(s.panel_height(), 6, "panel is capped at 6 rows");
     }
 
     #[test]
@@ -509,17 +719,123 @@ mod tests {
     }
 
     #[test]
+    fn child_agent_lifecycle_idempotent_and_status_updatable() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_child_agent("call_1", "thread_x", "turn_x", "do thing", t0);
+        // Duplicate spawn for the same child_thread_id is a no-op (defensive
+        // against duplicate ChildAgentSpawned events).
+        s.start_child_agent("call_1", "thread_x", "turn_x", "do thing", t0);
+        assert_eq!(s.child_agents().len(), 1);
+        assert_eq!(s.child_agents()[0].status, ChildAgentStatus::Running);
+
+        assert!(s.is_known_child_thread("thread_x"));
+        assert!(!s.is_known_child_thread("unrelated"));
+
+        s.set_child_agent_status_at("thread_x", ChildAgentStatus::Completed, t0);
+        assert_eq!(s.child_agents()[0].status, ChildAgentStatus::Completed);
+        assert_eq!(s.child_agents()[0].finished_at, Some(t0));
+
+        // Status update for unknown thread is a no-op.
+        s.set_child_agent_status("ghost", ChildAgentStatus::Failed);
+        assert_eq!(s.child_agents().len(), 1);
+    }
+
+    #[test]
+    fn child_agent_elapsed_freezes_after_terminal_status() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_child_agent("call_1", "thread_x", "turn_x", "do thing", t0);
+
+        assert_eq!(
+            s.child_agents()[0]
+                .elapsed(t0 + Duration::from_secs(7))
+                .as_secs(),
+            7
+        );
+
+        s.set_child_agent_status_at(
+            "thread_x",
+            ChildAgentStatus::Failed,
+            t0 + Duration::from_secs(3),
+        );
+
+        assert_eq!(
+            s.child_agents()[0]
+                .elapsed(t0 + Duration::from_secs(30))
+                .as_secs(),
+            3
+        );
+    }
+
+    #[test]
+    fn end_turn_clears_child_agents() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_child_agent("call_1", "thread_x", "turn_x", "do thing", t0);
+        s.end_turn();
+        assert!(s.child_agents().is_empty());
+    }
+
+    #[test]
+    fn panel_renders_child_agents_below_tools() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_tool("c1", "list_dir", None, t0);
+        s.start_tool("c2", "spawn_agent", None, t0);
+        s.start_child_agent("c2", "thread_a", "turn_a", "summarise main.rs", t0);
+        s.set_child_agent_status("thread_a", ChildAgentStatus::Running);
+        let rows = s.panel_rows(t0 + Duration::from_secs(2));
+        assert!(rows.iter().any(|r| r.contains("list_dir")));
+        assert!(rows.iter().all(|r| !r.contains("summarise main.rs")));
+    }
+
+    #[test]
+    fn panel_height_grows_with_child_agents() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        // One tool + two children → panel needs 3 rows.
+        s.start_tool("c1", "spawn_agent", None, t0);
+        s.start_child_agent("c1", "thread_a", "turn_a", "first", t0);
+        s.start_child_agent("c1", "thread_b", "turn_b", "second", t0);
+        assert_eq!(s.panel_height(), 0);
+    }
+
+    #[test]
+    fn header_groups_parallel_spawn_agents() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_tool("call_1", "spawn_agent", Some("first".into()), t0);
+        s.start_tool("call_2", "spawn_agent", Some("second".into()), t0);
+        s.start_child_agent("call_1", "thread_a", "turn_a", "first task", t0);
+
+        let line = s
+            .header_line(t0 + Duration::from_secs(5), "thinking")
+            .unwrap();
+        assert!(
+            line.contains("spawn_agent, spawn_agent (2 in flight, 5s)"),
+            "got {line:?}"
+        );
+    }
+
+    #[test]
     fn panel_rows_keeps_most_recent_when_overflowed() {
         let mut s = ActivityState::new();
         let t0 = Instant::now();
         s.start_turn(t0);
-        for i in 0..8 {
+        for i in 0..10 {
             s.start_tool(format!("c{i}"), format!("tool{i}"), None, t0);
         }
         let rows = s.panel_rows(t0);
-        assert_eq!(rows.len(), 5);
-        // First retained row should be tool3 (8 - 5 = skip 3); last is tool7.
-        assert!(rows[0].contains("tool3"), "got {:?}", rows[0]);
-        assert!(rows[4].contains("tool7"), "got {:?}", rows[4]);
+        assert_eq!(rows.len(), 6, "panel cap is 6 rows");
+        // First retained row should be tool4 (10 - 6 = skip 4); last is tool9.
+        assert!(rows[0].contains("tool4"), "got {:?}", rows[0]);
+        assert!(rows[5].contains("tool9"), "got {:?}", rows[5]);
     }
 }

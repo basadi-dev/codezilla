@@ -274,7 +274,7 @@ impl TurnExecutor {
                 .runtime
                 .inner
                 .model_gateway
-                .start_response(request)
+                .start_response(request, turn_ctx.cancel_token.clone())
                 .await?;
 
             let mut assistant_item_id: Option<String> = None;
@@ -369,6 +369,9 @@ impl TurnExecutor {
                         break;
                     }
                 }
+            }
+            if turn_ctx.cancel_token.is_cancelled() {
+                return self.complete_interrupted(&params.thread_id, &turn_id).await;
             }
 
             // ── Context-overflow auto-recovery ────────────────────────────────
@@ -613,8 +616,12 @@ impl TurnExecutor {
             let round_is_read_only = tool_calls.iter().all(|c| is_read_only_tool(&c.tool_name));
             let round_call_count = tool_calls.len();
 
-            let (had_any_success, round_file_changes) =
-                self.execute_tool_round(&turn_ctx, tool_calls).await?;
+            let (had_any_success, round_file_changes) = tokio::select! {
+                _ = turn_ctx.cancel_token.cancelled() => {
+                    return self.complete_interrupted(&params.thread_id, &turn_id).await;
+                }
+                result = self.execute_tool_round(&turn_ctx, tool_calls) => result?,
+            };
             completed_tool_rounds += 1;
             total_tool_calls += round_call_count;
             file_changes.extend(round_file_changes);

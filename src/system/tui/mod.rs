@@ -2,6 +2,7 @@ pub mod activity;
 pub mod app;
 pub mod approval;
 pub mod autocomplete;
+pub mod composer_history;
 pub mod input;
 pub mod markdown;
 pub mod render;
@@ -99,6 +100,7 @@ pub async fn run_interactive_tui(
         let spinner_active = app.active_turn_id.is_some() || app.pending_compact.is_some();
         if spinner_active && last_draw.elapsed() >= ACTIVE_POLL_INTERVAL {
             app.activity.tick();
+            let _ = app.refresh_live_sub_agent_sections();
             dirty = true;
         }
 

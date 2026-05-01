@@ -426,6 +426,12 @@ pub enum RuntimeEventKind {
     Warning,
     Disconnected,
     CompactionStatus,
+    /// Phase 7: a `spawn_agent` tool call has just kicked off a child turn.
+    /// The payload is `ChildAgentSpawnedPayload` and ties the child
+    /// thread/turn back to the parent's thread + `tool_call_id`. Lets the
+    /// TUI render a live activity tree without inferring the relationship
+    /// from `agent_depth` heuristics.
+    ChildAgentSpawned,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

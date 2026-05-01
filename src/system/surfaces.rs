@@ -163,38 +163,38 @@ impl ExecSurface {
                                 _ => {}
                             }
                         }
-                        OutputMode::Human => match event.kind {
-                            RuntimeEventKind::ItemUpdated => {
-                                if let Some(delta) =
-                                    event.payload.get("delta").and_then(|v| v.as_str())
-                                {
-                                    print!("{delta}");
-                                    io::stdout().flush()?;
-                                    last_message.push_str(delta);
+                        OutputMode::Human => {
+                            // Decode the payload through the typed surface so any
+                            // future shape change is a compile error here, not a
+                            // silently-dropped field.
+                            use crate::system::event_payload::RuntimeEventPayload;
+                            match event.parsed_payload().ok() {
+                                Some(RuntimeEventPayload::ItemUpdated(u)) => {
+                                    if let Some(delta) = u.delta.as_deref() {
+                                        print!("{delta}");
+                                        io::stdout().flush()?;
+                                        last_message.push_str(delta);
+                                    }
                                 }
-                            }
-                            RuntimeEventKind::ApprovalRequested => {
-                                bail!(
-                                    "approval required in exec mode for turn {}",
-                                    turn.turn.turn_id
-                                );
-                            }
-                            RuntimeEventKind::TurnCompleted => {
-                                if !matches!(self.output_mode, OutputMode::Jsonl) {
-                                    println!();
+                                Some(RuntimeEventPayload::ApprovalRequested(_)) => {
+                                    bail!(
+                                        "approval required in exec mode for turn {}",
+                                        turn.turn.turn_id
+                                    );
                                 }
-                                break 0;
-                            }
-                            RuntimeEventKind::TurnFailed => {
-                                if let Some(reason) =
-                                    event.payload.get("reason").and_then(|v| v.as_str())
-                                {
-                                    eprintln!("Error: {reason}");
+                                Some(RuntimeEventPayload::TurnCompleted(_)) => {
+                                    if !matches!(self.output_mode, OutputMode::Jsonl) {
+                                        println!();
+                                    }
+                                    break 0;
                                 }
-                                break 1;
+                                Some(RuntimeEventPayload::TurnFailed(p)) => {
+                                    eprintln!("Error: {}", p.reason);
+                                    break 1;
+                                }
+                                _ => {}
                             }
-                            _ => {}
-                        },
+                        }
                     }
                 }
                 None => break 1,

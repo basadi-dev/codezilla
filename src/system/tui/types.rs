@@ -141,6 +141,7 @@ pub struct TranscriptEntry {
     pub title: String,
     pub body: String,
     pub timestamp: Option<i64>,
+    pub completed_at: Option<i64>,
     pub pending: bool,
 }
 
@@ -645,6 +646,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or_default()
                 .to_string(),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
         ItemKind::SystemMessage => TranscriptEntry {
@@ -659,6 +661,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or_default()
                 .to_string(),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
         ItemKind::AgentMessage => TranscriptEntry {
@@ -673,18 +676,22 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or_default()
                 .to_string(),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
         ItemKind::ToolCall => TranscriptEntry {
             item_id: item.item_id.clone(),
             tool_call_id,
             kind: EntryKind::ToolCall,
-            title: item
-                .payload
-                .get("toolName")
-                .and_then(|v: &serde_json::Value| v.as_str())
-                .unwrap_or("tool")
-                .to_string(),
+            title: format_tool_call_title(
+                item.payload
+                    .get("toolName")
+                    .and_then(|v: &serde_json::Value| v.as_str())
+                    .unwrap_or("tool"),
+                item.payload
+                    .get("arguments")
+                    .unwrap_or(&serde_json::Value::Null),
+            ),
             body: format_tool_call(
                 item.payload
                     .get("toolName")
@@ -695,6 +702,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                     .unwrap_or(&serde_json::Value::Null),
             ),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
         ItemKind::ToolResult => TranscriptEntry {
@@ -704,6 +712,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             title: "result".into(),
             body: format_tool_result(item.payload.get("output"), item.payload.get("errorMessage")),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
         ItemKind::ReasoningSummary => TranscriptEntry {
@@ -719,6 +728,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or_else(|| item.payload.as_str().unwrap_or_default())
                 .to_string(),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
         ItemKind::ReasoningText => TranscriptEntry {
@@ -733,6 +743,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or_default()
                 .to_string(),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
         ItemKind::UserAttachment => TranscriptEntry {
@@ -747,6 +758,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or_default()
                 .to_string(),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
         ItemKind::Error => {
@@ -772,6 +784,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 title: kind_label,
                 body: message,
                 timestamp: Some(item.created_at),
+                completed_at: None,
                 pending: false,
             }
         }
@@ -814,6 +827,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 title: path.rsplit('/').next().unwrap_or(path).to_string(),
                 body,
                 timestamp: Some(item.created_at),
+                completed_at: None,
                 pending: false,
             }
         }
@@ -860,6 +874,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                     .to_string(),
                 body,
                 timestamp: Some(item.created_at),
+                completed_at: None,
                 pending: false,
             }
         }
@@ -896,6 +911,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 title: "output".into(),
                 body,
                 timestamp: Some(item.created_at),
+                completed_at: None,
                 pending: false,
             }
         }
@@ -906,6 +922,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             title: format!("{:?}", item.kind).to_lowercase(),
             body: pretty_json_or_text(Some(&item.payload), None),
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         },
     }
@@ -950,6 +967,7 @@ pub fn transcript_window_lines(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let body_width = (width as usize).saturating_sub(5).max(1); // "  │  " = 5 chars
     let end_line = start_line.saturating_add(max_lines);
+    let now_ts = chrono::Utc::now().timestamp();
     let mut line_index = 0usize;
     let mut prev_timestamp: Option<i64> = None;
     let mut prev_user_timestamp: Option<i64> = None;
@@ -970,6 +988,7 @@ pub fn transcript_window_lines(
                 entry_start,
                 prev_timestamp,
                 prev_user_timestamp,
+                now_ts,
             );
         }
 
@@ -1056,8 +1075,9 @@ fn append_transcript_entry_lines(
     start_line: usize,
     end_line: usize,
     entry_start: usize,
-    prev_timestamp: Option<i64>,
+    _prev_timestamp: Option<i64>,
     prev_user_timestamp: Option<i64>,
+    now_ts: i64,
 ) {
     let (sigil, sigil_color, body_color) = entry_style(entry.kind);
     let mut current_line = entry_start;
@@ -1085,15 +1105,15 @@ fn append_transcript_entry_lines(
                 format_timestamp(ts),
                 Style::default().fg(COLOR_MUTED),
             ));
-            // Show duration since previous entry
-            if let Some(prev_ts) = prev_timestamp {
-                let gap = ts - prev_ts;
-                if gap > 0 {
-                    header_spans.push(Span::styled(
-                        format!(" · {}", format_duration(gap)),
-                        Style::default().fg(COLOR_DIM),
-                    ));
-                }
+            // Show this entry's own elapsed time. Pending entries count up;
+            // completed entries keep their frozen completion duration.
+            if let Some(elapsed) =
+                entry_elapsed_secs(entry.timestamp, entry.completed_at, entry.pending, now_ts)
+            {
+                header_spans.push(Span::styled(
+                    format!(" · {}", format_duration(elapsed)),
+                    Style::default().fg(COLOR_DIM),
+                ));
             }
             // Show time since last user message (if this isn't a user message itself)
             if entry.kind != EntryKind::User {
@@ -1594,6 +1614,17 @@ pub fn format_duration(secs: i64) -> String {
         }
     }
 }
+
+pub fn entry_elapsed_secs(
+    timestamp: Option<i64>,
+    completed_at: Option<i64>,
+    pending: bool,
+    now: i64,
+) -> Option<i64> {
+    let start = timestamp?;
+    let end = completed_at.or_else(|| pending.then_some(now))?;
+    Some((end - start).max(0))
+}
 pub fn basename(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -1677,8 +1708,31 @@ pub fn pretty_json_or_text(primary: Option<&Value>, secondary: Option<&Value>) -
     String::new()
 }
 
+fn format_tool_call_title(tool_name: &str, arguments: &Value) -> String {
+    match tool_name {
+        "spawn_agent" => spawn_agent_label(arguments)
+            .map(|label| format!("sub-agent: {label}"))
+            .unwrap_or_else(|| "sub-agent".to_string()),
+        _ => tool_name.to_string(),
+    }
+}
+
 fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
     match tool_name {
+        "spawn_agent" => {
+            let mut lines = Vec::new();
+            if let Some(label) = spawn_agent_label(arguments) {
+                lines.push(format!("task: {label}"));
+            }
+            if let Some(timeout) = arguments.get("timeout_secs").and_then(Value::as_u64) {
+                lines.push(format!("timeout: {timeout}s"));
+            }
+            if lines.is_empty() {
+                pretty_json_or_text(Some(arguments), None)
+            } else {
+                lines.join("\n")
+            }
+        }
         "shell_exec" => {
             let mut lines = Vec::new();
             if let Some(argv) = arguments.get("argv").and_then(Value::as_array) {
@@ -1757,6 +1811,15 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
     }
 }
 
+fn spawn_agent_label(arguments: &Value) -> Option<String> {
+    let prompt = arguments.get("prompt").and_then(Value::as_str)?.trim();
+    if prompt.is_empty() {
+        return None;
+    }
+    let first_line = prompt.lines().find(|line| !line.trim().is_empty())?.trim();
+    Some(truncate_chars(first_line, 96))
+}
+
 pub fn format_tool_result(output: Option<&Value>, error_message: Option<&Value>) -> String {
     let Some(output) = output else {
         return pretty_json_or_text(None, error_message);
@@ -1792,7 +1855,101 @@ pub fn format_tool_result(output: Option<&Value>, error_message: Option<&Value>)
         return formatted;
     }
 
+    // spawn_agent deterministic-task redirect: no child thread is created.
+    if let Some(formatted) = format_spawn_agent_not_spawned_result(output) {
+        return formatted;
+    }
+
+    // spawn_agent results: {thread_id, turn_id, result, error?}
+    if let Some(formatted) = format_spawn_agent_result(output, error_message) {
+        return formatted;
+    }
+
     pretty_json_or_text(Some(output), error_message)
+}
+
+fn format_spawn_agent_not_spawned_result(output: &Value) -> Option<String> {
+    if output.get("status").and_then(Value::as_str) != Some("not_spawned") {
+        return None;
+    }
+
+    let reason = output
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("This task should use direct tools instead of a sub-agent.");
+    let mut lines = vec![
+        "status: not spawned".to_string(),
+        format!("reason: {reason}"),
+    ];
+
+    if let Some(tool) = output.get("suggested_tool").and_then(Value::as_str) {
+        lines.push(String::new());
+        lines.push(format!("suggested tool: {tool}"));
+    }
+    if let Some(args) = output.get("suggested_arguments") {
+        lines.push(format!(
+            "arguments: {}",
+            serde_json::to_string(args).unwrap_or_else(|_| args.to_string())
+        ));
+    }
+    if let Some(next) = output.get("next_step").and_then(Value::as_str) {
+        lines.push(format!("next: {next}"));
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn format_spawn_agent_result(output: &Value, error_message: Option<&Value>) -> Option<String> {
+    let thread_id = output
+        .get("thread_id")
+        .or_else(|| output.get("threadId"))
+        .and_then(Value::as_str)?;
+    let turn_id = output
+        .get("turn_id")
+        .or_else(|| output.get("turnId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let error = output.get("error").and_then(Value::as_str);
+    let status = match error {
+        Some("timeout") => "timed out",
+        Some("interrupted") => "interrupted",
+        Some(_) => "failed",
+        None => "completed",
+    };
+
+    let mut lines = vec![
+        format!("status: {status}"),
+        format!(
+            "thread: {}  turn: {}",
+            short_thread_id(thread_id),
+            short_turn_id(turn_id)
+        ),
+    ];
+
+    if let Some(message) = error_message.and_then(Value::as_str) {
+        if !message.trim().is_empty() {
+            lines.push(format!("error: {}", message.trim()));
+        }
+    }
+
+    let result = output
+        .get("result")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if !result.is_empty() {
+        lines.push(String::new());
+        if error == Some("timeout") {
+            lines.push("partial output before timeout:".to_string());
+        }
+        lines.push(summarise_long_output(
+            result,
+            TOOL_OUTPUT_MAX_LINES,
+            TOOL_OUTPUT_MAX_CHARS,
+        ));
+    }
+
+    Some(lines.join("\n"))
 }
 
 /// Format the result of a `write_file` call that carries a unified diff.
@@ -2084,6 +2241,16 @@ fn shell_escape(arg: &str) -> String {
     }
 }
 
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
 // ─── Output summarisation ─────────────────────────────────────────────────────
 
 /// Maximum lines shown for a single tool output block in the TUI.
@@ -2129,4 +2296,122 @@ pub fn summarise_long_output(text: &str, max_lines: usize, max_chars: usize) -> 
         line_count.saturating_sub(tail.lines().count())
     );
     format!("{notice}\n{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn spawn_agent_call_formats_as_sub_agent_task() {
+        let args = json!({
+            "prompt": "List the contents of `src` and summarize it.\nUse concise output.",
+            "timeout_secs": 60
+        });
+
+        assert_eq!(
+            format_tool_call_title("spawn_agent", &args),
+            "sub-agent: List the contents of `src` and summarize it."
+        );
+        let body = format_tool_call("spawn_agent", &args);
+        assert!(body.contains("task: List the contents"));
+        assert!(body.contains("timeout: 60s"));
+        assert!(
+            !body.contains("\"prompt\""),
+            "body should not be raw JSON: {body}"
+        );
+    }
+
+    #[test]
+    fn spawn_agent_result_formats_without_raw_json() {
+        let output = json!({
+            "thread_id": "thread_74a00930da5c485bb792e91bd85622c1",
+            "turn_id": "turn_8e6444c1fc7c4ac18e39353731b9dbe3",
+            "result": "The output was truncated at 300 entries.",
+            "error": "timeout"
+        });
+        let error = Value::from("sub-agent timed out after 120s");
+
+        let body = format_tool_result(Some(&output), Some(&error));
+        assert!(body.contains("status: timed out"));
+        assert!(body.contains("thread: 74a00930"));
+        assert!(body.contains("turn: 8e6444c1"));
+        assert!(body.contains("The output was truncated"));
+        assert!(
+            !body.contains("\"thread_id\""),
+            "body should not be raw JSON: {body}"
+        );
+    }
+
+    #[test]
+    fn spawn_agent_not_spawned_formats_as_redirect() {
+        let output = json!({
+            "status": "not_spawned",
+            "error": "deterministic_directory_inventory",
+            "reason": "Directory inventory is deterministic and should use direct file tools, not a model sub-agent.",
+            "suggested_tool": "list_dir",
+            "suggested_arguments": { "path": "bin", "depth": 3, "max_entries": 300 },
+            "next_step": "Call list_dir directly."
+        });
+
+        let body = format_tool_result(Some(&output), None);
+        assert!(body.contains("status: not spawned"));
+        assert!(body.contains("suggested tool: list_dir"));
+        assert!(body.contains("\"path\":\"bin\""));
+        assert!(
+            !body.contains("thread:"),
+            "no child thread should be shown: {body}"
+        );
+    }
+
+    #[test]
+    fn entry_elapsed_runs_for_pending_and_freezes_when_completed() {
+        assert_eq!(entry_elapsed_secs(Some(10), None, true, 14), Some(4));
+        assert_eq!(entry_elapsed_secs(Some(10), Some(12), false, 99), Some(2));
+        assert_eq!(entry_elapsed_secs(Some(10), None, false, 99), None);
+    }
+
+    #[test]
+    fn transcript_header_shows_entry_elapsed_not_previous_gap() {
+        let entries = vec![
+            TranscriptEntry {
+                item_id: "u1".into(),
+                tool_call_id: None,
+                kind: EntryKind::User,
+                title: "You".into(),
+                body: "go".into(),
+                timestamp: Some(10),
+                completed_at: None,
+                pending: false,
+            },
+            TranscriptEntry {
+                item_id: "a1".into(),
+                tool_call_id: None,
+                kind: EntryKind::Assistant,
+                title: "Codezilla".into(),
+                body: "done".into(),
+                timestamp: Some(15),
+                completed_at: Some(18),
+                pending: false,
+            },
+        ];
+
+        let (lines, _) = transcript_window_lines(&entries, 0, 120, None, 0, 10);
+        let assistant_header = lines
+            .iter()
+            .map(|line| {
+                let mut text = String::new();
+                for span in &line.spans {
+                    text.push_str(span.content.as_ref());
+                }
+                text
+            })
+            .find(|line| line.contains("Codezilla"))
+            .expect("assistant header should render");
+
+        assert!(assistant_header.contains(" · 3s"));
+        assert!(assistant_header.contains(" · +5s"));
+        assert!(!assistant_header.contains(" · 5s · +5s"));
+    }
 }

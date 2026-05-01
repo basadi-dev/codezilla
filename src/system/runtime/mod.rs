@@ -770,6 +770,59 @@ mod fake_model_tests {
     }
 
     #[tokio::test]
+    async fn spawn_agent_redirects_directory_inventory_to_direct_tools() {
+        let (runtime, _home) = build_runtime(vec![
+            ScriptedResponse::ToolCalls(vec![(
+                "spawn_agent".into(),
+                serde_json::json!({
+                    "prompt": "List the contents of the `bin` directory recursively (depth 3). For each file, note its path and type."
+                }),
+            )]),
+            ScriptedResponse::Text("Done.".into()),
+        ])
+        .await;
+
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "inventory bin").await;
+        assert_eq!(evt.kind, RuntimeEventKind::TurnCompleted, "got {:?}", evt);
+
+        let read = runtime
+            .read_thread(ThreadReadParams { thread_id })
+            .await
+            .unwrap();
+        let tool_result = read
+            .thread
+            .items
+            .iter()
+            .find(|i| i.kind == ItemKind::ToolResult)
+            .expect("tool result item missing");
+
+        assert_eq!(
+            tool_result.payload.get("ok").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        let output = tool_result.payload.get("output").unwrap();
+        assert_eq!(
+            output.get("status").and_then(|v| v.as_str()),
+            Some("not_spawned")
+        );
+        assert_eq!(
+            output.get("suggested_tool").and_then(|v| v.as_str()),
+            Some("list_dir")
+        );
+        assert_eq!(
+            output
+                .get("suggested_arguments")
+                .and_then(|v| v.get("path"))
+                .and_then(|v| v.as_str()),
+            Some("bin")
+        );
+        assert!(
+            output.get("thread_id").is_none(),
+            "redirect should not spawn a child thread: {output}"
+        );
+    }
+
+    #[tokio::test]
     async fn bash_exec_blocks_on_approval_and_denied_short_circuits() {
         // OnRequest is the default; bash_exec maps to SandboxEscalation,
         // so the executor must wait for a resolution before running the tool.
@@ -1330,5 +1383,118 @@ mod fake_model_tests {
         );
         assert_eq!(std::fs::read_to_string(&path_a).unwrap(), "ORIG-A");
         assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "ORIG-B");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_publishes_child_agent_spawned_event() {
+        // Drive a parent turn that calls spawn_agent. The supervisor should
+        // emit a `ChildAgentSpawned` event tying the child thread/turn back
+        // to the parent's tool_call_id, so the TUI's activity tree can pick
+        // it up.
+        let (runtime, _home) = build_runtime(vec![
+            ScriptedResponse::ToolCalls(vec![(
+                "spawn_agent".into(),
+                serde_json::json!({ "prompt": "summarise main.rs" }),
+            )]),
+            ScriptedResponse::Text("done".into()),
+            // The child agent's fake-model script: it shares the same
+            // FakeLlmClient queue as the parent, so the child consumes the
+            // next entry. One Empty response → child fails fast on
+            // empty_response, which is fine for this test (we only care
+            // about the spawn event firing).
+            ScriptedResponse::Empty,
+            ScriptedResponse::Empty,
+        ])
+        .await;
+
+        let mut sub = runtime.event_bus().subscribe(
+            "spawn-test".into(),
+            crate::system::agent::EventFilter { thread_id: None },
+        );
+
+        let started = runtime
+            .start_thread(ThreadStartParams {
+                cwd: Some(runtime.inner.effective_config.working_directory.clone()),
+                model_settings: None,
+                approval_policy: None,
+                permission_profile: None,
+                ephemeral: true,
+            })
+            .await
+            .unwrap();
+        runtime
+            .start_turn(
+                TurnStartParams {
+                    thread_id: started.metadata.thread_id.clone(),
+                    input: vec![UserInput::from_text("kick off")],
+                    cwd: None,
+                    model_settings: None,
+                    approval_policy: None,
+                    permission_profile: None,
+                    output_schema: None,
+                    agent_depth: 0,
+                },
+                SurfaceKind::Exec,
+            )
+            .await
+            .unwrap();
+
+        // Wait for the spawn event to fire.
+        let mut spawn_payload = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for ChildAgentSpawned"
+            );
+            match tokio::time::timeout(remaining, sub.receiver.recv()).await {
+                Ok(Some(evt)) => {
+                    if evt.kind == RuntimeEventKind::ChildAgentSpawned {
+                        spawn_payload = Some(evt.payload.clone());
+                        break;
+                    }
+                    if evt.kind == RuntimeEventKind::TurnCompleted
+                        && evt.thread_id.as_deref() == Some(started.metadata.thread_id.as_str())
+                    {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        let payload = spawn_payload.expect("ChildAgentSpawned event was not emitted");
+        // The parent thread/turn should match what we started.
+        assert_eq!(
+            payload.get("parentThreadId").and_then(|v| v.as_str()),
+            Some(started.metadata.thread_id.as_str())
+        );
+        assert!(payload.get("parentToolCallId").is_some());
+        assert!(payload.get("childThreadId").is_some());
+        assert!(payload.get("childTurnId").is_some());
+        let label = payload
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(label.contains("summarise"), "label was {label:?}");
+
+        // Typed payload also decodes.
+        use crate::system::event_payload::RuntimeEventPayload;
+        let evt = RuntimeEvent {
+            event_id: "x".into(),
+            kind: RuntimeEventKind::ChildAgentSpawned,
+            thread_id: Some(started.metadata.thread_id.clone()),
+            turn_id: None,
+            sequence: 0,
+            payload: payload.clone(),
+            emitted_at: 0,
+        };
+        match evt.parsed_payload().unwrap() {
+            RuntimeEventPayload::ChildAgentSpawned(p) => {
+                assert_eq!(p.parent_thread_id, started.metadata.thread_id);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

@@ -343,7 +343,7 @@ impl ToolProvider for ListDirToolProvider {
                     },
                     "depth": {
                         "type": "integer",
-                        "description": "Max recursion depth: 1 = immediate children only, 0 = unlimited. Default: 1."
+                        "description": "Max recursion depth: 1 = immediate children only, 0 = unlimited. Default: 1. Avoid depth 0 in large repositories unless also using pattern/max_entries and a partial listing is acceptable."
                     },
                     "include_hidden": {
                         "type": "boolean",

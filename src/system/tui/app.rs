@@ -22,12 +22,13 @@ use super::super::runtime::{
     ThreadListParams, ThreadReadParams, ThreadResumeParams, ThreadStartParams, TurnInterruptParams,
     TurnStartParams, TurnSteerParams,
 };
+use super::activity::ChildAgentStatus;
 use super::types::{
-    basename, entry_from_item, entry_style, format_timestamp, format_tool_result, is_diff_body,
-    is_read_file_body, relative_time_ago, render_diff_chunk, render_read_file_body_lines,
-    short_turn_id, split_at_width, thread_label, transcript_lines, AutocompleteItem, ComposerState,
-    EntryKind, FocusPane, PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry,
-    COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
+    basename, entry_elapsed_secs, entry_from_item, entry_style, format_timestamp,
+    format_tool_result, is_diff_body, is_read_file_body, relative_time_ago, render_diff_chunk,
+    render_read_file_body_lines, short_turn_id, spinner_frame, split_at_width, thread_label,
+    transcript_lines, AutocompleteItem, ComposerState, EntryKind, FocusPane, PendingApprovalView,
+    SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
 };
 
 /// Sentinel item-id for the "thinking" placeholder injected immediately after
@@ -39,6 +40,7 @@ struct CachedTranscriptEntry {
     kind: EntryKind,
     title: String,
     timestamp: Option<i64>,
+    completed_at: Option<i64>,
     pending: bool,
     /// For markdown entries (Assistant/Summary/Reasoning), stores the original
     /// raw body text so the renderer can call md_to_lines each frame.
@@ -106,9 +108,7 @@ pub struct InteractiveApp {
     pub autocomplete: super::autocomplete::AutocompleteState,
     /// Per-session model/reasoning override (None = use thread metadata + config defaults).
     pub model_settings_override: Option<super::super::domain::ModelSettings>,
-    composer_history: Vec<String>,
-    composer_history_index: Option<usize>,
-    composer_history_saved_input: Option<String>,
+    composer_history: super::composer_history::ComposerHistoryState,
     /// Background compaction task result receiver. Set when /compact is running.
     pub(super) pending_compact: Option<oneshot::Receiver<anyhow::Result<ThreadCompactResult>>>,
 }
@@ -152,9 +152,7 @@ impl InteractiveApp {
             },
             autocomplete: super::autocomplete::AutocompleteState::new(),
             model_settings_override: None,
-            composer_history: Vec::new(),
-            composer_history_index: None,
-            composer_history_saved_input: None,
+            composer_history: super::composer_history::ComposerHistoryState::new(),
             pending_compact: None,
         };
         app.refresh_threads().await?;
@@ -201,7 +199,7 @@ impl InteractiveApp {
         self.transcript.clear();
         self.transcript_index.clear();
         for item in &persisted.items {
-            self.upsert_transcript_entry(entry_from_item(item));
+            self.upsert_loaded_item(item);
         }
         self.active_turn_id = persisted
             .turns
@@ -229,7 +227,8 @@ impl InteractiveApp {
         self.transcript_view.jump_to_bottom();
         self.error_message = None;
         self.reset_composer_history_navigation();
-        self.composer_history = self.build_composer_history(&persisted).await?;
+        self.composer_history
+            .replace_history(self.build_composer_history(&persisted).await?);
         self.status_message = format!("Opened {}", thread_label(&persisted.metadata));
         Ok(())
     }
@@ -901,6 +900,7 @@ impl InteractiveApp {
                 title: "You".into(),
                 body: raw.clone(),
                 timestamp: Some(ts),
+                completed_at: None,
                 pending: true,
             });
         }
@@ -940,57 +940,35 @@ impl InteractiveApp {
     }
 
     pub fn composer_history_prev(&mut self) -> bool {
-        if self.composer_history.is_empty() {
-            return false;
+        use super::composer_history::HistoryNavigation;
+        let current = self.composer.text().to_string();
+        match self.composer_history.prev(&current) {
+            HistoryNavigation::Empty => false,
+            HistoryNavigation::Set(text) | HistoryNavigation::Restore(text) => {
+                self.composer.set_text(text);
+                true
+            }
         }
-
-        let next_index = match self.composer_history_index {
-            Some(index) => index.saturating_sub(1),
-            None => self.composer_history.len() - 1,
-        };
-
-        if self.composer_history_index.is_none() {
-            self.composer_history_saved_input = Some(self.composer.text().to_string());
-        }
-
-        self.composer_history_index = Some(next_index);
-        self.composer
-            .set_text(self.composer_history[next_index].clone());
-        true
     }
 
     pub fn composer_history_next(&mut self) -> bool {
-        if self.composer_history.is_empty() {
-            return false;
+        use super::composer_history::HistoryNavigation;
+        let current = self.composer.text().to_string();
+        match self.composer_history.next(&current) {
+            HistoryNavigation::Empty => false,
+            HistoryNavigation::Set(text) | HistoryNavigation::Restore(text) => {
+                self.composer.set_text(text);
+                true
+            }
         }
-
-        let Some(index) = self.composer_history_index else {
-            self.composer_history_saved_input = Some(self.composer.text().to_string());
-            self.composer_history_index = Some(0);
-            self.composer.set_text(self.composer_history[0].clone());
-            return true;
-        };
-
-        if index + 1 < self.composer_history.len() {
-            let next_index = index + 1;
-            self.composer_history_index = Some(next_index);
-            self.composer
-                .set_text(self.composer_history[next_index].clone());
-        } else {
-            let restored = self.composer_history_saved_input.take().unwrap_or_default();
-            self.composer_history_index = None;
-            self.composer.set_text(restored);
-        }
-        true
     }
 
     pub fn composer_history_active(&self) -> bool {
-        self.composer_history_index.is_some()
+        self.composer_history.is_active()
     }
 
     pub fn reset_composer_history_navigation(&mut self) {
-        self.composer_history_index = None;
-        self.composer_history_saved_input = None;
+        self.composer_history.reset_navigation();
     }
 
     async fn build_composer_history(
@@ -1002,11 +980,11 @@ impl InteractiveApp {
             return Ok(current);
         }
 
-        if let Some(previous_thread) = self
+        for previous_thread in self
             .threads
             .threads()
             .iter()
-            .find(|thread| thread.thread_id != persisted.metadata.thread_id)
+            .filter(|thread| thread.thread_id != persisted.metadata.thread_id)
         {
             let fallback = self
                 .runtime
@@ -1421,6 +1399,38 @@ impl InteractiveApp {
         }
 
         if event.thread_id.as_deref() != Some(self.current_thread_id.as_str()) {
+            // Route child-thread lifecycle events back into the parent
+            // transcript entry so sub-agent progress stays transcript-native.
+            if let Some(child_thread) = event.thread_id.as_deref() {
+                if let Some(child) = self.activity.child_agent_for_thread(child_thread).cloned() {
+                    match event.kind {
+                        RuntimeEventKind::TurnCompleted => {
+                            let status = match event.payload.get("status").and_then(Value::as_str) {
+                                Some("Interrupted") => ChildAgentStatus::Interrupted,
+                                _ => ChildAgentStatus::Completed,
+                            };
+                            self.activity.set_child_agent_status(child_thread, status);
+                            self.upsert_sub_agent_transcript_status(
+                                &child.parent_tool_call_id,
+                                child_thread,
+                                &child.label,
+                                status,
+                            );
+                        }
+                        RuntimeEventKind::TurnFailed => {
+                            self.activity
+                                .set_child_agent_status(child_thread, ChildAgentStatus::Failed);
+                            self.upsert_sub_agent_transcript_status(
+                                &child.parent_tool_call_id,
+                                child_thread,
+                                &child.label,
+                                ChildAgentStatus::Failed,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
             return Ok(());
         }
 
@@ -1582,6 +1592,57 @@ impl InteractiveApp {
                     .unwrap_or("Compacting…");
                 self.status_message = msg.to_string();
             }
+            RuntimeEventKind::ChildAgentSpawned => {
+                // Sub-agent visibility: register the child in the activity
+                // tree so the panel can render its lifecycle. Subsequent
+                // TurnCompleted/TurnFailed events on the child's thread_id
+                // will update the status (handled at the top of this match).
+                let parent = event
+                    .payload
+                    .get("parentThreadId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if parent != self.current_thread_id {
+                    return Ok(());
+                }
+                let parent_call = event
+                    .payload
+                    .get("parentToolCallId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let child_tid = event
+                    .payload
+                    .get("childThreadId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let child_turn = event
+                    .payload
+                    .get("childTurnId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let label = event
+                    .payload
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("agent")
+                    .to_string();
+                self.activity.start_child_agent(
+                    parent_call.clone(),
+                    child_tid.clone(),
+                    child_turn,
+                    label.clone(),
+                    std::time::Instant::now(),
+                );
+                self.upsert_sub_agent_transcript_status(
+                    &parent_call,
+                    &child_tid,
+                    &label,
+                    ChildAgentStatus::Running,
+                );
+            }
         }
 
         Ok(())
@@ -1626,6 +1687,7 @@ impl InteractiveApp {
                 title: title.into(),
                 body: String::new(),
                 timestamp: Some(event.emitted_at / 1000),
+                completed_at: None,
                 pending: true,
             });
         }
@@ -1726,6 +1788,7 @@ impl InteractiveApp {
                 title: "Codezilla".into(),
                 body: delta.to_string(),
                 timestamp: Some(event.emitted_at / 1000),
+                completed_at: None,
                 pending: true,
             });
         }
@@ -1741,31 +1804,23 @@ impl InteractiveApp {
         let item = serde_json::from_value::<ConversationItem>(event.payload.clone())?;
         if item.kind == ItemKind::ToolResult {
             let result = serde_json::from_value::<ToolResult>(item.payload.clone())?;
+            self.apply_spawn_agent_result_status(&result);
             if tool_result_failed(&result) {
+                self.finish_tool_call_entry(
+                    &result.tool_call_id,
+                    item.created_at,
+                    Some(tool_result_status_suffix(&result)),
+                );
                 self.upsert_transcript_entry(self.failed_tool_result_entry(&item, &result));
             } else {
                 // Merge the result into its matching ToolCall entry in-place so that
                 // the call and result appear as a single cohesive transcript block.
                 // This avoids the separate ToolResult entry and keeps the cache consistent.
-                let result_body = format_tool_result(
-                    item.payload.get("output"),
-                    item.payload.get("errorMessage"),
-                );
                 if let Some(call_idx) = self.transcript.iter().rposition(|e| {
                     e.kind == EntryKind::ToolCall
                         && e.tool_call_id.as_deref() == Some(result.tool_call_id.as_str())
                 }) {
-                    let call = &mut self.transcript[call_idx];
-                    if !call.body.ends_with('\n') {
-                        call.body.push('\n');
-                    }
-                    call.body.push_str("─── result ───\n");
-                    call.body.push_str(&result_body);
-                    call.title = format!("{} → done", call.title);
-                    call.pending = false;
-                    self.invalidate_transcript_cache();
-                    // Remove any Approval status entries that were inserted after the call.
-                    self.remove_approval_entries_after(call_idx);
+                    self.merge_tool_result_into_call(call_idx, &item, &result);
                 } else {
                     // No matching call found — fall back to standalone result entry.
                     self.remove_latest_tool_context_entries();
@@ -1775,6 +1830,11 @@ impl InteractiveApp {
             // Remove this tool from the in-flight tracker; the reducer keeps
             // any other tools that started in the same parallel batch alive.
             self.activity.finish_tool(&result.tool_call_id);
+        } else if matches!(item.kind, ItemKind::ToolCall) {
+            let mut entry = entry_from_item(&item);
+            entry.pending = true;
+            self.start_tool_activity_from_item(&item);
+            self.upsert_transcript_entry(entry);
         } else if matches!(item.kind, ItemKind::AgentMessage) {
             self.upsert_transcript_entry(entry_from_item(&item));
             self.activity.set_streaming(false);
@@ -1790,8 +1850,115 @@ impl InteractiveApp {
         Ok(())
     }
 
-    pub fn upsert_transcript_entry(&mut self, entry: TranscriptEntry) {
+    fn upsert_loaded_item(&mut self, item: &ConversationItem) {
+        if item.kind == ItemKind::ToolResult {
+            if let Ok(result) = serde_json::from_value::<ToolResult>(item.payload.clone()) {
+                if let Some(call_idx) = self.transcript.iter().rposition(|e| {
+                    e.kind == EntryKind::ToolCall
+                        && e.tool_call_id.as_deref() == Some(result.tool_call_id.as_str())
+                }) {
+                    if tool_result_failed(&result) {
+                        self.finish_tool_call_entry(
+                            &result.tool_call_id,
+                            item.created_at,
+                            Some(tool_result_status_suffix(&result)),
+                        );
+                        self.upsert_transcript_entry(self.failed_tool_result_entry(item, &result));
+                    } else {
+                        self.merge_tool_result_into_call(call_idx, item, &result);
+                    }
+                    return;
+                }
+            }
+        }
+
+        self.upsert_transcript_entry(entry_from_item(item));
+    }
+
+    fn merge_tool_result_into_call(
+        &mut self,
+        call_idx: usize,
+        item: &ConversationItem,
+        result: &ToolResult,
+    ) {
+        let result_body =
+            format_tool_result(item.payload.get("output"), item.payload.get("errorMessage"));
+        let suffix = if tool_result_not_spawned(result) {
+            "skipped"
+        } else {
+            "done"
+        };
+
+        {
+            let call = &mut self.transcript[call_idx];
+            if !call.body.ends_with('\n') {
+                call.body.push('\n');
+            }
+            call.body.push_str("─── result ───\n");
+            call.body.push_str(&result_body);
+            call.title = title_with_status_suffix(&call.title, suffix);
+            call.pending = false;
+            call.completed_at = Some(item.created_at);
+        }
+        self.invalidate_transcript_cache();
+        // Remove any Approval status entries that were inserted after the call.
+        self.remove_approval_entries_after(call_idx);
+    }
+
+    fn finish_tool_call_entry(
+        &mut self,
+        tool_call_id: &str,
+        completed_at: i64,
+        suffix: Option<&str>,
+    ) {
+        let Some(call_idx) = self.transcript.iter().rposition(|e| {
+            e.kind == EntryKind::ToolCall && e.tool_call_id.as_deref() == Some(tool_call_id)
+        }) else {
+            return;
+        };
+
+        let call = &mut self.transcript[call_idx];
+        if let Some(suffix) = suffix {
+            call.title = title_with_status_suffix(&call.title, suffix);
+        }
+        call.pending = false;
+        call.completed_at = Some(completed_at);
+        self.invalidate_transcript_cache();
+    }
+
+    fn start_tool_activity_from_item(&mut self, item: &ConversationItem) {
+        let tool_name = item
+            .payload
+            .get("toolName")
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        let tool_call_id = item
+            .payload
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or(item.item_id.as_str());
+        let hint = tool_hint_from_arguments(item.payload.get("arguments"));
+
+        self.activity.start_tool(
+            tool_call_id,
+            tool_name,
+            hint.clone(),
+            std::time::Instant::now(),
+        );
+        self.status_message = match hint {
+            Some(h) => format!("⚙ {tool_name} {h}…"),
+            None => format!("⚙ {tool_name}…"),
+        };
+        self.error_message = None;
+    }
+
+    pub fn upsert_transcript_entry(&mut self, mut entry: TranscriptEntry) {
         if let Some(index) = self.transcript_index.get(&entry.item_id).copied() {
+            let previous = &self.transcript[index];
+            if previous.pending && !entry.pending {
+                entry.completed_at = entry.completed_at.or(entry.timestamp);
+                entry.timestamp = previous.timestamp.or(entry.timestamp);
+            }
             self.transcript[index] = entry;
         } else {
             let index = self.transcript.len();
@@ -1816,6 +1983,7 @@ impl InteractiveApp {
             title: title.into(),
             body: body.into(),
             timestamp,
+            completed_at: None,
             pending: false,
         });
         // Do NOT force auto_scroll — respect user scroll position.
@@ -1932,6 +2100,7 @@ impl InteractiveApp {
 
         let end_line = start_line.saturating_add(max_lines);
         let body_width = (width as usize).saturating_sub(5).max(1);
+        let now_ts = chrono::Utc::now().timestamp();
         let first_entry = self
             .transcript_render_cache
             .line_ends
@@ -1957,6 +2126,7 @@ impl InteractiveApp {
                 entry_start,
                 prev_timestamp,
                 prev_user_timestamp,
+                now_ts,
             );
             // Track timestamps for duration/gap calculations
             if entry.timestamp.is_some() {
@@ -2044,11 +2214,331 @@ impl InteractiveApp {
             item_id: item.item_id.clone(),
             tool_call_id: Some(result.tool_call_id.clone()),
             kind: EntryKind::Error,
-            title: format!("{tool_name} failed"),
+            title: failed_tool_title(&tool_name, result),
             body,
             timestamp: Some(item.created_at),
+            completed_at: None,
             pending: false,
         }
+    }
+
+    fn apply_spawn_agent_result_status(&mut self, result: &ToolResult) {
+        let Some(child_thread_id) = result
+            .output
+            .get("thread_id")
+            .or_else(|| result.output.get("threadId"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        else {
+            return;
+        };
+        let child_turn_id = result
+            .output
+            .get("turn_id")
+            .or_else(|| result.output.get("turnId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        if !self.activity.is_known_child_thread(&child_thread_id) {
+            self.activity.start_child_agent(
+                result.tool_call_id.clone(),
+                child_thread_id.clone(),
+                child_turn_id,
+                "sub-agent",
+                std::time::Instant::now(),
+            );
+        }
+
+        let error = result
+            .output
+            .get("error")
+            .and_then(Value::as_str)
+            .or(result.error_message.as_deref());
+        let status = if result.ok {
+            ChildAgentStatus::Completed
+        } else {
+            match error {
+                Some("timeout") => ChildAgentStatus::TimedOut,
+                Some("interrupted") => ChildAgentStatus::Interrupted,
+                _ => ChildAgentStatus::Failed,
+            }
+        };
+        self.activity.set_child_agent_status(&child_thread_id, status);
+        let label = self
+            .activity
+            .child_agent_for_thread(&child_thread_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_else(|| "sub-agent".to_string());
+        self.upsert_sub_agent_transcript_status(
+            &result.tool_call_id,
+            &child_thread_id,
+            &label,
+            status,
+        );
+    }
+
+    fn upsert_sub_agent_transcript_status(
+        &mut self,
+        parent_tool_call_id: &str,
+        child_thread_id: &str,
+        label: &str,
+        status: ChildAgentStatus,
+    ) {
+        let Some(call_idx) = self.transcript.iter().rposition(|e| {
+            e.kind == EntryKind::ToolCall
+                && e.tool_call_id.as_deref() == Some(parent_tool_call_id)
+        }) else {
+            return;
+        };
+
+        let call = &mut self.transcript[call_idx];
+        let mut children = self
+            .activity
+            .child_agents()
+            .iter()
+            .filter(|c| c.parent_tool_call_id == parent_tool_call_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if children.is_empty() {
+            // Defensive fallback when event ordering races before activity
+            // registration catches up.
+            children.push(super::activity::ChildAgentActivity {
+                parent_tool_call_id: parent_tool_call_id.to_string(),
+                child_thread_id: child_thread_id.to_string(),
+                child_turn_id: String::new(),
+                label: label.to_string(),
+                status,
+                started_at: std::time::Instant::now(),
+                finished_at: None,
+            });
+        }
+
+        let running = children
+            .iter()
+            .filter(|c| matches!(c.status, ChildAgentStatus::Running))
+            .count();
+        let done = children
+            .iter()
+            .filter(|c| matches!(c.status, ChildAgentStatus::Completed))
+            .count();
+        let failed = children
+            .iter()
+            .filter(|c| matches!(c.status, ChildAgentStatus::Failed))
+            .count();
+        let timed_out = children
+            .iter()
+            .filter(|c| matches!(c.status, ChildAgentStatus::TimedOut))
+            .count();
+        let interrupted = children
+            .iter()
+            .filter(|c| matches!(c.status, ChildAgentStatus::Interrupted))
+            .count();
+        let finished = done + failed + timed_out + interrupted;
+        let total = children.len().max(1);
+        let now = std::time::Instant::now();
+
+        let bar_width = 10usize;
+        let filled = (finished * bar_width) / total;
+        let bar = format!(
+            "{}{}",
+            "█".repeat(filled),
+            "░".repeat(bar_width.saturating_sub(filled))
+        );
+
+        let mut section_lines = vec![
+            "─── sub-agents ───".to_string(),
+            format!(
+                "{total} total • {running} running • {} done • {} issues",
+                done,
+                failed + timed_out + interrupted
+            ),
+            format!("[{bar}] {finished}/{total}"),
+        ];
+
+        for child in &children {
+            if matches!(child.status, ChildAgentStatus::Completed) {
+                continue;
+            }
+            let status_text = match child.status {
+                ChildAgentStatus::Running => {
+                    let frame = spinner_frame(self.activity.spinner_tick());
+                    let elapsed = child.elapsed(now).as_secs();
+                    if elapsed >= 45 {
+                        section_lines.push(format!(
+                            "- [{}] {} {} • running • {}s • stuck",
+                            child.child_thread_id,
+                            frame,
+                            truncate_chars(&child.label, 78),
+                            elapsed
+                        ));
+                    } else {
+                        section_lines.push(format!(
+                            "- [{}] {} {} • running • {}s",
+                            child.child_thread_id,
+                            frame,
+                            truncate_chars(&child.label, 78),
+                            elapsed
+                        ));
+                    }
+                    continue;
+                }
+                ChildAgentStatus::Completed => "done",
+                ChildAgentStatus::Failed => "failed",
+                ChildAgentStatus::Interrupted => "interrupted",
+                ChildAgentStatus::TimedOut => "timed out",
+            };
+            let status_icon = match child.status {
+                ChildAgentStatus::Running => "⠋",
+                ChildAgentStatus::Completed => "✓",
+                ChildAgentStatus::Failed => "✗",
+                ChildAgentStatus::Interrupted => "◌",
+                ChildAgentStatus::TimedOut => "⏱",
+            };
+            let elapsed_secs = child.elapsed(now).as_secs();
+            section_lines.push(format!(
+                "- [{}] {} {} • {} • {}s",
+                child.child_thread_id,
+                status_icon,
+                truncate_chars(&child.label, 78),
+                status_text,
+                elapsed_secs
+            ));
+        }
+
+        if done > 0 {
+            section_lines.push(format!("- ✓ {done} finished hidden (collapsed)"));
+        }
+        section_lines.push("─── end sub-agents ───".to_string());
+
+        let section = format!("{}\n", section_lines.join("\n"));
+        let existing = call.body.clone();
+        let result_marker = "─── result ───";
+        let start_marker = "─── sub-agents ───";
+        let end_marker = "─── end sub-agents ───";
+
+        let mut rebuilt = if let Some(start) = existing.find(start_marker) {
+            let end = existing
+                .find(end_marker)
+                .map(|idx| idx + end_marker.len())
+                .unwrap_or(start);
+            let mut s = String::new();
+            s.push_str(&existing[..start]);
+            s.push_str(&section);
+            if end < existing.len() {
+                if !s.ends_with('\n') {
+                    s.push('\n');
+                }
+                s.push_str(existing[end..].trim_start_matches('\n'));
+            }
+            s
+        } else if let Some(result_idx) = existing.find(result_marker) {
+            let mut s = String::new();
+            s.push_str(&existing[..result_idx]);
+            if !s.is_empty() && !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s.push_str(&section);
+            s.push_str(&existing[result_idx..]);
+            s
+        } else {
+            let mut s = existing;
+            if !s.is_empty() && !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s.push_str(&section);
+            s
+        };
+
+        if !rebuilt.ends_with('\n') {
+            rebuilt.push('\n');
+        }
+        call.body = rebuilt;
+        self.invalidate_transcript_cache();
+    }
+
+    pub fn refresh_live_sub_agent_sections(&mut self) -> bool {
+        let running = self
+            .activity
+            .child_agents()
+            .iter()
+            .any(|c| matches!(c.status, ChildAgentStatus::Running));
+        if !running {
+            return false;
+        }
+
+        let mut changed = false;
+        let mut seen = std::collections::HashSet::new();
+        let children = self.activity.child_agents().to_vec();
+        for child in &children {
+            if !seen.insert(child.parent_tool_call_id.clone()) {
+                continue;
+            }
+            self.upsert_sub_agent_transcript_status(
+                &child.parent_tool_call_id,
+                &child.child_thread_id,
+                &child.label,
+                child.status,
+            );
+            changed = true;
+        }
+        changed
+    }
+}
+
+fn failed_tool_title(tool_name: &str, result: &ToolResult) -> String {
+    let tool_name = tool_name
+        .split_once(" → ")
+        .map(|(base, _)| base)
+        .unwrap_or(tool_name);
+    match result.output.get("error").and_then(Value::as_str) {
+        Some("timeout") => format!("{tool_name} timed out"),
+        Some("interrupted") => format!("{tool_name} interrupted"),
+        _ => format!("{tool_name} failed"),
+    }
+}
+
+fn tool_result_status_suffix(result: &ToolResult) -> &'static str {
+    match result.output.get("error").and_then(Value::as_str) {
+        Some("timeout") => "timed out",
+        Some("interrupted") => "interrupted",
+        _ => "failed",
+    }
+}
+
+fn title_with_status_suffix(title: &str, suffix: &str) -> String {
+    let base = title
+        .split_once(" → ")
+        .map(|(base, _)| base)
+        .unwrap_or(title);
+    format!("{base} → {suffix}")
+}
+
+fn tool_hint_from_arguments(arguments: Option<&Value>) -> Option<String> {
+    arguments
+        .and_then(|a| {
+            a.get("path")
+                .or_else(|| a.get("command"))
+                .or_else(|| a.get("pattern"))
+        })
+        .and_then(Value::as_str)
+        .map(|s| {
+            let short = s.rsplit('/').next().unwrap_or(s);
+            if short.len() > 40 {
+                format!("{}…", &short[..37])
+            } else {
+                short.to_string()
+            }
+        })
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
 
@@ -2168,6 +2658,7 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             kind: entry.kind,
             title,
             timestamp: entry.timestamp,
+            completed_at: entry.completed_at,
             pending: entry.pending,
             raw_body,
             body_lines,
@@ -2189,9 +2680,15 @@ fn extract_user_message_history(items: &[ConversationItem]) -> Vec<String> {
         .iter()
         .filter(|item| item.kind == ItemKind::UserMessage)
         .filter_map(|item| item.payload.get("text").and_then(Value::as_str))
-        .filter(|text| !text.trim().is_empty())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .filter(|text| !is_synthetic_sub_agent_prompt(text))
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn is_synthetic_sub_agent_prompt(text: &str) -> bool {
+    text.starts_with("You are running as a bounded sub-agent.")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2203,8 +2700,9 @@ fn append_cached_transcript_entry_lines(
     start_line: usize,
     end_line: usize,
     entry_start: usize,
-    prev_timestamp: Option<i64>,
-    prev_user_timestamp: Option<i64>,
+    _prev_timestamp: Option<i64>,
+    _prev_user_timestamp: Option<i64>,
+    now_ts: i64,
 ) {
     let (sigil, sigil_color, body_color) = entry_style(entry.kind);
     let mut current_line = entry_start;
@@ -2233,27 +2731,15 @@ fn append_cached_transcript_entry_lines(
                 format_timestamp(ts),
                 Style::default().fg(COLOR_MUTED),
             ));
-            // Show duration since previous entry
-            if let Some(prev_ts) = prev_timestamp {
-                let gap = ts - prev_ts;
-                if gap > 0 {
-                    header_spans.push(Span::styled(
-                        format!(" · {}", super::types::format_duration(gap)),
-                        Style::default().fg(super::types::COLOR_DIM),
-                    ));
-                }
-            }
-            // Show time since last user message (if this isn't a user message itself)
-            if entry.kind != EntryKind::User {
-                if let Some(user_ts) = prev_user_timestamp {
-                    let since_user = ts - user_ts;
-                    if since_user > 0 {
-                        header_spans.push(Span::styled(
-                            format!(" · +{}", super::types::format_duration(since_user)),
-                            Style::default().fg(super::types::COLOR_DIM),
-                        ));
-                    }
-                }
+            // Show this entry's own elapsed time. Pending entries count up;
+            // completed entries keep their frozen completion duration.
+            if let Some(elapsed) =
+                entry_elapsed_secs(entry.timestamp, entry.completed_at, entry.pending, now_ts)
+            {
+                header_spans.push(Span::styled(
+                    format!(" · {}", super::types::format_duration(elapsed)),
+                    Style::default().fg(super::types::COLOR_DIM),
+                ));
             }
         }
         if entry.pending {
@@ -2475,10 +2961,17 @@ fn shell_escape(arg: &str) -> String {
 }
 
 fn tool_result_failed(result: &ToolResult) -> bool {
+    if tool_result_not_spawned(result) {
+        return false;
+    }
     !result.ok
         || result
             .error_message
             .as_ref()
             .is_some_and(|message| !message.trim().is_empty())
         || result.output.get("error").and_then(Value::as_str).is_some()
+}
+
+fn tool_result_not_spawned(result: &ToolResult) -> bool {
+    result.output.get("status").and_then(Value::as_str) == Some("not_spawned")
 }

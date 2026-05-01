@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::llm::{self, LlmClient, StreamChunk};
 use crate::system::domain::{
@@ -76,6 +77,7 @@ impl ModelGateway {
     pub async fn start_response(
         &self,
         request: ModelRequest,
+        cancel_token: CancellationToken,
     ) -> Result<mpsc::Receiver<ModelStreamEvent>> {
         let prompt_budget = calculate_prompt_budget(request.model_settings.context_window);
         let messages = build_llm_messages(
@@ -101,8 +103,9 @@ impl ModelGateway {
         let model_settings = request.model_settings.clone();
 
         tokio::spawn(async move {
-            match client
-                .stream(
+            let stream_result = tokio::select! {
+                _ = cancel_token.cancelled() => return,
+                result = client.stream(
                     &model_settings.provider_id,
                     &messages,
                     &tools,
@@ -110,22 +113,46 @@ impl ModelGateway {
                     0.2,
                     model_settings.reasoning_effort.as_deref(),
                     8192,
-                )
-                .await
-            {
+                ) => result,
+            };
+
+            match stream_result {
                 Ok(mut stream) => {
                     let mut usage = TokenUsage::default();
                     let mut partial_tools: HashMap<
                         usize,
                         (Option<String>, Option<String>, String),
                     > = HashMap::new();
-                    while let Some(chunk) = stream.recv().await {
+                    loop {
+                        let chunk = tokio::select! {
+                            _ = cancel_token.cancelled() => return,
+                            chunk = stream.recv() => chunk,
+                        };
+                        let Some(chunk) = chunk else {
+                            break;
+                        };
                         match chunk {
                             StreamChunk::Text(text) => {
-                                let _ = tx.send(ModelStreamEvent::AssistantDelta(text)).await;
+                                if !send_model_event(
+                                    &tx,
+                                    &cancel_token,
+                                    ModelStreamEvent::AssistantDelta(text),
+                                )
+                                .await
+                                {
+                                    return;
+                                }
                             }
                             StreamChunk::Thinking(thought) => {
-                                let _ = tx.send(ModelStreamEvent::ReasoningDelta(thought)).await;
+                                if !send_model_event(
+                                    &tx,
+                                    &cancel_token,
+                                    ModelStreamEvent::ReasoningDelta(thought),
+                                )
+                                .await
+                                {
+                                    return;
+                                }
                             }
                             StreamChunk::ToolCallDelta {
                                 index,
@@ -155,6 +182,9 @@ impl ModelGateway {
                         }
                     }
                     if !partial_tools.is_empty() {
+                        if cancel_token.is_cancelled() {
+                            return;
+                        }
                         let mut calls = Vec::new();
                         for (_, (id, name, args)) in partial_tools {
                             let tool_name = name.unwrap_or_default();
@@ -181,10 +211,20 @@ impl ModelGateway {
                             }
                         }
                         if !calls.is_empty() {
-                            let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
+                            if !send_model_event(
+                                &tx,
+                                &cancel_token,
+                                ModelStreamEvent::ToolCalls(calls),
+                            )
+                            .await
+                            {
+                                return;
+                            }
                         }
                     }
-                    let _ = tx.send(ModelStreamEvent::Completed(usage)).await;
+                    let _ =
+                        send_model_event(&tx, &cancel_token, ModelStreamEvent::Completed(usage))
+                            .await;
                 }
                 Err(stream_err) => {
                     let stream_err_text = stream_err.to_string();
@@ -201,7 +241,8 @@ impl ModelGateway {
                         )
                     {
                         let msg = cod_error::humanize(&stream_err_text, stream_kind);
-                        let _ = tx.send(ModelStreamEvent::Failed(msg)).await;
+                        let _ = send_model_event(&tx, &cancel_token, ModelStreamEvent::Failed(msg))
+                            .await;
                         return;
                     }
 
@@ -210,8 +251,9 @@ impl ModelGateway {
                         error = %stream_err_text,
                         "model_gateway: stream failed — attempting non-streaming fallback"
                     );
-                    match client
-                        .complete(
+                    let complete_result = tokio::select! {
+                        _ = cancel_token.cancelled() => return,
+                        result = client.complete(
                             &model_settings.provider_id,
                             &messages,
                             &tools,
@@ -219,14 +261,20 @@ impl ModelGateway {
                             0.2,
                             model_settings.reasoning_effort.as_deref(),
                             8192,
-                        )
-                        .await
-                    {
+                        ) => result,
+                    };
+                    match complete_result {
                         Ok(response) => {
                             if !response.content.is_empty() {
-                                let _ = tx
-                                    .send(ModelStreamEvent::AssistantDelta(response.content))
-                                    .await;
+                                if !send_model_event(
+                                    &tx,
+                                    &cancel_token,
+                                    ModelStreamEvent::AssistantDelta(response.content),
+                                )
+                                .await
+                                {
+                                    return;
+                                }
                             }
                             if !response.tool_calls.is_empty() {
                                 let mut calls = Vec::new();
@@ -254,17 +302,28 @@ impl ModelGateway {
                                     }
                                 }
                                 if !calls.is_empty() {
-                                    let _ = tx.send(ModelStreamEvent::ToolCalls(calls)).await;
+                                    if !send_model_event(
+                                        &tx,
+                                        &cancel_token,
+                                        ModelStreamEvent::ToolCalls(calls),
+                                    )
+                                    .await
+                                    {
+                                        return;
+                                    }
                                 }
                             }
                             let usage = response.usage.unwrap_or_default();
-                            let _ = tx
-                                .send(ModelStreamEvent::Completed(TokenUsage {
+                            let _ = send_model_event(
+                                &tx,
+                                &cancel_token,
+                                ModelStreamEvent::Completed(TokenUsage {
                                     input_tokens: usage.prompt_tokens as i64,
                                     output_tokens: usage.completion_tokens as i64,
                                     cached_tokens: 0,
-                                }))
-                                .await;
+                                }),
+                            )
+                            .await;
                         }
                         Err(complete_err) => {
                             let complete_err_text = complete_err.to_string();
@@ -272,11 +331,14 @@ impl ModelGateway {
                             let stream_msg = cod_error::humanize(&stream_err_text, stream_kind);
                             let fallback_msg =
                                 cod_error::humanize(&complete_err_text, complete_kind);
-                            let _ = tx
-                                .send(ModelStreamEvent::Failed(format!(
+                            let _ = send_model_event(
+                                &tx,
+                                &cancel_token,
+                                ModelStreamEvent::Failed(format!(
                                     "{stream_msg} (fallback also failed: {fallback_msg})"
-                                )))
-                                .await;
+                                )),
+                            )
+                            .await;
                         }
                     }
                 }
@@ -284,6 +346,17 @@ impl ModelGateway {
         });
 
         Ok(rx)
+    }
+}
+
+async fn send_model_event(
+    tx: &mpsc::Sender<ModelStreamEvent>,
+    cancel_token: &CancellationToken,
+    event: ModelStreamEvent,
+) -> bool {
+    tokio::select! {
+        _ = cancel_token.cancelled() => false,
+        result = tx.send(event) => result.is_ok(),
     }
 }
 

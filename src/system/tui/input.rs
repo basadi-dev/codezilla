@@ -308,7 +308,10 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         (KeyCode::Up, _) => {
             if app.autocomplete.is_active() {
                 app.autocomplete_select_prev();
-            } else if app.composer_history_active() || app.composer.is_empty() {
+            } else if app.composer_history_active()
+                || app.composer.is_empty()
+                || composer_cursor_on_first_visual_row(app)
+            {
                 app.jump_transcript_to_bottom();
                 app.composer_history_prev();
             } else {
@@ -321,7 +324,7 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         (KeyCode::Down, _) => {
             if app.autocomplete.is_active() {
                 app.autocomplete_select_next();
-            } else if app.composer_history_active() || app.composer.is_empty() {
+            } else if app.composer_history_active() {
                 app.jump_transcript_to_bottom();
                 app.composer_history_next();
             } else {
@@ -350,4 +353,12 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         _ => {}
     }
     Ok(())
+}
+
+fn composer_cursor_on_first_visual_row(app: &InteractiveApp) -> bool {
+    let (first_width, continuation_width) = app.composer_wrap_widths();
+    let (row, _) = app
+        .composer
+        .visual_cursor_row_col(first_width.max(1), continuation_width.max(1));
+    row == 0
 }

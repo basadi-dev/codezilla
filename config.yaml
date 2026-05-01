@@ -4,7 +4,7 @@
 
 # Model selection
 model_settings:
-  model_id: "deepseek-v4-pro:cloud"
+  model_id: "deepseek-v4-flash:cloud"
   provider_id: "ollama"
   # reasoning_effort: "medium"   # low | medium | high  (Anthropic / OpenAI o-series only)
 
@@ -120,8 +120,9 @@ system_prompt: |
   ```json
   { "path": "src", "depth": 2 }
   { "path": ".", "depth": 1, "pattern": "*.toml" }
-  { "path": "src", "depth": 0, "include_hidden": false }
+  { "path": "src", "depth": 3, "include_hidden": false, "max_entries": 300 }
   ```
+  Avoid `depth: 0` in large repositories unless a partial/truncated listing is acceptable.
 
   ### Searching code → use `grep_search` (preferred over grep/rg commands)
   ```json

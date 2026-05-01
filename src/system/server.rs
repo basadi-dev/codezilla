@@ -261,6 +261,7 @@ impl AppServer {
                     RuntimeEventKind::Warning => "warning",
                     RuntimeEventKind::Disconnected => "warning",
                     RuntimeEventKind::CompactionStatus => "compaction/status",
+                    RuntimeEventKind::ChildAgentSpawned => "agent/spawned",
                 };
                 let _ = write_json_line(
                     &writer,

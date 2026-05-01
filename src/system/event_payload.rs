@@ -45,6 +45,7 @@ pub enum RuntimeEventPayload {
     Warning(WarningPayload),
     Disconnected(DisconnectedPayload),
     CompactionStatus(CompactionStatusPayload),
+    ChildAgentSpawned(ChildAgentSpawnedPayload),
 }
 
 /// Payload of `ItemStarted` and `ItemCompleted` events.
@@ -127,6 +128,21 @@ pub struct CompactionStatusPayload {
     pub message: Option<String>,
 }
 
+/// Payload for `ChildAgentSpawned` events. Ties a child thread/turn to the
+/// parent's `tool_call_id` so consumers (TUI, benchmarks) can render the
+/// agent tree without inferring the relationship from `agent_depth`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildAgentSpawnedPayload {
+    pub parent_thread_id: ThreadId,
+    pub parent_turn_id: TurnId,
+    pub parent_tool_call_id: String,
+    pub child_thread_id: ThreadId,
+    pub child_turn_id: TurnId,
+    /// User-visible label — typically the first line of the spawn prompt.
+    pub label: String,
+}
+
 impl RuntimeEventPayload {
     /// Decode `event.payload` according to `event.kind`.
     pub fn from_event(event: &RuntimeEvent) -> Result<Self> {
@@ -174,6 +190,10 @@ impl RuntimeEventPayload {
             }
             RuntimeEventKind::CompactionStatus => Ok(Self::CompactionStatus(decode(
                 "CompactionStatus",
+                &event.payload,
+            )?)),
+            RuntimeEventKind::ChildAgentSpawned => Ok(Self::ChildAgentSpawned(decode(
+                "ChildAgentSpawned",
                 &event.payload,
             )?)),
         }
