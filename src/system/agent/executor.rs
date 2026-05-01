@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde_json::json;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::model_gateway::{estimate_items_token_pct, is_context_overflow_error, ModelStreamEvent};
@@ -9,8 +10,9 @@ mod utils;
 
 use self::context::TurnContext;
 use self::utils::{
-    derive_thread_title, find_repetition_start, is_degenerate_repetition, is_read_only_tool,
-    recently_read_paths, should_retry_no_tool_completion, thinking_instruction,
+    classify_turn_intent, derive_thread_title, find_repetition_start, is_degenerate_repetition,
+    is_read_only_tool, recently_read_paths, should_retry_no_tool_completion, thinking_instruction,
+    TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
@@ -143,6 +145,7 @@ impl TurnExecutor {
         let mut auto_trim_attempted = false;
 
         let agent_cfg = self.runtime.inner.effective_config.agent.clone();
+        let turn_intent = classify_turn_intent(&params.input);
 
         // ── Loop-break guards ─────────────────────────────────────────────────
         //
@@ -186,6 +189,8 @@ impl TurnExecutor {
         // read-only, empty-response). If the model keeps needing correction
         // it won't self-correct. Fail fast rather than burning tokens.
         let mut total_nudges: usize = 0;
+        let mut total_invalid_tool_calls: usize = 0;
+        let mut seen_read_signatures: HashSet<String> = HashSet::new();
 
         loop {
             agent_iterations += 1;
@@ -214,6 +219,7 @@ impl TurnExecutor {
                 consecutive_failures,
                 no_tool_nudges,
                 completed_tool_rounds,
+                intent = ?turn_intent,
                 "executor: loop iteration"
             );
             if let Some(thread) = self.runtime.load_thread(&params.thread_id).await? {
@@ -616,15 +622,35 @@ impl TurnExecutor {
             let round_is_read_only = tool_calls.iter().all(|c| is_read_only_tool(&c.tool_name));
             let round_call_count = tool_calls.len();
 
-            let (had_any_success, round_file_changes) = tokio::select! {
+            let (had_any_success, round_file_changes, invalid_tool_calls) = tokio::select! {
                 _ = turn_ctx.cancel_token.cancelled() => {
                     return self.complete_interrupted(&params.thread_id, &turn_id).await;
                 }
-                result = self.execute_tool_round(&turn_ctx, tool_calls) => result?,
+                result = self.execute_tool_round(&turn_ctx, tool_calls, &mut seen_read_signatures) => result?,
             };
             completed_tool_rounds += 1;
             total_tool_calls += round_call_count;
             file_changes.extend(round_file_changes);
+            total_invalid_tool_calls += invalid_tool_calls;
+
+            if invalid_tool_calls > 0 {
+                tracing::warn!(
+                    turn_id = %turn_id,
+                    invalid_tool_calls,
+                    total_invalid_tool_calls,
+                    "executor: invalid tool calls detected this round"
+                );
+                if total_invalid_tool_calls >= 2 {
+                    return self
+                        .fail_turn(
+                            &params.thread_id,
+                            &turn_id,
+                            "invalid_tool_limit",
+                            "The model repeatedly emitted invalid tool arguments. The turn has been stopped to prevent a failing loop.",
+                        )
+                        .await;
+                }
+            }
 
             // ── Read-only exploration guard ───────────────────────────────────
             // Reset when any action tool ran this round; bump when every call
@@ -648,16 +674,17 @@ impl TurnExecutor {
                         tracing::error!(
                             turn_id = %turn_id,
                             total_nudges,
-                            "executor: cumulative nudge limit reached — terminating turn"
+                            intent = ?turn_intent,
+                            "executor: cumulative read-only nudge limit reached — terminating turn"
                         );
                         return self
                             .fail_turn(
                                 &params.thread_id,
                                 &turn_id,
-                                "nudge_limit",
+                                "read_only_limit",
                                 &format!(
-                                    "Agent required {total_nudges} corrections without making \
-                                     progress. The turn has been stopped."
+                                    "The model exceeded the read-only exploration budget for \
+                                     this turn after {total_nudges} corrective nudges."
                                 ),
                             )
                             .await;
@@ -674,12 +701,17 @@ impl TurnExecutor {
                              want to change. This is much easier than rewriting the entire file."
                         )
                     };
-                    let msg = format!(
-                        "You have spent {effective_read_only_limit} consecutive rounds \
-                         reading files without taking any action. Stop reading and act now. \
-                         Either use `patch_file` to edit code, `bash_exec` to run a command, \
-                         or give a final answer.{file_hint}"
-                    );
+                    let msg = match turn_intent {
+                        TurnIntent::Answer | TurnIntent::Review | TurnIntent::Inventory => format!(
+                            "You have enough context. Stop issuing read-only tools and provide the final answer now.{file_hint}"
+                        ),
+                        _ => format!(
+                            "You have spent {effective_read_only_limit} consecutive rounds \
+                             reading files without taking any action. Stop reading and act now. \
+                             Either use `patch_file` to edit code, `bash_exec` to run a command, \
+                             or give a final answer.{file_hint}"
+                        ),
+                    };
                     tracing::warn!(
                         turn_id = %turn_id,
                         "executor: read-only saturation nudge fired"

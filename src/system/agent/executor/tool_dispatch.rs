@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Result};
 use futures::future::join_all;
 use serde_json::json;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::system::agent::executor::context::TurnContext;
 use crate::system::agent::executor::utils::{
-    action_for_tool_call, partition_into_batches, promote_to_bash_if_needed,
+    action_for_tool_call, partition_into_batches, promote_to_bash_if_needed, read_signature,
+    validate_tool_call,
 };
 use crate::system::domain::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, ConversationItem, FileChangeSummary,
@@ -27,7 +29,8 @@ impl TurnExecutor {
         &self,
         ctx: &TurnContext,
         tool_calls: Vec<ToolCall>,
-    ) -> Result<(bool, Vec<FileChangeSummary>)> {
+        seen_read_signatures: &mut HashSet<String>,
+    ) -> Result<(bool, Vec<FileChangeSummary>, usize)> {
         // 1. Normalise: rewrite shell_exec with shell operators → bash_exec.
         let calls: Vec<ToolCall> = tool_calls
             .into_iter()
@@ -36,6 +39,8 @@ impl TurnExecutor {
 
         // 2. Persist all ToolCall items in original order *before* executing
         //    anything, so the transcript always shows calls before results.
+        let mut invalid_tool_calls: usize = 0;
+        let mut valid_calls: Vec<ToolCall> = Vec::new();
         for call in &calls {
             let call_item = ConversationItem {
                 item_id: format!("item_{}", Uuid::new_v4().simple()),
@@ -46,18 +51,58 @@ impl TurnExecutor {
                 payload: serde_json::to_value(call)?,
             };
             self.persist_turn_item(call_item).await?;
+
+            if let Some(reason) = validate_tool_call(call) {
+                invalid_tool_calls += 1;
+                let result = ToolResult {
+                    tool_call_id: call.tool_call_id.clone(),
+                    ok: false,
+                    output: json!({
+                        "error": "invalid_tool_arguments",
+                        "tool": call.tool_name,
+                        "details": reason,
+                    }),
+                    error_message: Some(format!(
+                        "invalid_tool_arguments: {} ({})",
+                        call.tool_name, reason
+                    )),
+                };
+                self.persist_tool_result(&ctx.params.thread_id, &ctx.turn_id, &result)
+                    .await?;
+                continue;
+            }
+            if let Some(sig) = read_signature(call) {
+                if seen_read_signatures.contains(&sig) {
+                    invalid_tool_calls += 1;
+                    let result = ToolResult {
+                        tool_call_id: call.tool_call_id.clone(),
+                        ok: false,
+                        output: json!({
+                            "error": "duplicate_read",
+                            "tool": call.tool_name,
+                            "details": "same read-only call already executed earlier in this turn",
+                        }),
+                        error_message: Some(format!("duplicate_read: {}", call.tool_name)),
+                    };
+                    self.persist_tool_result(&ctx.params.thread_id, &ctx.turn_id, &result)
+                        .await?;
+                    continue;
+                }
+                seen_read_signatures.insert(sig);
+            }
+            valid_calls.push(call.clone());
         }
 
         // 3. Partition into batches (consecutive parallel-safe calls grouped;
         //    each non-parallel-safe call is a solo sequential batch).
-        let batches = partition_into_batches(&calls, |name| {
+        let batches = partition_into_batches(&valid_calls, |name| {
             self.runtime
                 .inner
                 .tool_orchestrator
                 .is_parallel_safe(name, &ctx.listing)
         });
 
-        let call_summary: Vec<String> = calls
+        let call_summary: Vec<String> = valid_calls
             .iter()
             .map(|c| {
                 let args_preview = serde_json::to_string(&c.arguments)
@@ -70,7 +115,7 @@ impl TurnExecutor {
             .collect();
         tracing::debug!(
             turn_id = %ctx.turn_id,
-            total_calls = calls.len(),
+            total_calls = valid_calls.len(),
             batch_count = batches.len(),
             calls = %call_summary.join(" | "),
             "tool_round: dispatching"
@@ -114,7 +159,7 @@ impl TurnExecutor {
             }
         }
 
-        Ok((had_any_success, file_changes))
+        Ok((had_any_success, file_changes, invalid_tool_calls))
     }
 
     /// Execute a single batch of tool calls.

@@ -15,9 +15,10 @@ use uuid::Uuid;
 
 use super::{
     ConversationRuntime, LoadedTurn, ThreadCompactParams, ThreadCompactResult, ThreadForkParams,
-    ThreadForkResult, ThreadListParams, ThreadListResult, ThreadMemoryModeParams, ThreadReadParams,
-    ThreadReadResult, ThreadResumeParams, ThreadResumeResult, ThreadRollbackParams,
-    ThreadRollbackResult, ThreadSession, ThreadStartParams, ThreadStartResult,
+    ThreadForkResult, ThreadListParams, ThreadListResult, ThreadMemoryModeParams,
+    ThreadModelSettingsParams, ThreadReadParams, ThreadReadResult, ThreadResumeParams,
+    ThreadResumeResult, ThreadRollbackParams, ThreadRollbackResult, ThreadSession,
+    ThreadStartParams, ThreadStartResult,
 };
 use crate::system::agent::model_gateway::build_compaction_messages;
 use crate::system::domain::{
@@ -314,6 +315,23 @@ impl ConversationRuntime {
         {
             let mut thread = thread.lock().await;
             thread.metadata.memory_mode = params.memory_mode;
+            thread.metadata.updated_at = now_seconds();
+            self.inner
+                .persistence_manager
+                .update_thread(&thread.metadata)?;
+        }
+        Ok(())
+    }
+
+    pub async fn set_thread_model_settings(&self, params: ThreadModelSettingsParams) -> Result<()> {
+        let thread = self
+            .load_thread(&params.thread_id)
+            .await?
+            .ok_or_else(|| anyhow!("thread_not_found: {}", params.thread_id))?;
+        {
+            let mut thread = thread.lock().await;
+            thread.metadata.model_id = params.model_id;
+            thread.metadata.provider_id = params.provider_id;
             thread.metadata.updated_at = now_seconds();
             self.inner
                 .persistence_manager

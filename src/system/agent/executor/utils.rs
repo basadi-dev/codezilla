@@ -1,7 +1,8 @@
 use serde_json::Value;
+use std::borrow::Cow;
 
 use crate::system::domain::{
-    ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ToolCall,
+    ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ToolCall, UserInput,
 };
 
 // ─── is_read_only_tool ────────────────────────────────────────────────────────
@@ -23,6 +24,147 @@ pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
             | "read_browser_page"
             | "view_file"
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnIntent {
+    Edit,
+    Debug,
+    Review,
+    Answer,
+    Inventory,
+    Unknown,
+}
+
+pub(crate) fn classify_turn_intent(inputs: &[UserInput]) -> TurnIntent {
+    let text = inputs
+        .iter()
+        .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+
+    if text.is_empty() {
+        return TurnIntent::Unknown;
+    }
+    if text.contains("review") || text.contains("audit") || text.contains("regression") {
+        return TurnIntent::Review;
+    }
+    if text.contains("list ") || text.contains("inventory") || text.contains("contents of") {
+        return TurnIntent::Inventory;
+    }
+    if text.contains("fix")
+        || text.contains("implement")
+        || text.contains("change")
+        || text.contains("update")
+        || text.contains("refactor")
+        || text.contains("remove")
+    {
+        return TurnIntent::Edit;
+    }
+    if text.contains("why")
+        || text.contains("what's wrong")
+        || text.contains("what is wrong")
+        || text.contains("debug")
+        || text.contains("loop")
+    {
+        return TurnIntent::Debug;
+    }
+    if text.contains("explain") || text.contains("what") || text.contains("how") {
+        return TurnIntent::Answer;
+    }
+    TurnIntent::Unknown
+}
+
+pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
+    let missing = |field: &'static str| format!("missing required argument `{field}`");
+    let non_empty_string = |name: &'static str| -> Option<Cow<'static, str>> {
+        match call.arguments.get(name).and_then(Value::as_str) {
+            Some(v) if !v.trim().is_empty() => None,
+            _ => Some(Cow::Owned(missing(name))),
+        }
+    };
+    match call.tool_name.as_str() {
+        "grep_search" => non_empty_string("pattern").map(|m| m.into_owned()),
+        "read_file" | "list_dir" | "view_file" => non_empty_string("path").map(|m| m.into_owned()),
+        "bash_exec" => non_empty_string("command").map(|m| m.into_owned()),
+        "shell_exec" => {
+            if call.arguments.get("argv").is_none() {
+                Some(missing("argv"))
+            } else {
+                None
+            }
+        }
+        "patch_file" => {
+            if call.arguments.get("path").and_then(Value::as_str).is_none() {
+                return Some(missing("path"));
+            }
+            if call
+                .arguments
+                .get("start_line")
+                .and_then(Value::as_u64)
+                .is_none()
+            {
+                return Some(missing("start_line"));
+            }
+            if call
+                .arguments
+                .get("end_line")
+                .and_then(Value::as_u64)
+                .is_none()
+            {
+                return Some(missing("end_line"));
+            }
+            if call
+                .arguments
+                .get("content")
+                .and_then(Value::as_str)
+                .is_none()
+            {
+                return Some(missing("content"));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn read_signature(call: &ToolCall) -> Option<String> {
+    match call.tool_name.as_str() {
+        "read_file" => {
+            let path = call.arguments.get("path")?.as_str()?;
+            let offset = call
+                .arguments
+                .get("offset")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let limit = call
+                .arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            Some(format!("read_file:{path}:{offset}:{limit}"))
+        }
+        "grep_search" => {
+            let pattern = call.arguments.get("pattern")?.as_str()?;
+            let path = call
+                .arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            Some(format!("grep_search:{path}:{pattern}"))
+        }
+        "list_dir" => {
+            let path = call.arguments.get("path")?.as_str()?;
+            let depth = call
+                .arguments
+                .get("depth")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            Some(format!("list_dir:{path}:{depth}"))
+        }
+        _ => None,
+    }
 }
 
 // ─── partition_into_batches ───────────────────────────────────────────────────

@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::oneshot;
+use tracing::info;
 
 use ratatui::{
     layout::Rect,
@@ -19,8 +20,8 @@ use super::super::domain::{
 use super::super::error as cod_error;
 use super::super::runtime::{
     ConversationRuntime, ThreadCompactParams, ThreadCompactResult, ThreadForkParams,
-    ThreadListParams, ThreadReadParams, ThreadResumeParams, ThreadStartParams, TurnInterruptParams,
-    TurnStartParams, TurnSteerParams,
+    ThreadListParams, ThreadModelSettingsParams, ThreadReadParams, ThreadResumeParams,
+    ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnSteerParams,
 };
 use super::activity::ChildAgentStatus;
 use super::types::{
@@ -1071,9 +1072,26 @@ impl InteractiveApp {
             } else {
                 ms.model_id = rest.to_string();
             }
+            self.runtime
+                .set_thread_model_settings(ThreadModelSettingsParams {
+                    thread_id: self.current_thread_id.clone(),
+                    model_id: ms.model_id.clone(),
+                    provider_id: ms.provider_id.clone(),
+                })
+                .await?;
+            if let Some(meta) = self.current_thread_meta.as_mut() {
+                meta.model_id = ms.model_id.clone();
+                meta.provider_id = ms.provider_id.clone();
+            }
             self.status_message = format!("Model set to {}/{}", ms.provider_id, ms.model_id);
             self.error_message = None;
             self.model_settings_override = Some(ms);
+            info!(
+                thread_id = %self.current_thread_id,
+                provider_id = %self.effective_model_settings().provider_id,
+                model_id = %self.effective_model_settings().model_id,
+                "tui: model override updated via /model"
+            );
             true
         } else if matches!(command, "/reasoning") {
             let effort = self

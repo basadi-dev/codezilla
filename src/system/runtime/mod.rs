@@ -149,6 +149,14 @@ pub struct ThreadMemoryModeParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadModelSettingsParams {
+    pub thread_id: ThreadId,
+    pub model_id: String,
+    pub provider_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnStartParams {
     pub thread_id: ThreadId,
     #[serde(default)]
