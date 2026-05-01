@@ -47,6 +47,7 @@ pub fn draw(app: &mut InteractiveApp, frame: &mut Frame) {
         .split(frame.area());
 
     render_header(app, frame, outer[0]);
+    app.header_area = outer[0];
     render_separator(frame, outer[1]);
     render_transcript(app, frame, outer[2]);
     if ac_h > 0 {
@@ -54,6 +55,7 @@ pub fn draw(app: &mut InteractiveApp, frame: &mut Frame) {
     }
     render_composer(app, frame, outer[4]);
     render_status_bar(app, frame, outer[5]);
+    app.status_bar_area = outer[5];
 }
 
 // ─── Header ────────────────────────────────────────────────────────────────────
@@ -182,10 +184,85 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     left_spans.push(Span::styled(" ".repeat(padding), Style::default()));
     left_spans.extend(right_spans);
 
-    frame.render_widget(Paragraph::new(Line::from(left_spans)), area);
+    // ── Apply selection highlighting if the user is dragging in the header ──
+    let sel = app.drag_selection_lines();
+    let spans = if let Some(ref sel) = sel {
+        if sel.start_line == 0 && sel.end_line == 0 {
+            apply_selection_highlight(left_spans, sel.start_col, sel.end_col)
+        } else {
+            left_spans
+        }
+    } else {
+        left_spans
+    };
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-// ─── Separator ────────────────────────────────────────────────────────────────
+/// Highlight a character range within a sequence of spans. Spans that fall
+/// partially inside the selection are split so only the selected characters
+/// receive the highlight style.
+fn apply_selection_highlight(
+    spans: Vec<Span<'static>>,
+    sel_start: usize,
+    sel_end: usize,
+) -> Vec<Span<'static>> {
+    let highlight_style = Style::default().bg(Color::Rgb(60, 70, 90)).fg(Color::White);
+
+    let mut out: Vec<Span<'static>> = vec![];
+    let mut char_offset: usize = 0;
+
+    for span in spans {
+        let count = span.content.chars().count();
+        let span_start = char_offset;
+        let span_end = char_offset + count;
+
+        if span_end <= sel_start || span_start > sel_end {
+            // No overlap — pass through unchanged
+            out.push(span);
+        } else if span_start >= sel_start && span_end <= sel_end + 1 {
+            // Fully inside selection
+            out.push(Span::styled(
+                span.content.clone(),
+                span.style.patch(highlight_style),
+            ));
+        } else {
+            // Partial overlap — split into up to 3 pieces
+            let chars: Vec<char> = span.content.chars().collect();
+
+            // Before selection
+            if span_start < sel_start {
+                let before: String = chars[0..sel_start - span_start].iter().collect();
+                if !before.is_empty() {
+                    out.push(Span::styled(before, span.style));
+                }
+            }
+
+            // Inside selection
+            let inner_from = sel_start.saturating_sub(span_start);
+            let inner_to = (sel_end + 1).saturating_sub(span_start).min(chars.len());
+            if inner_from < inner_to {
+                let inner: String = chars[inner_from..inner_to].iter().collect();
+                if !inner.is_empty() {
+                    out.push(Span::styled(inner, span.style.patch(highlight_style)));
+                }
+            }
+
+            // After selection
+            if span_end > sel_end + 1 {
+                let after_from = (sel_end + 1).saturating_sub(span_start);
+                let after: String = chars[after_from..].iter().collect();
+                if !after.is_empty() {
+                    out.push(Span::styled(after, span.style));
+                }
+            }
+        }
+
+        char_offset += count;
+    }
+
+    out
+}
 
 fn render_separator(frame: &mut Frame, area: Rect) {
     // A single dim horizontal rule using box-drawing character repeated

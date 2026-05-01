@@ -25,13 +25,13 @@ use super::super::runtime::{
 };
 use super::activity::ChildAgentStatus;
 use super::types::{
-    basename, entry_elapsed_secs, entry_from_item, entry_style, format_timestamp,
-    format_tool_result, is_diff_body, is_read_file_body, relative_time_ago, render_diff_chunk,
-    render_read_file_body_lines, short_turn_id, spinner_frame, split_at_width, thread_label,
-    transcript_lines, AutocompleteItem, ComposerState, EntryKind, FocusPane, PendingApprovalView,
-    SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT, COLOR_MUTED, THREAD_LIMIT,
+    basename, current_state_label, entry_elapsed_secs, entry_from_item, entry_style,
+    format_timestamp, format_tool_result, is_diff_body, is_read_file_body, relative_time_ago,
+    render_diff_chunk, render_read_file_body_lines, short_turn_id, spinner_frame, split_at_width,
+    thread_label, transcript_lines, AutocompleteItem, ComposerState, EntryKind, FocusPane,
+    PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
+    COLOR_MUTED, THREAD_LIMIT,
 };
-
 /// Sentinel item-id for the "thinking" placeholder injected immediately after
 /// the user submits a message.  Removed when the first real agent content arrives.
 const THINKING_PLACEHOLDER_ID: &str = "__codezilla_thinking__";
@@ -497,6 +497,73 @@ impl InteractiveApp {
         })
     }
 
+    /// Build the plain-text representation of the header line (same content as
+    /// rendered). Used by copy-to-clipboard when the user drag-selects text in
+    /// the header area.
+    pub fn header_plain_text(&self) -> String {
+        let meta = self.current_thread_meta.as_ref();
+        let thread = meta.map(thread_label).unwrap_or_else(|| "no thread".into());
+        let cwd = meta
+            .and_then(|t| t.cwd.as_ref())
+            .map(|c| basename(c))
+            .unwrap_or_else(|| "~".into());
+        let (model, reasoning) = {
+            let ms = self.effective_model_settings();
+            let model = format!("{}/{}", ms.provider_id, ms.model_id);
+            let reasoning = ms.reasoning_effort.unwrap_or_default();
+            (model, reasoning)
+        };
+        let approval_icon = if self.auto_approve_tools_enabled() {
+            "🔓"
+        } else {
+            "🔒"
+        };
+        let state = current_state_label(self.active_turn_id.is_some(), self.approval.has_pending());
+        let state_sigil = if self.active_turn_id.is_some() {
+            spinner_frame(self.activity.spinner_tick())
+        } else {
+            "●"
+        };
+        let live_label: String = if self.active_turn_id.is_some() {
+            self.activity
+                .header_line(std::time::Instant::now(), "◆ generating…")
+                .unwrap_or_else(|| state.to_string())
+        } else {
+            state.to_string()
+        };
+
+        // Left side
+        let left = format!(" ◈ codezilla  {state_sigil} {live_label}");
+
+        // Right side
+        let mut right = cwd.to_string();
+        right.push_str(" │ ");
+        right.push_str(&model);
+        if !reasoning.is_empty() {
+            right.push_str(" │ ");
+            right.push_str(&format!("reasoning:{reasoning}"));
+        }
+        right.push_str(" │ ");
+        right.push_str(approval_icon);
+
+        // Thread title in between
+        let left_width = left.chars().count();
+        let right_width = right.chars().count();
+        let available = self.header_area.width as usize;
+        let max_thread = available.saturating_sub(left_width + right_width + 2);
+        let thread_display = if thread.chars().count() > max_thread && max_thread > 3 {
+            let chars: Vec<char> = thread.chars().take(max_thread.saturating_sub(1)).collect();
+            format!("{}…", chars.iter().collect::<String>())
+        } else {
+            thread
+        };
+        let thread_width = thread_display.chars().count();
+        let used = left_width + 2 + thread_width + right_width;
+        let padding = available.saturating_sub(used);
+
+        format!("{left}  {thread_display}{}{right}", " ".repeat(padding))
+    }
+
     pub fn clear_selection(&mut self) {
         self.transcript_selection.clear();
     }
@@ -751,6 +818,35 @@ impl InteractiveApp {
                 },
                 Err(e) => {
                     self.error_message = Some(format!("Clipboard unavailable: {e}"));
+                }
+            }
+            return;
+        }
+
+        // ── Header line (line 0) ────────────────────────────────────────────
+        if sel.start_line == 0 {
+            let header_text = self.header_plain_text();
+            let chars: Vec<char> = header_text.chars().collect();
+            let from = sel.start_col.min(chars.len());
+            let to = (sel.end_col + 1).min(chars.len());
+            if from < to {
+                let selected: String = chars[from..to].iter().collect();
+                if !selected.trim().is_empty() {
+                    let char_count = selected.chars().count();
+                    match arboard::Clipboard::new() {
+                        Ok(mut cb) => match cb.set_text(selected) {
+                            Ok(_) => {
+                                self.status_message = format!("✓ Copied {char_count} chars");
+                                self.error_message = None;
+                            }
+                            Err(e) => {
+                                self.error_message = Some(format!("Clipboard write failed: {e}"));
+                            }
+                        },
+                        Err(e) => {
+                            self.error_message = Some(format!("Clipboard unavailable: {e}"));
+                        }
+                    }
                 }
             }
             return;

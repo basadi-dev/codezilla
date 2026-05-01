@@ -16,8 +16,9 @@ enum ConstrainedMode {
 use self::context::TurnContext;
 use self::utils::{
     already_read_directive, classify_turn_intent, derive_thread_title, find_repetition_start,
-    intent_directive, is_degenerate_repetition, is_read_only_tool, recently_read_paths, ReadKey,
-    should_retry_no_tool_completion, thinking_instruction, user_requested_verification, TurnIntent,
+    intent_directive, is_degenerate_repetition, is_read_only_tool, recently_read_paths,
+    should_retry_no_tool_completion, thinking_instruction, user_requested_verification, ReadKey,
+    TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
