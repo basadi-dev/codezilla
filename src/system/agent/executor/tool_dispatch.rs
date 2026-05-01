@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Result};
 use futures::future::join_all;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::system::agent::executor::context::TurnContext;
 use crate::system::agent::executor::utils::{
-    action_for_tool_call, is_read_only_tool, partition_into_batches, promote_to_bash_if_needed,
-    read_signature, validate_tool_call,
+    action_for_tool_call, cross_round_signature, is_duplicate_read, is_read_only_tool,
+    partition_into_batches, promote_to_bash_if_needed, read_signature, validate_tool_call, ReadKey,
 };
 use crate::system::domain::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, ConversationItem, FileChangeSummary,
@@ -29,9 +29,10 @@ impl TurnExecutor {
         &self,
         ctx: &TurnContext,
         tool_calls: Vec<ToolCall>,
-        seen_read_signatures: &mut HashSet<String>,
+        seen_read_signatures: &mut HashSet<ReadKey>,
+        cross_round_counts: &mut HashMap<String, usize>,
         block_read_only_tools: bool,
-    ) -> Result<(bool, Vec<FileChangeSummary>, usize, usize)> {
+    ) -> Result<(bool, Vec<FileChangeSummary>, usize, usize, usize)> {
         // 1. Normalise: rewrite shell_exec with shell operators → bash_exec.
         let calls: Vec<ToolCall> = tool_calls
             .into_iter()
@@ -42,6 +43,7 @@ impl TurnExecutor {
         //    anything, so the transcript always shows calls before results.
         let mut invalid_tool_calls: usize = 0;
         let mut blocked_read_only_calls: usize = 0;
+        let mut max_repeat_count: usize = 0;
         let mut valid_calls: Vec<ToolCall> = Vec::new();
         for call in &calls {
             let call_item = ConversationItem {
@@ -91,7 +93,7 @@ impl TurnExecutor {
                 continue;
             }
             if let Some(sig) = read_signature(call) {
-                if seen_read_signatures.contains(&sig) {
+                if is_duplicate_read(&sig, seen_read_signatures) {
                     invalid_tool_calls += 1;
                     let result = ToolResult {
                         tool_call_id: call.tool_call_id.clone(),
@@ -99,7 +101,7 @@ impl TurnExecutor {
                         output: json!({
                             "error": "duplicate_read",
                             "tool": call.tool_name,
-                            "details": "same read-only call already executed earlier in this turn",
+                            "details": "same read-only call already executed earlier in this turn — refer back to the prior tool result",
                         }),
                         error_message: Some(format!("duplicate_read: {}", call.tool_name)),
                     };
@@ -109,6 +111,17 @@ impl TurnExecutor {
                 }
                 seen_read_signatures.insert(sig);
             }
+
+            // Cross-round repetition tracking — bump the count for this call's
+            // normalized signature. Threshold check happens in run_turn so it
+            // can drive constrained mode + nudges at the loop level.
+            let cross_sig = cross_round_signature(call);
+            let count = cross_round_counts.entry(cross_sig).or_insert(0);
+            *count += 1;
+            if *count > max_repeat_count {
+                max_repeat_count = *count;
+            }
+
             valid_calls.push(call.clone());
         }
 
@@ -183,6 +196,7 @@ impl TurnExecutor {
             file_changes,
             invalid_tool_calls,
             blocked_read_only_calls,
+            max_repeat_count,
         ))
     }
 

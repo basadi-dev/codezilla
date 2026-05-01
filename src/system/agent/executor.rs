@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::model_gateway::{estimate_items_token_pct, is_context_overflow_error, ModelStreamEvent};
@@ -15,9 +15,9 @@ enum ConstrainedMode {
 
 use self::context::TurnContext;
 use self::utils::{
-    classify_turn_intent, derive_thread_title, find_repetition_start, is_degenerate_repetition,
-    is_read_only_tool, recently_read_paths, should_retry_no_tool_completion, thinking_instruction,
-    user_requested_verification, TurnIntent,
+    already_read_directive, classify_turn_intent, derive_thread_title, find_repetition_start,
+    intent_directive, is_degenerate_repetition, is_read_only_tool, recently_read_paths, ReadKey,
+    should_retry_no_tool_completion, thinking_instruction, user_requested_verification, TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
@@ -119,13 +119,23 @@ impl TurnExecutor {
             }
         };
 
+        let agent_cfg = self.runtime.inner.effective_config.agent.clone();
+        let turn_intent = classify_turn_intent(&params.input);
+        let verification_requested = user_requested_verification(&params.input);
+
         // Persist the system prompt once per turn for DB-level auditing and
         // post-mortem debugging. System entries are hidden in the TUI but are
         // available for inspection in the raw conversation store.
         // We also cache the result here so the first loop iteration can reuse
         // it rather than calling system_instructions() a second time.
         let initial_system_instructions = self
-            .system_instructions(cwd_for_persist, None, repo_map_text.as_deref())
+            .system_instructions(
+                cwd_for_persist,
+                None,
+                repo_map_text.as_deref(),
+                turn_intent,
+                &[],
+            )
             .await?;
         {
             let system_text = initial_system_instructions.join("\n\n");
@@ -148,10 +158,6 @@ impl TurnExecutor {
         // Tracks whether we have already done one automatic context-overflow
         // trim this turn. We only retry once to avoid an infinite loop.
         let mut auto_trim_attempted = false;
-
-        let agent_cfg = self.runtime.inner.effective_config.agent.clone();
-        let turn_intent = classify_turn_intent(&params.input);
-        let verification_requested = user_requested_verification(&params.input);
 
         // ── Loop-break guards ─────────────────────────────────────────────────
         //
@@ -196,7 +202,17 @@ impl TurnExecutor {
         // it won't self-correct. Fail fast rather than burning tokens.
         let mut total_nudges: usize = 0;
         let mut total_invalid_tool_calls: usize = 0;
-        let mut seen_read_signatures: HashSet<String> = HashSet::new();
+        let mut seen_read_signatures: HashSet<ReadKey> = HashSet::new();
+
+        // Guard 6 — cross-round repetition: counts how many times each
+        // normalized tool-call signature has appeared across the entire turn.
+        // If the same call (any tool, not just read-only) shows up REPEAT_THRESHOLD
+        // times, the model is genuinely stuck repeating itself — switch to
+        // constrained mode and force action-or-finish.
+        let mut cross_round_counts: HashMap<String, usize> = HashMap::new();
+        const REPEAT_THRESHOLD: usize = 3;
+        let mut repetition_handled = false;
+
         let mut constrained_mode: Option<ConstrainedMode> = None;
         let mut constrained_mode_violations: usize = 0;
         let mut verification_nudges: usize = 0;
@@ -269,6 +285,7 @@ impl TurnExecutor {
             let system_instructions = if let Some(cached) = cached_system_instructions.take() {
                 cached
             } else {
+                let already_read = recently_read_paths(&turn_ctx.items, 8);
                 self.system_instructions(
                     &turn_ctx.cwd,
                     turn_ctx
@@ -276,6 +293,8 @@ impl TurnExecutor {
                         .reasoning_effort
                         .as_deref(),
                     repo_map_text.as_deref(),
+                    turn_intent,
+                    &already_read,
                 )
                 .await?
             };
@@ -586,7 +605,7 @@ impl TurnExecutor {
                         max_no_tool_nudges = agent_cfg.max_no_tool_nudges,
                         "executor: nudging model to emit tool call (described intent but no call)"
                     );
-                    let recent_files = recently_read_paths(&turn_ctx.items);
+                    let recent_files = recently_read_paths(&turn_ctx.items, 3);
                     let file_hint = if recent_files.is_empty() {
                         String::new()
                     } else {
@@ -695,7 +714,13 @@ impl TurnExecutor {
                 .any(|c| matches!(c.tool_name.as_str(), "bash_exec" | "shell_exec"));
             let round_call_count = tool_calls.len();
 
-            let (had_any_success, round_file_changes, invalid_tool_calls, blocked_read_only_calls) = tokio::select! {
+            let (
+                had_any_success,
+                round_file_changes,
+                invalid_tool_calls,
+                blocked_read_only_calls,
+                max_repeat_count,
+            ) = tokio::select! {
                 _ = turn_ctx.cancel_token.cancelled() => {
                     return self.complete_interrupted(&params.thread_id, &turn_id).await;
                 }
@@ -703,6 +728,7 @@ impl TurnExecutor {
                     &turn_ctx,
                     tool_calls,
                     &mut seen_read_signatures,
+                    &mut cross_round_counts,
                     constrained_mode.is_some(),
                 ) => result?,
             };
@@ -760,6 +786,43 @@ impl TurnExecutor {
                 continue;
             }
 
+            // ── Cross-round repetition guard ──────────────────────────────────
+            // If the model has emitted the same tool call (any tool, any args)
+            // REPEAT_THRESHOLD times across this turn, it's stuck. Switch to
+            // constrained mode and nudge once. Only fires once per turn.
+            if !repetition_handled
+                && max_repeat_count >= REPEAT_THRESHOLD
+                && constrained_mode.is_none()
+            {
+                repetition_handled = true;
+                total_nudges += 1;
+                constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
+                tracing::warn!(
+                    turn_id = %turn_id,
+                    max_repeat_count,
+                    "executor: cross-round repetition detected — entering constrained mode"
+                );
+                self.runtime
+                    .publish_event(
+                        RuntimeEventKind::Warning,
+                        Some(params.thread_id.clone()),
+                        Some(turn_id.clone()),
+                        json!({
+                            "message": format!(
+                                "Same tool call repeated {max_repeat_count} times — nudging the agent to take a different approach."
+                            )
+                        }),
+                    )
+                    .await?;
+                no_tool_nudge_instruction = Some(
+                    "You have emitted the same tool call repeatedly. The result will not change. \
+                     Either take a different action (`patch_file` or `bash_exec`), or provide \
+                     the final answer now. Read-only tools are blocked."
+                        .into(),
+                );
+                continue;
+            }
+
             // ── Read-only exploration guard ───────────────────────────────────
             // Reset when any action tool ran this round; bump when every call
             // was read-only. On hitting the threshold inject a single nudge and
@@ -779,7 +842,7 @@ impl TurnExecutor {
                     consecutive_read_only_rounds = 0;
                     total_nudges += 1;
                     constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
-                    let recent_files = recently_read_paths(&turn_ctx.items);
+                    let recent_files = recently_read_paths(&turn_ctx.items, 3);
                     let file_hint = if recent_files.is_empty() {
                         String::new()
                     } else {
@@ -1251,10 +1314,18 @@ impl TurnExecutor {
         cwd: &str,
         reasoning_effort: Option<&str>,
         repo_map_text: Option<&str>,
+        intent: TurnIntent,
+        already_read: &[String],
     ) -> Result<Vec<String>> {
         let mut instructions = vec![self.runtime.inner.effective_config.system_prompt.clone()];
         if let Some(instruction) = thinking_instruction(reasoning_effort) {
             instructions.push(instruction);
+        }
+        if let Some(directive) = intent_directive(intent) {
+            instructions.push(directive);
+        }
+        if let Some(directive) = already_read_directive(already_read) {
+            instructions.push(directive);
         }
         let skills = self.runtime.inner.extension_manager.list_skills(cwd).await;
         for skill in skills {

@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use crate::system::domain::{
     ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ToolCall, UserInput,
@@ -129,10 +130,31 @@ pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
     }
 }
 
-pub(crate) fn read_signature(call: &ToolCall) -> Option<String> {
+/// Semantic key for a read-only call. Lets the dedup layer reason about
+/// subsumption (a whole-file read covers any subsequent partial read of the
+/// same path) rather than just exact-string equality.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ReadKey {
+    WholeFile(String),
+    PartialFile {
+        path: String,
+        offset: u64,
+        limit: u64,
+    },
+    Grep {
+        path: String,
+        pattern: String,
+    },
+    ListDir {
+        path: String,
+        depth: u64,
+    },
+}
+
+pub(crate) fn read_signature(call: &ToolCall) -> Option<ReadKey> {
     match call.tool_name.as_str() {
         "read_file" => {
-            let path = call.arguments.get("path")?.as_str()?;
+            let path = normalize_path(call.arguments.get("path")?.as_str()?);
             let offset = call
                 .arguments
                 .get("offset")
@@ -143,27 +165,94 @@ pub(crate) fn read_signature(call: &ToolCall) -> Option<String> {
                 .get("limit")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            Some(format!("read_file:{path}:{offset}:{limit}"))
+            if offset == 0 && limit == 0 {
+                Some(ReadKey::WholeFile(path))
+            } else {
+                Some(ReadKey::PartialFile {
+                    path,
+                    offset,
+                    limit,
+                })
+            }
         }
         "grep_search" => {
-            let pattern = call.arguments.get("pattern")?.as_str()?;
+            let pattern = call.arguments.get("pattern")?.as_str()?.to_string();
             let path = call
                 .arguments
                 .get("path")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            Some(format!("grep_search:{path}:{pattern}"))
+            Some(ReadKey::Grep {
+                path: normalize_path(path),
+                pattern,
+            })
         }
         "list_dir" => {
-            let path = call.arguments.get("path")?.as_str()?;
+            let path = normalize_path(call.arguments.get("path")?.as_str()?);
             let depth = call
                 .arguments
                 .get("depth")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            Some(format!("list_dir:{path}:{depth}"))
+            Some(ReadKey::ListDir { path, depth })
         }
         _ => None,
+    }
+}
+
+/// True if the key has already been satisfied by a prior read this turn —
+/// either by exact match or by a whole-file read subsuming a partial read.
+pub(crate) fn is_duplicate_read(key: &ReadKey, seen: &HashSet<ReadKey>) -> bool {
+    if seen.contains(key) {
+        return true;
+    }
+    if let ReadKey::PartialFile { path, .. } = key {
+        if seen.contains(&ReadKey::WholeFile(path.clone())) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Stable signature for cross-round repetition detection. Covers ALL tool
+/// calls (not just reads) — used to spot the model issuing the same call
+/// repeatedly across rounds, which is a stronger signal than within-round
+/// duplicate-read dedup.
+pub(crate) fn cross_round_signature(call: &ToolCall) -> String {
+    format!(
+        "{}:{}",
+        call.tool_name,
+        serde_json::to_string(&call.arguments).unwrap_or_default()
+    )
+}
+
+/// Lightweight path normalization — strips `./` prefix, trailing `/`, and
+/// collapses runs of `/`. Does NOT touch the filesystem (no canonicalize),
+/// so it's safe for paths that don't exist.
+fn normalize_path(p: &str) -> String {
+    let trimmed = p.trim();
+    let stripped = trimmed
+        .strip_prefix("./")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+
+    let mut out = String::with_capacity(stripped.len());
+    let mut prev_slash = false;
+    for ch in stripped.chars() {
+        if ch == '/' {
+            if prev_slash {
+                continue;
+            }
+            prev_slash = true;
+        } else {
+            prev_slash = false;
+        }
+        out.push(ch);
+    }
+    if out.is_empty() {
+        ".".into()
+    } else {
+        out
     }
 }
 
@@ -629,8 +718,11 @@ fn normalize_for_detection(text: &str) -> String {
 
 /// Extract the file paths that the model has recently read, by scanning
 /// the most recent ToolCall items for read_file invocations.
-/// Returns deduplicated paths in most-recent-first order.
-pub(crate) fn recently_read_paths(items: &[ConversationItem]) -> Vec<String> {
+/// Returns deduplicated paths in most-recent-first order, capped at `limit`.
+pub(crate) fn recently_read_paths(items: &[ConversationItem], limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for item in items.iter().rev() {
@@ -655,11 +747,57 @@ pub(crate) fn recently_read_paths(items: &[ConversationItem]) -> Vec<String> {
                 paths.push(path.to_string());
             }
         }
-        if paths.len() >= 3 {
+        if paths.len() >= limit {
             break;
         }
     }
     paths
+}
+
+/// Short directive that tells the model what kind of turn this is, so it
+/// can shape its exploration depth accordingly. Computed once per turn from
+/// the user's first message and re-injected each iteration.
+pub(crate) fn intent_directive(intent: TurnIntent) -> Option<String> {
+    match intent {
+        TurnIntent::Edit => Some(
+            "Turn intent: EDIT. Locate the relevant file, edit it with patch_file, verify if \
+             relevant, and stop. Minimize exploration."
+                .into(),
+        ),
+        TurnIntent::Debug => Some(
+            "Turn intent: DEBUG. Reproduce or pinpoint the issue, identify the root cause, and \
+             report. Only edit if explicitly asked."
+                .into(),
+        ),
+        TurnIntent::Review => Some(
+            "Turn intent: REVIEW. Read the relevant code and answer. Do not edit unless asked."
+                .into(),
+        ),
+        TurnIntent::Answer => Some(
+            "Turn intent: ANSWER. Read only what you need to answer the question, then answer \
+             concisely. Do not edit."
+                .into(),
+        ),
+        TurnIntent::Inventory => Some(
+            "Turn intent: INVENTORY. List or summarize the requested items, then stop. Do not edit."
+                .into(),
+        ),
+        TurnIntent::Unknown => None,
+    }
+}
+
+/// Tells the model which files are already in its context this turn so it
+/// stops re-reading them. Empty list returns None — no point injecting an
+/// empty list.
+pub(crate) fn already_read_directive(paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let list = paths.join(", ");
+    Some(format!(
+        "Files already read in this turn (refer back to prior tool results — do not re-read): \
+         {list}"
+    ))
 }
 
 // ─── Degenerate-output detection ──────────────────────────────────────────────
