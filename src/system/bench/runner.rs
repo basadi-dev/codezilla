@@ -1113,122 +1113,6 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::system::bench::task::{TaskSetup, TaskValidation};
-
-    fn test_task(timeout_secs: u64) -> BenchTask {
-        BenchTask {
-            id: "diagnostic-test".into(),
-            title: "Diagnostic Test".into(),
-            difficulty: "easy".into(),
-            category: "test".into(),
-            prompt: "do the thing".into(),
-            setup: TaskSetup {
-                fixtures: None,
-                commands: Vec::new(),
-                assert_fails: None,
-            },
-            validate: TaskValidation {
-                command: None,
-                expected_files: Vec::new(),
-                no_extra_changes: false,
-            },
-            timeout_secs,
-            max_cost_usd: None,
-            tags: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn timeout_diagnostic_reports_pending_approval_and_tool() {
-        let task = test_task(90);
-        let events = vec![
-            serde_json::json!({
-                "kind": "APPROVAL_REQUESTED",
-                "sequence": 1,
-                "payload": {
-                    "request": {
-                        "title": "Approve write_file",
-                        "action": { "actionType": "write_file", "paths": ["hello.txt"] }
-                    }
-                }
-            }),
-            serde_json::json!({
-                "kind": "ITEM_COMPLETED",
-                "sequence": 2,
-                "payload": {
-                    "kind": "TOOL_CALL",
-                    "payload": {
-                        "toolCallId": "call_1",
-                        "toolName": "write_file",
-                        "arguments": { "path": "hello.txt", "content": "hello" }
-                    }
-                }
-            }),
-            serde_json::json!({
-                "kind": "WARNING",
-                "sequence": 3,
-                "payload": { "message": "still waiting" }
-            }),
-        ];
-
-        let diagnostic = build_timeout_diagnostic(&task, 90, &events, &[]);
-
-        assert!(diagnostic.contains("timed out after 90s"));
-        assert!(diagnostic.contains("Pending approval: Approve write_file"));
-        assert!(diagnostic.contains("Pending tool call: write_file (call_1)"));
-        assert!(diagnostic.contains("Last warning: still waiting"));
-    }
-
-    #[test]
-    fn timeout_diagnostic_omits_resolved_approval_and_finished_tool() {
-        let task = test_task(90);
-        let events = vec![
-            serde_json::json!({
-                "kind": "APPROVAL_REQUESTED",
-                "sequence": 1,
-                "payload": { "request": { "title": "Approve bash_exec" } }
-            }),
-            serde_json::json!({
-                "kind": "APPROVAL_RESOLVED",
-                "sequence": 2,
-                "payload": { "decision": "APPROVED" }
-            }),
-            serde_json::json!({
-                "kind": "ITEM_COMPLETED",
-                "sequence": 3,
-                "payload": {
-                    "kind": "TOOL_CALL",
-                    "payload": {
-                        "toolCallId": "call_2",
-                        "toolName": "bash_exec",
-                        "arguments": { "command": "cargo test" }
-                    }
-                }
-            }),
-            serde_json::json!({
-                "kind": "ITEM_COMPLETED",
-                "sequence": 4,
-                "payload": {
-                    "kind": "TOOL_RESULT",
-                    "payload": {
-                        "toolCallId": "call_2",
-                        "ok": true,
-                        "output": {}
-                    }
-                }
-            }),
-        ];
-
-        let diagnostic = build_timeout_diagnostic(&task, 90, &events, &[]);
-
-        assert!(!diagnostic.contains("Pending approval"));
-        assert!(!diagnostic.contains("Pending tool call"));
-    }
-}
-
 // ── Metrics extraction ───────────────────────────────────────────────────────
 
 fn extract_terminal_error(events: &[Value]) -> Option<String> {
@@ -1899,4 +1783,120 @@ fn generate_transcript(events: &[Value], task: &BenchTask) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::bench::task::{TaskSetup, TaskValidation};
+
+    fn test_task(timeout_secs: u64) -> BenchTask {
+        BenchTask {
+            id: "diagnostic-test".into(),
+            title: "Diagnostic Test".into(),
+            difficulty: "easy".into(),
+            category: "test".into(),
+            prompt: "do the thing".into(),
+            setup: TaskSetup {
+                fixtures: None,
+                commands: Vec::new(),
+                assert_fails: None,
+            },
+            validate: TaskValidation {
+                command: None,
+                expected_files: Vec::new(),
+                no_extra_changes: false,
+            },
+            timeout_secs,
+            max_cost_usd: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn timeout_diagnostic_reports_pending_approval_and_tool() {
+        let task = test_task(90);
+        let events = vec![
+            serde_json::json!({
+                "kind": "APPROVAL_REQUESTED",
+                "sequence": 1,
+                "payload": {
+                    "request": {
+                        "title": "Approve write_file",
+                        "action": { "actionType": "write_file", "paths": ["hello.txt"] }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "kind": "ITEM_COMPLETED",
+                "sequence": 2,
+                "payload": {
+                    "kind": "TOOL_CALL",
+                    "payload": {
+                        "toolCallId": "call_1",
+                        "toolName": "write_file",
+                        "arguments": { "path": "hello.txt", "content": "hello" }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "kind": "WARNING",
+                "sequence": 3,
+                "payload": { "message": "still waiting" }
+            }),
+        ];
+
+        let diagnostic = build_timeout_diagnostic(&task, 90, &events, &[]);
+
+        assert!(diagnostic.contains("timed out after 90s"));
+        assert!(diagnostic.contains("Pending approval: Approve write_file"));
+        assert!(diagnostic.contains("Pending tool call: write_file (call_1)"));
+        assert!(diagnostic.contains("Last warning: still waiting"));
+    }
+
+    #[test]
+    fn timeout_diagnostic_omits_resolved_approval_and_finished_tool() {
+        let task = test_task(90);
+        let events = vec![
+            serde_json::json!({
+                "kind": "APPROVAL_REQUESTED",
+                "sequence": 1,
+                "payload": { "request": { "title": "Approve bash_exec" } }
+            }),
+            serde_json::json!({
+                "kind": "APPROVAL_RESOLVED",
+                "sequence": 2,
+                "payload": { "decision": "APPROVED" }
+            }),
+            serde_json::json!({
+                "kind": "ITEM_COMPLETED",
+                "sequence": 3,
+                "payload": {
+                    "kind": "TOOL_CALL",
+                    "payload": {
+                        "toolCallId": "call_2",
+                        "toolName": "bash_exec",
+                        "arguments": { "command": "cargo test" }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "kind": "ITEM_COMPLETED",
+                "sequence": 4,
+                "payload": {
+                    "kind": "TOOL_RESULT",
+                    "payload": {
+                        "toolCallId": "call_2",
+                        "ok": true,
+                        "output": {}
+                    }
+                }
+            }),
+        ];
+
+        let diagnostic = build_timeout_diagnostic(&task, 90, &events, &[]);
+
+        assert!(!diagnostic.contains("Pending approval"));
+        assert!(!diagnostic.contains("Pending tool call"));
+    }
 }

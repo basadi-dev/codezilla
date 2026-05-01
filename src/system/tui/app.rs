@@ -95,8 +95,6 @@ pub struct InteractiveApp {
     /// Whether the user has pressed Ctrl+C once while composer is focused and
     /// is awaiting a second Ctrl+C to clear the composer prompt.
     pub composer_clear_requested: bool,
-    /// Drag-selection reducer for the transcript pane (drag points + lock +
-    /// click history for double-click detection).
     pub transcript_selection: super::selection::TranscriptSelectionState,
     /// Drag-selection reducer for the composer pane.
     pub composer_selection: super::selection::ComposerSelectionState,
@@ -104,6 +102,10 @@ pub struct InteractiveApp {
     pub transcript_area: Rect,
     /// Composer input area rect — written by the renderer each frame.
     pub composer_area: Rect,
+    /// Header area rect — written by the renderer each frame.
+    pub header_area: Rect,
+    /// Status bar area rect — written by the renderer each frame.
+    pub status_bar_area: Rect,
     transcript_render_cache: TranscriptRenderCache,
     /// Slash-command autocomplete reducer (suggestions + selection + scroll).
     pub autocomplete: super::autocomplete::AutocompleteState,
@@ -147,6 +149,8 @@ impl InteractiveApp {
             composer_selection: super::selection::ComposerSelectionState::new(),
             transcript_area: Rect::default(),
             composer_area: Rect::default(),
+            header_area: Rect::default(),
+            status_bar_area: Rect::default(),
             transcript_render_cache: TranscriptRenderCache {
                 dirty: true,
                 ..TranscriptRenderCache::default()
@@ -161,7 +165,6 @@ impl InteractiveApp {
         app.load_thread(&current).await?;
         Ok(app)
     }
-
     pub async fn refresh_threads(&mut self) -> Result<()> {
         let listed = self
             .runtime
@@ -402,11 +405,59 @@ impl InteractiveApp {
     }
 
     fn mouse_to_selection_point(
-        &self,
+        &mut self,
         col: u16,
         row: u16,
         clamp_to_viewport: bool,
     ) -> Option<SelectionPoint> {
+        // ── Header area (row 0) ──────────────────────────────────────────────
+        if self.header_area.width > 0
+            && row >= self.header_area.y
+            && row < self.header_area.y + self.header_area.height
+        {
+            let right = self
+                .header_area
+                .x
+                .saturating_add(self.header_area.width.saturating_sub(1));
+            let c = if clamp_to_viewport {
+                col.clamp(self.header_area.x, right)
+            } else if col < self.header_area.x || col > right {
+                return None;
+            } else {
+                col
+            };
+            return Some(SelectionPoint {
+                line: 0,
+                col: c.saturating_sub(self.header_area.x) as usize,
+            });
+        }
+
+        // ── Status bar area (last row) ───────────────────────────────────────
+        if self.status_bar_area.width > 0
+            && row >= self.status_bar_area.y
+            && row < self.status_bar_area.y + self.status_bar_area.height
+        {
+            let right = self
+                .status_bar_area
+                .x
+                .saturating_add(self.status_bar_area.width.saturating_sub(1));
+            let c = if clamp_to_viewport {
+                col.clamp(self.status_bar_area.x, right)
+            } else if col < self.status_bar_area.x || col > right {
+                return None;
+            } else {
+                col
+            };
+            // Map to a virtual line after all transcript lines
+            let total = self.transcript_total_lines(self.transcript_area.width);
+            let virtual_line = total.saturating_sub(1).max(1);
+            return Some(SelectionPoint {
+                line: virtual_line,
+                col: c.saturating_sub(self.status_bar_area.x) as usize,
+            });
+        }
+
+        // ── Transcript area ──────────────────────────────────────────────────
         let area = self.transcript_area;
         if area.width == 0 || area.height == 0 {
             return None;
@@ -421,7 +472,6 @@ impl InteractiveApp {
             }
             (col, row)
         };
-
         Some(SelectionPoint {
             line: self.transcript_view.scroll() as usize + (row as usize - area.y as usize),
             col: col.saturating_sub(area.x) as usize,
@@ -448,9 +498,6 @@ impl InteractiveApp {
     }
 
     pub fn clear_selection(&mut self) {
-        // Reducer's clear() drops drag points + lock but preserves the
-        // last-click history so a follow-up click still pairs as a
-        // double-click.
         self.transcript_selection.clear();
     }
 

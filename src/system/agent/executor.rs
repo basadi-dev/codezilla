@@ -17,7 +17,7 @@ use self::context::TurnContext;
 use self::utils::{
     classify_turn_intent, derive_thread_title, find_repetition_start, is_degenerate_repetition,
     is_read_only_tool, recently_read_paths, should_retry_no_tool_completion, thinking_instruction,
-    TurnIntent,
+    user_requested_verification, TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
@@ -151,6 +151,7 @@ impl TurnExecutor {
 
         let agent_cfg = self.runtime.inner.effective_config.agent.clone();
         let turn_intent = classify_turn_intent(&params.input);
+        let verification_requested = user_requested_verification(&params.input);
 
         // ── Loop-break guards ─────────────────────────────────────────────────
         //
@@ -198,6 +199,8 @@ impl TurnExecutor {
         let mut seen_read_signatures: HashSet<String> = HashSet::new();
         let mut constrained_mode: Option<ConstrainedMode> = None;
         let mut constrained_mode_violations: usize = 0;
+        let mut verification_nudges: usize = 0;
+        let mut command_attempted_after_last_file_change = false;
 
         loop {
             agent_iterations += 1;
@@ -443,9 +446,15 @@ impl TurnExecutor {
                     &turn_ctx.items,
                     completed_tool_rounds,
                 );
+            let will_nudge_verification = tool_calls.is_empty()
+                && !assistant_text.is_empty()
+                && verification_requested
+                && !file_changes.is_empty()
+                && !command_attempted_after_last_file_change
+                && verification_nudges == 0;
 
             if let Some(item_id) = assistant_item_id {
-                if !will_nudge_intent {
+                if !will_nudge_intent && !will_nudge_verification {
                     let item = ConversationItem {
                         item_id,
                         thread_id: params.thread_id.clone(),
@@ -458,7 +467,7 @@ impl TurnExecutor {
                 } else {
                     tracing::debug!(
                         turn_id = %turn_id,
-                        "executor: suppressing narration persistence — intent nudge will fire"
+                        "executor: suppressing narration persistence — corrective nudge will fire"
                     );
                 }
             }
@@ -606,6 +615,60 @@ impl TurnExecutor {
                         .await?;
                     continue;
                 }
+
+                // ── Requested-verification guard ─────────────────────────────
+                // If the user explicitly asked to test/verify, do not let the
+                // agent finish immediately after editing. Require at least one
+                // command attempt after the last file change, then let the model
+                // report pass/fail normally.
+                if verification_requested
+                    && !file_changes.is_empty()
+                    && !command_attempted_after_last_file_change
+                    && verification_nudges == 0
+                {
+                    verification_nudges += 1;
+                    total_nudges += 1;
+                    if total_nudges >= agent_cfg.max_total_nudges {
+                        tracing::error!(
+                            turn_id = %turn_id,
+                            total_nudges,
+                            "executor: cumulative nudge limit reached — terminating turn"
+                        );
+                        return self
+                            .fail_turn(
+                                &params.thread_id,
+                                &turn_id,
+                                "nudge_limit",
+                                &format!(
+                                    "Agent required {total_nudges} corrections without making \
+                                     progress. The turn has been stopped."
+                                ),
+                            )
+                            .await;
+                    }
+                    tracing::warn!(
+                        turn_id = %turn_id,
+                        "executor: nudging model to verify file changes"
+                    );
+                    no_tool_nudge_instruction = Some(
+                        "You changed files, and the user explicitly asked to test or verify the \
+                         result. Do not finish yet. Emit exactly one `bash_exec` command now to \
+                         run the narrowest relevant test, build, or check command. If no direct \
+                         test exists, run the closest available validation command."
+                            .into(),
+                    );
+                    self.runtime
+                        .publish_event(
+                            RuntimeEventKind::Warning,
+                            Some(params.thread_id.clone()),
+                            Some(turn_id.clone()),
+                            json!({
+                                "message": "Agent changed files but has not run verification — retrying with a test/check nudge."
+                            }),
+                        )
+                        .await?;
+                    continue;
+                }
                 tracing::info!(
                     turn_id = %turn_id,
                     agent_iterations,
@@ -627,6 +690,9 @@ impl TurnExecutor {
 
             // Snapshot whether this round is pure read-only *before* tool_calls is moved.
             let round_is_read_only = tool_calls.iter().all(|c| is_read_only_tool(&c.tool_name));
+            let round_has_command = tool_calls
+                .iter()
+                .any(|c| matches!(c.tool_name.as_str(), "bash_exec" | "shell_exec"));
             let round_call_count = tool_calls.len();
 
             let (had_any_success, round_file_changes, invalid_tool_calls, blocked_read_only_calls) = tokio::select! {
@@ -642,6 +708,12 @@ impl TurnExecutor {
             };
             completed_tool_rounds += 1;
             total_tool_calls += round_call_count;
+            if !round_file_changes.is_empty() {
+                command_attempted_after_last_file_change = false;
+            }
+            if round_has_command {
+                command_attempted_after_last_file_change = true;
+            }
             file_changes.extend(round_file_changes);
             total_invalid_tool_calls += invalid_tool_calls;
 

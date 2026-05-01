@@ -432,6 +432,33 @@ pub(crate) fn should_retry_no_tool_completion(
         .unwrap_or(false)
 }
 
+pub(crate) fn user_requested_verification(inputs: &[UserInput]) -> bool {
+    let text = inputs
+        .iter()
+        .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = normalize_for_detection(&text);
+
+    const VERIFY_PATTERNS: &[&str] = &[
+        "test it",
+        "test this",
+        "run test",
+        "run the test",
+        "run tests",
+        "run the tests",
+        "verify",
+        "validate",
+        "make sure it passes",
+        "cargo test",
+        "cargo check",
+        "pytest",
+        "npm test",
+    ];
+
+    contains_any(&normalized, VERIFY_PATTERNS)
+}
+
 fn latest_user_text(items: &[ConversationItem]) -> Option<&str> {
     items
         .iter()
@@ -448,6 +475,48 @@ fn is_agentic_user_request(text: &str) -> bool {
         return false;
     }
 
+    const DELEGATED_ACTION_PATTERNS: &[&str] = &[
+        "can you check why",
+        "could you check why",
+        "please check why",
+        "check why",
+        "can you check what needs",
+        "could you check what needs",
+        "please check what needs",
+        "check what needs",
+        "check the code",
+        "check this project",
+        "check this repo",
+        "can you inspect",
+        "could you inspect",
+        "please inspect",
+        "can you look at",
+        "could you look at",
+        "please look at",
+        "can you debug",
+        "could you debug",
+        "please debug",
+        "can you fix",
+        "could you fix",
+        "please fix",
+        "fix it",
+        "can you change",
+        "could you change",
+        "please change",
+        "change it",
+        "can you update",
+        "could you update",
+        "please update",
+        "can you implement",
+        "could you implement",
+        "please implement",
+        "test it",
+        "run the tests",
+    ];
+    if contains_any(&normalized, DELEGATED_ACTION_PATTERNS) {
+        return true;
+    }
+
     const NON_AGENTIC_PATTERNS: &[&str] = &[
         "how can i ",
         "how do i ",
@@ -461,10 +530,7 @@ fn is_agentic_user_request(text: &str) -> bool {
         "should i ",
         "which approach",
     ];
-    if NON_AGENTIC_PATTERNS
-        .iter()
-        .any(|pattern| normalized.contains(pattern))
-    {
+    if contains_any(&normalized, NON_AGENTIC_PATTERNS) {
         return false;
     }
 
@@ -496,9 +562,11 @@ fn is_agentic_user_request(text: &str) -> bool {
         "make it",
     ];
 
-    AGENTIC_PATTERNS
-        .iter()
-        .any(|pattern| normalized.contains(pattern))
+    contains_any(&normalized, AGENTIC_PATTERNS)
+}
+
+fn contains_any(text: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|pattern| text.contains(pattern))
 }
 
 fn looks_like_unexecuted_tool_intent(text: &str) -> bool {
@@ -743,5 +811,49 @@ mod tests {
             &items,
             1
         ));
+    }
+
+    #[test]
+    fn retries_delegated_diagnostic_question_with_no_tool_call() {
+        let items = vec![user_item(
+            "can you check why that is and how it can be fixed?",
+        )];
+
+        assert!(should_retry_no_tool_completion(
+            "The issue is probably in the executor.",
+            &items,
+            0
+        ));
+    }
+
+    #[test]
+    fn retries_delegated_change_and_test_request_with_no_tool_call() {
+        let items = vec![user_item(
+            "check what needs to be changed, change it and test it",
+        )];
+
+        assert!(should_retry_no_tool_completion(
+            "I would inspect the relevant files and run tests.",
+            &items,
+            0
+        ));
+    }
+
+    #[test]
+    fn still_allows_first_person_how_to_questions_without_tools() {
+        let items = vec![user_item("how can I fix the failing build?")];
+
+        assert!(!should_retry_no_tool_completion(
+            "Start by running the failing test with verbose output.",
+            &items,
+            0
+        ));
+    }
+
+    #[test]
+    fn detects_explicit_verification_requests() {
+        let input = UserInput::from_text("change it and test it");
+
+        assert!(user_requested_verification(&[input]));
     }
 }

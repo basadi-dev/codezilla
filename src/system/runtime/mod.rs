@@ -922,7 +922,7 @@ mod fake_model_tests {
             .iter()
             .filter(|i| i.kind == ItemKind::AgentMessage)
             .filter_map(|i| i.payload.get("text").and_then(|v| v.as_str()))
-            .last()
+            .next_back()
             .unwrap_or_default()
             .to_string();
         assert!(

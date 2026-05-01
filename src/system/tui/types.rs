@@ -2303,11 +2303,9 @@ mod tests {
             "sub-agent: List the contents of `src` and summarize it."
         );
         let body = format_tool_call("spawn_agent", &args);
-        assert!(body.contains("task: List the contents"));
-        assert!(body.contains("timeout: 60s"));
         assert!(
-            !body.contains("\"prompt\""),
-            "body should not be raw JSON: {body}"
+            body.is_empty(),
+            "spawn_agent body should stay terse: {body}"
         );
     }
 

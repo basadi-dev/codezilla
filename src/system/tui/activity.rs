@@ -814,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn header_groups_parallel_spawn_agents() {
+    fn header_deduplicates_parallel_spawn_agents() {
         let mut s = ActivityState::new();
         let t0 = Instant::now();
         s.start_turn(t0);
@@ -826,7 +826,7 @@ mod tests {
             .header_line(t0 + Duration::from_secs(5), "thinking")
             .unwrap();
         assert!(
-            line.contains("spawn_agent, spawn_agent (2 in flight, 5s)"),
+            line.contains("spawn_agent (2 in flight, 5s)"),
             "got {line:?}"
         );
     }
