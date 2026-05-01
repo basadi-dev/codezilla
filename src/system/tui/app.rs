@@ -2264,7 +2264,8 @@ impl InteractiveApp {
                 _ => ChildAgentStatus::Failed,
             }
         };
-        self.activity.set_child_agent_status(&child_thread_id, status);
+        self.activity
+            .set_child_agent_status(&child_thread_id, status);
         let label = self
             .activity
             .child_agent_for_thread(&child_thread_id)
@@ -2285,21 +2286,21 @@ impl InteractiveApp {
         label: &str,
         status: ChildAgentStatus,
     ) {
-        let Some(call_idx) = self.transcript.iter().rposition(|e| {
-            e.kind == EntryKind::ToolCall
-                && e.tool_call_id.as_deref() == Some(parent_tool_call_id)
-        }) else {
+        let Some(call_idx) = self
+            .transcript
+            .iter()
+            .rposition(|e| e.kind == EntryKind::ToolCall && e.title.starts_with("sub-agent:"))
+            .or_else(|| {
+                self.transcript.iter().rposition(|e| {
+                    e.kind == EntryKind::ToolCall
+                        && e.tool_call_id.as_deref() == Some(parent_tool_call_id)
+                })
+            })
+        else {
             return;
         };
 
-        let call = &mut self.transcript[call_idx];
-        let mut children = self
-            .activity
-            .child_agents()
-            .iter()
-            .filter(|c| c.parent_tool_call_id == parent_tool_call_id)
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut children = self.activity.child_agents().to_vec();
         if children.is_empty() {
             // Defensive fallback when event ordering races before activity
             // registration catches up.
@@ -2314,47 +2315,9 @@ impl InteractiveApp {
             });
         }
 
-        let running = children
-            .iter()
-            .filter(|c| matches!(c.status, ChildAgentStatus::Running))
-            .count();
-        let done = children
-            .iter()
-            .filter(|c| matches!(c.status, ChildAgentStatus::Completed))
-            .count();
-        let failed = children
-            .iter()
-            .filter(|c| matches!(c.status, ChildAgentStatus::Failed))
-            .count();
-        let timed_out = children
-            .iter()
-            .filter(|c| matches!(c.status, ChildAgentStatus::TimedOut))
-            .count();
-        let interrupted = children
-            .iter()
-            .filter(|c| matches!(c.status, ChildAgentStatus::Interrupted))
-            .count();
-        let finished = done + failed + timed_out + interrupted;
-        let total = children.len().max(1);
         let now = std::time::Instant::now();
 
-        let bar_width = 10usize;
-        let filled = (finished * bar_width) / total;
-        let bar = format!(
-            "{}{}",
-            "█".repeat(filled),
-            "░".repeat(bar_width.saturating_sub(filled))
-        );
-
-        let mut section_lines = vec![
-            "─── sub-agents ───".to_string(),
-            format!(
-                "{total} total • {running} running • {} done • {} issues",
-                done,
-                failed + timed_out + interrupted
-            ),
-            format!("[{bar}] {finished}/{total}"),
-        ];
+        let mut section_lines = vec!["sub-agents:".to_string()];
 
         for child in &children {
             if matches!(child.status, ChildAgentStatus::Completed) {
@@ -2366,18 +2329,16 @@ impl InteractiveApp {
                     let elapsed = child.elapsed(now).as_secs();
                     if elapsed >= 45 {
                         section_lines.push(format!(
-                            "- [{}] {} {} • running • {}s • stuck",
-                            child.child_thread_id,
+                            "- {} {} • {}s • stuck",
                             frame,
-                            truncate_chars(&child.label, 78),
+                            truncate_chars(&child.label, 64),
                             elapsed
                         ));
                     } else {
                         section_lines.push(format!(
-                            "- [{}] {} {} • running • {}s",
-                            child.child_thread_id,
+                            "- {} {} • {}s",
                             frame,
-                            truncate_chars(&child.label, 78),
+                            truncate_chars(&child.label, 64),
                             elapsed
                         ));
                     }
@@ -2397,31 +2358,28 @@ impl InteractiveApp {
             };
             let elapsed_secs = child.elapsed(now).as_secs();
             section_lines.push(format!(
-                "- [{}] {} {} • {} • {}s",
-                child.child_thread_id,
+                "- {} {} • {} • {}s",
                 status_icon,
-                truncate_chars(&child.label, 78),
+                truncate_chars(&child.label, 64),
                 status_text,
                 elapsed_secs
             ));
         }
 
-        if done > 0 {
-            section_lines.push(format!("- ✓ {done} finished hidden (collapsed)"));
+        if section_lines.len() == 1 {
+            section_lines.push("- ✓ all sub-agents done".to_string());
         }
-        section_lines.push("─── end sub-agents ───".to_string());
 
         let section = format!("{}\n", section_lines.join("\n"));
-        let existing = call.body.clone();
+        let existing = self.transcript[call_idx].body.clone();
         let result_marker = "─── result ───";
-        let start_marker = "─── sub-agents ───";
-        let end_marker = "─── end sub-agents ───";
+        let start_marker = "sub-agents:";
 
         let mut rebuilt = if let Some(start) = existing.find(start_marker) {
-            let end = existing
-                .find(end_marker)
-                .map(|idx| idx + end_marker.len())
-                .unwrap_or(start);
+            let end = existing[start..]
+                .find(result_marker)
+                .map(|rel| start + rel)
+                .unwrap_or(existing.len());
             let mut s = String::new();
             s.push_str(&existing[..start]);
             s.push_str(&section);
@@ -2453,7 +2411,29 @@ impl InteractiveApp {
         if !rebuilt.ends_with('\n') {
             rebuilt.push('\n');
         }
-        call.body = rebuilt;
+        self.transcript[call_idx].body = rebuilt;
+
+        // Remove duplicate sub-agent sections from other tool-call entries.
+        for (idx, entry) in self.transcript.iter_mut().enumerate() {
+            if idx == call_idx || entry.kind != EntryKind::ToolCall {
+                continue;
+            }
+            if let Some(start) = entry.body.find(start_marker) {
+                let end = entry.body[start..]
+                    .find(result_marker)
+                    .map(|rel| start + rel)
+                    .unwrap_or(entry.body.len());
+                let mut trimmed = String::new();
+                trimmed.push_str(&entry.body[..start]);
+                if end < entry.body.len() {
+                    if !trimmed.ends_with('\n') && !trimmed.is_empty() {
+                        trimmed.push('\n');
+                    }
+                    trimmed.push_str(entry.body[end..].trim_start_matches('\n'));
+                }
+                entry.body = trimmed;
+            }
+        }
         self.invalidate_transcript_cache();
     }
 

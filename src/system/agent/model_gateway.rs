@@ -210,16 +210,15 @@ impl ModelGateway {
                                 });
                             }
                         }
-                        if !calls.is_empty() {
-                            if !send_model_event(
+                        if !calls.is_empty()
+                            && !send_model_event(
                                 &tx,
                                 &cancel_token,
                                 ModelStreamEvent::ToolCalls(calls),
                             )
                             .await
-                            {
-                                return;
-                            }
+                        {
+                            return;
                         }
                     }
                     let _ =
@@ -265,16 +264,15 @@ impl ModelGateway {
                     };
                     match complete_result {
                         Ok(response) => {
-                            if !response.content.is_empty() {
-                                if !send_model_event(
+                            if !response.content.is_empty()
+                                && !send_model_event(
                                     &tx,
                                     &cancel_token,
                                     ModelStreamEvent::AssistantDelta(response.content),
                                 )
                                 .await
-                                {
-                                    return;
-                                }
+                            {
+                                return;
                             }
                             if !response.tool_calls.is_empty() {
                                 let mut calls = Vec::new();
@@ -301,16 +299,15 @@ impl ModelGateway {
                                         });
                                     }
                                 }
-                                if !calls.is_empty() {
-                                    if !send_model_event(
+                                if !calls.is_empty()
+                                    && !send_model_event(
                                         &tx,
                                         &cancel_token,
                                         ModelStreamEvent::ToolCalls(calls),
                                     )
                                     .await
-                                    {
-                                        return;
-                                    }
+                                {
+                                    return;
                                 }
                             }
                             let usage = response.usage.unwrap_or_default();

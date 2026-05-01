@@ -1719,20 +1719,8 @@ fn format_tool_call_title(tool_name: &str, arguments: &Value) -> String {
 
 fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
     match tool_name {
-        "spawn_agent" => {
-            let mut lines = Vec::new();
-            if let Some(label) = spawn_agent_label(arguments) {
-                lines.push(format!("task: {label}"));
-            }
-            if let Some(timeout) = arguments.get("timeout_secs").and_then(Value::as_u64) {
-                lines.push(format!("timeout: {timeout}s"));
-            }
-            if lines.is_empty() {
-                pretty_json_or_text(Some(arguments), None)
-            } else {
-                lines.join("\n")
-            }
-        }
+        // Keep spawn_agent call bodies terse; the title already carries the task label.
+        "spawn_agent" => String::new(),
         "shell_exec" => {
             let mut lines = Vec::new();
             if let Some(argv) = arguments.get("argv").and_then(Value::as_array) {

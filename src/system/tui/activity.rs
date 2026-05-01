@@ -32,6 +32,7 @@
 //! covered by tests.
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// What's currently holding up the agent. Set when the runtime emits an
@@ -379,7 +380,13 @@ impl ActivityState {
                     let secs = t.elapsed(now).as_secs();
                     return Some(format!("{} ({}s)", t.label(), secs));
                 }
-                let names: Vec<&str> = self.tools.iter().map(|t| t.tool_name.as_str()).collect();
+                let mut seen = HashSet::new();
+                let names: Vec<&str> = self
+                    .tools
+                    .iter()
+                    .map(|t| t.tool_name.as_str())
+                    .filter(|name| seen.insert(*name))
+                    .collect();
                 return Some(format!(
                     "⚙ {} ({} in flight, {}s)",
                     names.join(", "),

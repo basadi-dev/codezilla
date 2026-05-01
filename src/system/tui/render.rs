@@ -33,59 +33,27 @@ pub fn draw(app: &mut InteractiveApp, frame: &mut Frame) {
     } else {
         (app.autocomplete.suggestions().len() as u16).min(8)
     };
-    // Activity panel: only shows when 2+ tools are in flight (single-tool
-    // case is already in the header line).
-    let act_h = app.activity.panel_height();
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),     // header
-            Constraint::Length(1),     // separator
-            Constraint::Length(act_h), // activity panel (0 when ≤1 tools)
-            Constraint::Min(4),        // transcript
-            Constraint::Length(ac_h),  // autocomplete list (0 when hidden)
-            Constraint::Length(ch),    // composer
-            Constraint::Length(1),     // status bar
+            Constraint::Length(1),    // header
+            Constraint::Length(1),    // separator
+            Constraint::Min(4),       // transcript
+            Constraint::Length(ac_h), // autocomplete list (0 when hidden)
+            Constraint::Length(ch),   // composer
+            Constraint::Length(1),    // status bar
         ])
         .split(frame.area());
 
     render_header(app, frame, outer[0]);
     render_separator(frame, outer[1]);
-    if act_h > 0 {
-        render_activity_panel(app, frame, outer[2]);
-    }
-    render_transcript(app, frame, outer[3]);
+    render_transcript(app, frame, outer[2]);
     if ac_h > 0 {
-        render_autocomplete(app, frame, outer[4]);
+        render_autocomplete(app, frame, outer[3]);
     }
-    render_composer(app, frame, outer[5]);
-    render_status_bar(app, frame, outer[6]);
-}
-
-/// Multi-tool activity panel — one line per in-flight tool with elapsed
-/// time. Rendered only when [`ActivityState::panel_height`] > 0.
-fn render_activity_panel(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
-    if area.height == 0 {
-        return;
-    }
-    let now = std::time::Instant::now();
-    let rows = app.activity.panel_rows(now);
-    let lines: Vec<Line> = rows
-        .into_iter()
-        .map(|row| {
-            Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    row,
-                    Style::default()
-                        .fg(COLOR_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+    render_composer(app, frame, outer[4]);
+    render_status_bar(app, frame, outer[5]);
 }
 
 // ─── Header ────────────────────────────────────────────────────────────────────
