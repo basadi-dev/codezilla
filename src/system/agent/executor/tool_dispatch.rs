@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::system::agent::executor::context::TurnContext;
 use crate::system::agent::executor::utils::{
-    action_for_tool_call, partition_into_batches, promote_to_bash_if_needed, read_signature,
-    validate_tool_call,
+    action_for_tool_call, is_read_only_tool, partition_into_batches, promote_to_bash_if_needed,
+    read_signature, validate_tool_call,
 };
 use crate::system::domain::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, ConversationItem, FileChangeSummary,
@@ -30,7 +30,8 @@ impl TurnExecutor {
         ctx: &TurnContext,
         tool_calls: Vec<ToolCall>,
         seen_read_signatures: &mut HashSet<String>,
-    ) -> Result<(bool, Vec<FileChangeSummary>, usize)> {
+        block_read_only_tools: bool,
+    ) -> Result<(bool, Vec<FileChangeSummary>, usize, usize)> {
         // 1. Normalise: rewrite shell_exec with shell operators → bash_exec.
         let calls: Vec<ToolCall> = tool_calls
             .into_iter()
@@ -40,6 +41,7 @@ impl TurnExecutor {
         // 2. Persist all ToolCall items in original order *before* executing
         //    anything, so the transcript always shows calls before results.
         let mut invalid_tool_calls: usize = 0;
+        let mut blocked_read_only_calls: usize = 0;
         let mut valid_calls: Vec<ToolCall> = Vec::new();
         for call in &calls {
             let call_item = ConversationItem {
@@ -51,6 +53,23 @@ impl TurnExecutor {
                 payload: serde_json::to_value(call)?,
             };
             self.persist_turn_item(call_item).await?;
+
+            if block_read_only_tools && is_read_only_tool(&call.tool_name) {
+                blocked_read_only_calls += 1;
+                let result = ToolResult {
+                    tool_call_id: call.tool_call_id.clone(),
+                    ok: false,
+                    output: json!({
+                        "error": "read_only_blocked",
+                        "tool": call.tool_name,
+                        "details": "read-only tools are blocked after exploration budget was exhausted",
+                    }),
+                    error_message: Some(format!("read_only_blocked: {}", call.tool_name)),
+                };
+                self.persist_tool_result(&ctx.params.thread_id, &ctx.turn_id, &result)
+                    .await?;
+                continue;
+            }
 
             if let Some(reason) = validate_tool_call(call) {
                 invalid_tool_calls += 1;
@@ -159,7 +178,12 @@ impl TurnExecutor {
             }
         }
 
-        Ok((had_any_success, file_changes, invalid_tool_calls))
+        Ok((
+            had_any_success,
+            file_changes,
+            invalid_tool_calls,
+            blocked_read_only_calls,
+        ))
     }
 
     /// Execute a single batch of tool calls.

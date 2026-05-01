@@ -8,6 +8,11 @@ mod context;
 mod tool_dispatch;
 mod utils;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstrainedMode {
+    FinalOrActionOnly,
+}
+
 use self::context::TurnContext;
 use self::utils::{
     classify_turn_intent, derive_thread_title, find_repetition_start, is_degenerate_repetition,
@@ -191,6 +196,8 @@ impl TurnExecutor {
         let mut total_nudges: usize = 0;
         let mut total_invalid_tool_calls: usize = 0;
         let mut seen_read_signatures: HashSet<String> = HashSet::new();
+        let mut constrained_mode: Option<ConstrainedMode> = None;
+        let mut constrained_mode_violations: usize = 0;
 
         loop {
             agent_iterations += 1;
@@ -622,11 +629,16 @@ impl TurnExecutor {
             let round_is_read_only = tool_calls.iter().all(|c| is_read_only_tool(&c.tool_name));
             let round_call_count = tool_calls.len();
 
-            let (had_any_success, round_file_changes, invalid_tool_calls) = tokio::select! {
+            let (had_any_success, round_file_changes, invalid_tool_calls, blocked_read_only_calls) = tokio::select! {
                 _ = turn_ctx.cancel_token.cancelled() => {
                     return self.complete_interrupted(&params.thread_id, &turn_id).await;
                 }
-                result = self.execute_tool_round(&turn_ctx, tool_calls, &mut seen_read_signatures) => result?,
+                result = self.execute_tool_round(
+                    &turn_ctx,
+                    tool_calls,
+                    &mut seen_read_signatures,
+                    constrained_mode.is_some(),
+                ) => result?,
             };
             completed_tool_rounds += 1;
             total_tool_calls += round_call_count;
@@ -651,12 +663,36 @@ impl TurnExecutor {
                         .await;
                 }
             }
+            if blocked_read_only_calls > 0 {
+                constrained_mode_violations += 1;
+                tracing::warn!(
+                    turn_id = %turn_id,
+                    blocked_read_only_calls,
+                    constrained_mode_violations,
+                    "executor: constrained mode violation (read-only calls while blocked)"
+                );
+                if constrained_mode_violations >= 2 {
+                    return self
+                        .fail_turn(
+                            &params.thread_id,
+                            &turn_id,
+                            "constrained_mode_violation",
+                            "The model kept issuing read-only tools after being instructed to act or provide a final answer.",
+                        )
+                        .await;
+                }
+                no_tool_nudge_instruction = Some(
+                    "Read-only tools are now blocked. Your next response must either call `patch_file`, call `bash_exec`, or provide the final answer."
+                        .into(),
+                );
+                continue;
+            }
 
             // ── Read-only exploration guard ───────────────────────────────────
             // Reset when any action tool ran this round; bump when every call
             // was read-only. On hitting the threshold inject a single nudge and
             // reset so a follow-up nudge fires again if the model ignores it.
-            if round_is_read_only {
+            if constrained_mode.is_none() && round_is_read_only {
                 consecutive_read_only_rounds += 1;
                 // Effective threshold shrinks with each nudge.
                 let effective_read_only_limit =
@@ -670,25 +706,7 @@ impl TurnExecutor {
                 if consecutive_read_only_rounds >= effective_read_only_limit {
                     consecutive_read_only_rounds = 0;
                     total_nudges += 1;
-                    if total_nudges >= agent_cfg.max_total_nudges {
-                        tracing::error!(
-                            turn_id = %turn_id,
-                            total_nudges,
-                            intent = ?turn_intent,
-                            "executor: cumulative read-only nudge limit reached — terminating turn"
-                        );
-                        return self
-                            .fail_turn(
-                                &params.thread_id,
-                                &turn_id,
-                                "read_only_limit",
-                                &format!(
-                                    "The model exceeded the read-only exploration budget for \
-                                     this turn after {total_nudges} corrective nudges."
-                                ),
-                            )
-                            .await;
-                    }
+                    constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
                     let recent_files = recently_read_paths(&turn_ctx.items);
                     let file_hint = if recent_files.is_empty() {
                         String::new()
@@ -703,13 +721,13 @@ impl TurnExecutor {
                     };
                     let msg = match turn_intent {
                         TurnIntent::Answer | TurnIntent::Review | TurnIntent::Inventory => format!(
-                            "You have enough context. Stop issuing read-only tools and provide the final answer now.{file_hint}"
+                            "You have enough context. Your next response must provide the final answer. \
+                             Do not call `read_file`, `grep_search`, or `list_dir` again.{file_hint}"
                         ),
                         _ => format!(
-                            "You have spent {effective_read_only_limit} consecutive rounds \
-                             reading files without taking any action. Stop reading and act now. \
-                             Either use `patch_file` to edit code, `bash_exec` to run a command, \
-                             or give a final answer.{file_hint}"
+                            "You have enough context. Your next response must either call `patch_file`, \
+                             call `bash_exec`, or provide the final answer. Do not call `read_file`, \
+                             `grep_search`, or `list_dir` again.{file_hint}"
                         ),
                     };
                     tracing::warn!(
@@ -731,7 +749,7 @@ impl TurnExecutor {
                         .await?;
                     no_tool_nudge_instruction = Some(msg);
                 }
-            } else {
+            } else if constrained_mode.is_none() {
                 if consecutive_read_only_rounds > 0 {
                     tracing::debug!(
                         turn_id = %turn_id,
@@ -740,6 +758,15 @@ impl TurnExecutor {
                     );
                 }
                 consecutive_read_only_rounds = 0;
+            }
+
+            if constrained_mode.is_some() && !round_is_read_only && had_any_success {
+                constrained_mode = None;
+                constrained_mode_violations = 0;
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    "executor: constrained mode cleared after successful action"
+                );
             }
 
             // ── Consecutive-failure guard ─────────────────────────────────────
