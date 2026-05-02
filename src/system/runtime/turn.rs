@@ -87,7 +87,7 @@ impl ConversationRuntime {
                         &thread_id_for_task,
                         &turn_id,
                         err.kind.label(),
-                        &err.message,
+                        &error_text,
                     )
                     .await;
             }

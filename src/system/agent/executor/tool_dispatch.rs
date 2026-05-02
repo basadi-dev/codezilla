@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use futures::future::join_all;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -13,6 +13,7 @@ use crate::system::domain::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, ConversationItem, FileChangeSummary,
     ItemKind, RuntimeEventKind, ToolCall, ToolExecutionContext, ToolResult, TurnStatus,
 };
+use crate::system::error as cod_error;
 
 use super::TurnExecutor;
 
@@ -163,7 +164,7 @@ impl TurnExecutor {
             tracing::debug!(turn_id = %ctx.turn_id, "tool_round: calling dispatch_batch");
             let results = self.dispatch_batch(ctx, batch).await?;
             tracing::debug!(turn_id = %ctx.turn_id, n = results.len(), "tool_round: dispatch_batch returned");
-            for result in results {
+            for mut result in results {
                 if result.ok {
                     had_any_success = true;
                     tracing::debug!(
@@ -176,12 +177,37 @@ impl TurnExecutor {
                         file_changes.push(change);
                     }
                 } else {
+                    let raw_error = result
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "<none>".to_string());
+                    let normalized_error = cod_error::from_raw(&raw_error).message;
+                    result.error_message = Some(normalized_error.clone());
+                    if let Value::Object(obj) = &mut result.output {
+                        obj.insert("rawError".into(), Value::String(raw_error.clone()));
+                        obj.insert(
+                            "normalizedError".into(),
+                            Value::String(normalized_error.clone()),
+                        );
+                    }
                     tracing::warn!(
                         turn_id = %ctx.turn_id,
                         tool_call_id = %result.tool_call_id,
-                        error = result.error_message.as_deref().unwrap_or("<none>"),
+                        error = %normalized_error,
                         output = %result.output,
                         "tool_result: FAILED"
+                    );
+                    let _ = self.runtime.inner.persistence_manager.append_log(
+                        "warn",
+                        &format!(
+                            "tool_failed thread_id={} turn_id={} tool_call_id={} error={} raw_error={} output={}",
+                            ctx.params.thread_id,
+                            ctx.turn_id,
+                            result.tool_call_id,
+                            normalized_error,
+                            raw_error,
+                            result.output
+                        ),
                     );
                 }
                 tracing::debug!(turn_id = %ctx.turn_id, "tool_round: calling persist_tool_result");
