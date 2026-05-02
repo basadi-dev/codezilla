@@ -1192,26 +1192,32 @@ impl TurnExecutor {
     ) -> Result<()> {
         let raw_message = message.to_string();
         let normalized_message = cod_error::from_raw(message).message;
+        let api_request_id = cod_error::extract_api_request_id(&raw_message);
         let _ = self.runtime.inner.persistence_manager.append_log(
             "error",
             &format!(
-                "turn_failed thread_id={thread_id} turn_id={turn_id} kind={kind_label} message={normalized_message} raw={raw_message}"
+                "turn_failed thread_id={thread_id} turn_id={turn_id} kind={kind_label} message={normalized_message} raw={raw_message} api_request_id={}",
+                api_request_id.clone().unwrap_or_else(|| "<none>".into())
             ),
         );
 
         // Persist a visible Error item so the failure reason appears in the
         // transcript and survives thread reloads.
+        let mut error_payload = json!({
+            "kind": kind_label,
+            "message": normalized_message,
+            "rawMessage": raw_message,
+        });
+        if let Some(request_id) = &api_request_id {
+            error_payload["apiRequestId"] = json!(request_id);
+        }
         let error_item = ConversationItem {
             item_id: format!("item_{}", Uuid::new_v4().simple()),
             thread_id: thread_id.into(),
             turn_id: turn_id.into(),
             created_at: now_seconds(),
             kind: ItemKind::Error,
-            payload: json!({
-                "kind": kind_label,
-                "message": normalized_message,
-                "rawMessage": raw_message,
-            }),
+            payload: error_payload,
         };
         self.persist_turn_item(error_item).await?;
 
@@ -1254,16 +1260,21 @@ impl TurnExecutor {
             .await
             .remove(thread_id);
 
+        let mut event_payload = json!({
+            "kind": kind_label,
+            "reason": normalized_message,
+            "rawReason": raw_message,
+        });
+        if let Some(request_id) = api_request_id {
+            event_payload["apiRequestId"] = json!(request_id);
+        }
+
         self.runtime
             .publish_event(
                 crate::system::domain::RuntimeEventKind::TurnFailed,
                 Some(thread_id.into()),
                 Some(turn_id.into()),
-                json!({
-                    "kind": kind_label,
-                    "reason": normalized_message,
-                    "rawReason": raw_message,
-                }),
+                event_payload,
             )
             .await?;
         Ok(())

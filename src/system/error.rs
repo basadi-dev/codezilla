@@ -146,7 +146,10 @@ pub fn classify(raw: &str) -> ErrorKind {
     if lower.contains("401") || lower.contains("unauthori") || lower.contains("invalid api key") {
         return ErrorKind::AuthError;
     }
-    if lower.contains("api error") || lower.contains("http error") {
+    if lower.contains("api error")
+        || lower.contains("http error")
+        || lower.contains("api returned an error")
+    {
         return ErrorKind::ApiError;
     }
     if lower.contains("stream") && (lower.contains("fail") || lower.contains("error")) {
@@ -299,17 +302,56 @@ fn extract_api_detail(raw: &str) -> String {
                 .or_else(|| v.pointer("/message"))
                 .and_then(|m| m.as_str());
             if let Some(msg) = msg {
-                return format!(" ({msg})");
+                return format!(" ({})", sanitize_api_detail(msg));
             }
         }
     }
+    if let Some(req_id) = extract_api_request_id(raw) {
+        return format!(" ({req_id})");
+    }
     // Fall back to the last colon-separated segment
-    let last = raw.rsplit(':').next().unwrap_or("").trim();
+    let last = sanitize_api_detail(raw.rsplit(':').next().unwrap_or("").trim());
     if last.is_empty() || last == raw {
         String::new()
     } else {
         format!(" ({last})")
     }
+}
+
+pub fn extract_api_request_id(raw: &str) -> Option<String> {
+    raw.split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+        .find(|tok| is_uuid_v4ish(tok))
+        .map(ToOwned::to_owned)
+}
+
+fn sanitize_api_detail(input: &str) -> String {
+    input
+        .trim()
+        .trim_matches('"')
+        .trim_end_matches("\\\"})")
+        .trim_end_matches("\"})")
+        .trim_end_matches("})")
+        .trim_end_matches(')')
+        .trim_end_matches('"')
+        .trim()
+        .to_string()
+}
+
+fn is_uuid_v4ish(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    for (idx, ch) in s.chars().enumerate() {
+        let dash = matches!(idx, 8 | 13 | 18 | 23);
+        if dash {
+            if ch != '-' {
+                return false;
+            }
+        } else if !ch.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
 }
 
 fn strip_codezilla_prefix(raw: &str) -> String {

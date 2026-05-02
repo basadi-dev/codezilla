@@ -182,6 +182,7 @@ impl TurnExecutor {
                         .clone()
                         .unwrap_or_else(|| "<none>".to_string());
                     let normalized_error = cod_error::from_raw(&raw_error).message;
+                    let api_request_id = cod_error::extract_api_request_id(&raw_error);
                     result.error_message = Some(normalized_error.clone());
                     if let Value::Object(obj) = &mut result.output {
                         obj.insert("rawError".into(), Value::String(raw_error.clone()));
@@ -189,6 +190,9 @@ impl TurnExecutor {
                             "normalizedError".into(),
                             Value::String(normalized_error.clone()),
                         );
+                        if let Some(request_id) = &api_request_id {
+                            obj.insert("apiRequestId".into(), Value::String(request_id.clone()));
+                        }
                     }
                     tracing::warn!(
                         turn_id = %ctx.turn_id,
