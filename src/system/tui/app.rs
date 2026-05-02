@@ -156,6 +156,8 @@ struct CachedTranscriptEntry {
     /// counting lines in the scroll arithmetic for markdown entries).
     body_lines: Vec<String>,
     line_count: usize,
+    /// When true, only the header line is rendered (body is hidden).
+    collapsed: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1155,6 +1157,7 @@ impl InteractiveApp {
                 timestamp: Some(ts),
                 completed_at: None,
                 pending: true,
+                collapsed: false,
             });
         }
         self.transcript_view.jump_to_bottom();
@@ -2001,6 +2004,7 @@ impl InteractiveApp {
                 timestamp: Some(event.emitted_at / 1000),
                 completed_at: None,
                 pending: true,
+                collapsed: false,
             });
         }
 
@@ -2102,6 +2106,7 @@ impl InteractiveApp {
                 timestamp: Some(event.emitted_at / 1000),
                 completed_at: None,
                 pending: true,
+                collapsed: false,
             });
         }
         self.status_message = "Streaming response…".into();
@@ -2195,10 +2200,24 @@ impl InteractiveApp {
     ) {
         let result_body =
             format_tool_result(item.payload.get("output"), item.payload.get("errorMessage"));
-        let suffix = if tool_result_not_spawned(result) {
+        let base_suffix = if tool_result_not_spawned(result) {
             "skipped"
         } else {
             "done"
+        };
+
+        // For collapsed entries, extract a brief summary from the result output
+        // so the header reads e.g. "read_file  main.rs → done  (142 lines)".
+        let suffix = if self.transcript.get(call_idx).is_some_and(|e| e.collapsed) {
+            let output = item.payload.get("output");
+            let summary = collapsed_result_summary(output);
+            if summary.is_empty() {
+                base_suffix.to_string()
+            } else {
+                format!("{base_suffix}  ({summary})")
+            }
+        } else {
+            base_suffix.to_string()
         };
 
         {
@@ -2208,7 +2227,7 @@ impl InteractiveApp {
             }
             call.body.push_str("─── result ───\n");
             call.body.push_str(&result_body);
-            call.title = title_with_status_suffix(&call.title, suffix);
+            call.title = title_with_status_suffix(&call.title, &suffix);
             call.pending = false;
             call.completed_at = Some(item.created_at);
         }
@@ -2320,6 +2339,7 @@ impl InteractiveApp {
             timestamp,
             completed_at: None,
             pending: false,
+            collapsed: false,
         });
         // Do NOT force auto_scroll — respect user scroll position.
     }
@@ -2338,6 +2358,7 @@ impl InteractiveApp {
             timestamp: None,
             completed_at: None,
             pending: true,
+            collapsed: false,
         });
     }
 
@@ -2795,6 +2816,7 @@ impl InteractiveApp {
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
+            collapsed: false,
         }
     }
 
@@ -3070,6 +3092,65 @@ fn title_with_status_suffix(title: &str, suffix: &str) -> String {
     format!("{base} → {suffix}")
 }
 
+/// Extract a brief summary string from a tool result's raw output JSON.
+///
+/// Used only for collapsed entries so the header shows context, e.g.:
+/// - `read_file  main.rs → done  (142 lines)`
+/// - `list_dir  src → done  (42 entries)`
+/// - `grep_search  /foo/ → done  (5 matches)`
+fn collapsed_result_summary(output: Option<&Value>) -> String {
+    let Some(output) = output else {
+        return String::new();
+    };
+
+    // read_file: { path, content }
+    if let Some(content) = output.get("content").and_then(Value::as_str) {
+        let lines = content.lines().count();
+        return format!("{lines} lines");
+    }
+
+    // list_dir: { entries: [...], count, truncated }
+    if let Some(entries) = output.get("entries").and_then(Value::as_array) {
+        let count = output
+            .get("count")
+            .and_then(Value::as_u64)
+            .unwrap_or(entries.len() as u64);
+        let truncated = output
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let suffix = if truncated { "+" } else { "" };
+        return format!("{count}{suffix} entries");
+    }
+
+    // grep_search: { matches: [...] }
+    if let Some(matches) = output.get("matches").and_then(Value::as_array) {
+        let n = matches.len();
+        return if n == 1 {
+            "1 match".to_string()
+        } else {
+            format!("{n} matches")
+        };
+    }
+
+    // web_fetch: { url, status, total_chars }
+    if let Some(status) = output.get("status").and_then(Value::as_u64) {
+        if output.get("url").is_some() {
+            let chars = output
+                .get("total_chars")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            return format!("HTTP {status} · {chars} chars");
+        }
+    }
+
+    // simple ok: { ok: true, path }
+    if output.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return "ok".to_string();
+    }
+
+    String::new()
+}
 fn tool_hint_from_arguments(arguments: Option<&Value>) -> Option<String> {
     arguments
         .and_then(|a| {
@@ -3213,7 +3294,10 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
 
         // Working timer with no body collapses to header + trailing-blank only;
         // every other entry guarantees at least one body row.
-        let body_line_count = if is_working_timer && body_lines.is_empty() {
+        let body_line_count = if entry.collapsed && !entry.pending {
+            // Collapsed entries hide their body entirely.
+            0
+        } else if is_working_timer && body_lines.is_empty() {
             0
         } else {
             body_lines.len().max(1)
@@ -3231,6 +3315,7 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             raw_body,
             body_lines,
             line_count,
+            collapsed: entry.collapsed,
         });
     }
 
@@ -3323,11 +3408,26 @@ fn append_cached_transcript_entry_lines(
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        // Show collapse/expand chevron on collapsible (auto-collapsed) entries.
+        if entry.collapsed && !entry.pending {
+            header_spans.push(Span::styled(
+                "  ▸",
+                Style::default().fg(COLOR_MUTED),
+            ));
+        }
         out.push(Line::from(header_spans));
     }
     current_line += 1;
 
     // ── Body ─────────────────────────────────────────────────────────────────
+    // Collapsed entries skip the body entirely — only the header is shown.
+    if entry.collapsed && !entry.pending {
+        if current_line >= start_line && current_line < end_line {
+            out.push(Line::from(""));
+        }
+        return;
+    }
+
     let use_markdown = matches!(
         entry.kind,
         EntryKind::User | EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning

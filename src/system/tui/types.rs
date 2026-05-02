@@ -143,6 +143,9 @@ pub struct TranscriptEntry {
     pub timestamp: Option<i64>,
     pub completed_at: Option<i64>,
     pub pending: bool,
+    /// When true, only the header line is shown in the transcript; the body
+    /// is hidden. Read-only tool calls auto-collapse to reduce noise.
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -626,6 +629,25 @@ pub fn entry_style(kind: EntryKind) -> (&'static str, Color, Color) {
 
 // ─── Utility functions shared across tui modules ──────────────────────────────
 
+/// Returns true for tools whose transcript output should be collapsed by default.
+///
+/// Read-only / low-signal tools collapse to a header-only line to reduce
+/// transcript noise. Action tools (bash, write, patch, spawn_agent) remain
+/// expanded because users need to see their output (diffs, command results).
+pub fn should_auto_collapse_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file"
+            | "list_dir"
+            | "grep_search"
+            | "web_fetch"
+            | "image_metadata"
+            | "create_directory"
+            | "remove_path"
+            | "copy_path"
+    )
+}
+
 pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
     let tool_call_id = item
         .payload
@@ -648,6 +670,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
+            collapsed: false,
         },
         ItemKind::SystemMessage => TranscriptEntry {
             item_id: item.item_id.clone(),
@@ -663,6 +686,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
+            collapsed: false,
         },
         ItemKind::AgentMessage => TranscriptEntry {
             item_id: item.item_id.clone(),
@@ -678,33 +702,30 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
+            collapsed: false,
         },
-        ItemKind::ToolCall => TranscriptEntry {
-            item_id: item.item_id.clone(),
-            tool_call_id,
-            kind: EntryKind::ToolCall,
-            title: format_tool_call_title(
-                item.payload
-                    .get("toolName")
-                    .and_then(|v: &serde_json::Value| v.as_str())
-                    .unwrap_or("tool"),
-                item.payload
-                    .get("arguments")
-                    .unwrap_or(&serde_json::Value::Null),
-            ),
-            body: format_tool_call(
-                item.payload
-                    .get("toolName")
-                    .and_then(|v: &serde_json::Value| v.as_str())
-                    .unwrap_or("tool"),
-                item.payload
-                    .get("arguments")
-                    .unwrap_or(&serde_json::Value::Null),
-            ),
-            timestamp: Some(item.created_at),
-            completed_at: None,
-            pending: false,
-        },
+        ItemKind::ToolCall => {
+            let tool_name = item
+                .payload
+                .get("toolName")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or("tool");
+            let arguments = item
+                .payload
+                .get("arguments")
+                .unwrap_or(&serde_json::Value::Null);
+            TranscriptEntry {
+                item_id: item.item_id.clone(),
+                tool_call_id,
+                kind: EntryKind::ToolCall,
+                title: format_tool_call_title(tool_name, arguments),
+                body: format_tool_call(tool_name, arguments),
+                timestamp: Some(item.created_at),
+                completed_at: None,
+                pending: false,
+                collapsed: should_auto_collapse_tool(tool_name),
+            }
+        }
         ItemKind::ToolResult => TranscriptEntry {
             item_id: item.item_id.clone(),
             tool_call_id,
@@ -714,6 +735,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
+            collapsed: false,
         },
         ItemKind::ReasoningSummary => TranscriptEntry {
             item_id: item.item_id.clone(),
@@ -730,6 +752,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
+            collapsed: false,
         },
         ItemKind::ReasoningText => TranscriptEntry {
             item_id: item.item_id.clone(),
@@ -745,6 +768,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
+            collapsed: false,
         },
         ItemKind::UserAttachment => TranscriptEntry {
             item_id: item.item_id.clone(),
@@ -760,6 +784,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
+            collapsed: false,
         },
         ItemKind::Error => {
             // Prefer structured { kind, message } payload produced by the new error pipeline.
@@ -786,6 +811,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 timestamp: Some(item.created_at),
                 completed_at: None,
                 pending: false,
+                collapsed: false,
             }
         }
         ItemKind::FileChange => {
@@ -829,6 +855,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 timestamp: Some(item.created_at),
                 completed_at: None,
                 pending: false,
+                collapsed: false,
             }
         }
         ItemKind::CommandExecution => {
@@ -876,6 +903,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 timestamp: Some(item.created_at),
                 completed_at: None,
                 pending: false,
+                collapsed: false,
             }
         }
         ItemKind::CommandOutput => {
@@ -913,11 +941,13 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 timestamp: Some(item.created_at),
                 completed_at: None,
                 pending: false,
+                collapsed: false,
             }
         }
         _ => TranscriptEntry {
             item_id: item.item_id.clone(),
             tool_call_id: None,
+            collapsed: false,
             kind: EntryKind::Status,
             title: format!("{:?}", item.kind).to_lowercase(),
             body: pretty_json_or_text(Some(&item.payload), None),
@@ -1046,7 +1076,10 @@ pub fn split_at_width(s: &str, width: usize) -> Vec<String> {
 
 fn transcript_entry_line_count(entry: &TranscriptEntry, body_width: usize) -> usize {
     let is_working_timer = entry.item_id.starts_with("__codezilla_working__");
-    let body_lines = if entry.body.is_empty() && is_working_timer {
+    let body_lines = if entry.collapsed && !entry.pending {
+        // Collapsed entries show header + trailing blank only (no body).
+        0
+    } else if entry.body.is_empty() && is_working_timer {
         0
     } else if entry.body.is_empty() && entry.pending {
         1
@@ -1143,11 +1176,26 @@ fn append_transcript_entry_lines(
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        // Show collapse/expand chevron on collapsible entries.
+        if entry.collapsed && !entry.pending {
+            header_spans.push(Span::styled(
+                "  ▸",
+                Style::default().fg(COLOR_MUTED),
+            ));
+        }
         out.push(Line::from(header_spans));
     }
     current_line += 1;
 
     // ── Body ─────────────────────────────────────────────────────────────────
+    // Collapsed entries skip the body entirely — only the header is shown.
+    if entry.collapsed && !entry.pending {
+        if current_line >= start_line && current_line < end_line {
+            out.push(Line::from(""));
+        }
+        return;
+    }
+
     let use_markdown = matches!(
         entry.kind,
         EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
@@ -1732,6 +1780,72 @@ fn format_tool_call_title(tool_name: &str, arguments: &Value) -> String {
         "spawn_agent" => spawn_agent_label(arguments)
             .map(|label| format!("sub-agent: {label}"))
             .unwrap_or_else(|| "sub-agent".to_string()),
+
+        // Read-only / collapsible tools: embed the key argument in the title
+        // so collapsed entries show context (e.g. "read_file  main.rs").
+        "read_file" | "write_file" | "create_directory" | "remove_path" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .map(basename)
+                .unwrap_or_default();
+            if path.is_empty() {
+                tool_name.to_string()
+            } else {
+                format!("{tool_name}  {path}")
+            }
+        }
+        "list_dir" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or(".");
+            let short = basename(path);
+            format!("{tool_name}  {short}")
+        }
+        "grep_search" => {
+            let pattern = arguments
+                .get("pattern")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .map(basename)
+                .unwrap_or_else(|| ".".into());
+            format!("{tool_name}  /{pattern}/  in {path}")
+        }
+        "web_fetch" => {
+            let url = arguments
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            // Show just the domain for brevity.
+            let short = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"))
+                .unwrap_or(url)
+                .split('/')
+                .next()
+                .unwrap_or(url);
+            format!("{tool_name}  {short}")
+        }
+        "copy_path" => {
+            let source = arguments
+                .get("source")
+                .and_then(Value::as_str)
+                .map(basename);
+            let target = arguments
+                .get("target")
+                .and_then(Value::as_str)
+                .map(basename);
+            match (source, target) {
+                (Some(s), Some(t)) => format!("{tool_name}  {s} → {t}"),
+                (Some(s), None) => format!("{tool_name}  {s}"),
+                _ => tool_name.to_string(),
+            }
+        }
+
         _ => tool_name.to_string(),
     }
 }
@@ -2372,8 +2486,11 @@ mod tests {
 
     #[test]
     fn entry_elapsed_runs_for_pending_and_freezes_when_completed() {
-        assert_eq!(entry_elapsed_secs(Some(10), None, true, 14), Some(4));
+        // Pending entry with no completed_at → None (elapsed shown via Working timer instead).
+        assert_eq!(entry_elapsed_secs(Some(10), None, true, 14), None);
+        // Completed entry → frozen duration from start to completed_at.
         assert_eq!(entry_elapsed_secs(Some(10), Some(12), false, 99), Some(2));
+        // No start timestamp → None.
         assert_eq!(entry_elapsed_secs(Some(10), None, false, 99), None);
     }
 
@@ -2389,6 +2506,7 @@ mod tests {
                 timestamp: Some(10),
                 completed_at: None,
                 pending: false,
+                collapsed: false,
             },
             TranscriptEntry {
                 item_id: "a1".into(),
@@ -2399,6 +2517,7 @@ mod tests {
                 timestamp: Some(15),
                 completed_at: Some(18),
                 pending: false,
+                collapsed: false,
             },
         ];
 
