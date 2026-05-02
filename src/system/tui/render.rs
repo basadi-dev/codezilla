@@ -635,7 +635,14 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
         .context_window
         .unwrap_or(100_000);
     let prompt_budget = context_window.saturating_sub(8_192);
-    let used_pct = (usage.input_tokens as f64 / prompt_budget as f64) * 100.0;
+    // `ctx` should reflect current prompt occupancy (latest turn), not the
+    // cumulative "tokens in" counter across all turns.
+    let context_input_tokens = if app.streaming_turn_usage.input_tokens > 0 {
+        app.streaming_turn_usage.input_tokens
+    } else {
+        app.latest_prompt_input_tokens
+    };
+    let used_pct = (context_input_tokens as f64 / prompt_budget as f64) * 100.0;
     let remaining_pct = (100.0 - used_pct).max(0.0);
 
     let token_part = {

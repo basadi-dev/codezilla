@@ -187,6 +187,8 @@ pub struct InteractiveApp {
     pub active_turn_id: Option<String>,
     /// Cumulative token usage from completed turns (input + output tokens).
     pub token_usage: TokenUsage,
+    /// Latest completed-turn prompt input tokens (used for context % display).
+    pub latest_prompt_input_tokens: i64,
     /// Token usage for the currently streaming turn (replaced, not accumulated).
     pub streaming_turn_usage: TokenUsage,
     pub status_message: String,
@@ -247,6 +249,7 @@ impl InteractiveApp {
             approval: super::approval::ApprovalState::new(),
             active_turn_id: None,
             token_usage: TokenUsage::default(),
+            latest_prompt_input_tokens: 0,
             streaming_turn_usage: TokenUsage::default(),
             status_message: "Ready".into(),
             error_message: None,
@@ -336,6 +339,13 @@ impl InteractiveApp {
                 output_tokens: acc.output_tokens + t.token_usage.output_tokens,
                 cached_tokens: acc.cached_tokens + t.token_usage.cached_tokens,
             });
+        self.latest_prompt_input_tokens = persisted
+            .turns
+            .iter()
+            .filter(|t| t.status == TurnStatus::Completed)
+            .max_by_key(|t| t.updated_at)
+            .map(|t| t.token_usage.input_tokens)
+            .unwrap_or(0);
         self.streaming_turn_usage = TokenUsage::default();
         self.approval.set_pending(None);
         self.transcript_selection.clear();
@@ -1831,6 +1841,7 @@ impl InteractiveApp {
                 // whole struct (which would fail on missing fields).
                 if let Some(usage_val) = event.payload.get("tokenUsage") {
                     if let Ok(usage) = serde_json::from_value::<TokenUsage>(usage_val.clone()) {
+                        self.latest_prompt_input_tokens = usage.input_tokens;
                         self.token_usage.input_tokens += usage.input_tokens;
                         self.token_usage.output_tokens += usage.output_tokens;
                         self.token_usage.cached_tokens += usage.cached_tokens;

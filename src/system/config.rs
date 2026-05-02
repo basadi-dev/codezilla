@@ -204,7 +204,7 @@ pub struct OpenAiConfig {
 }
 
 fn default_ollama_url() -> String {
-    "http://localhost:11434".into()
+    "https://ollama.com".into()
 }
 
 // ── Domain imports ────────────────────────────────────────────────────────────
@@ -714,9 +714,15 @@ fn default_app_home() -> PathBuf {
 fn default_spec_config_json() -> Value {
     json!({
         "model_settings": {
-            "model_id": "qwen3-coder:480b",
+            "model_id": "glm-5.1:cloud",
             "provider_id": "ollama",
             "web_search_enabled": false
+        },
+        "llm": {
+            "ollama": {
+                "base_url": "https://ollama.com",
+                "auth_type": "bearer"
+            }
         },
         "approval_policy": { "kind": "ON_REQUEST" },
         "approvals_reviewer": "USER",
@@ -743,6 +749,30 @@ fn default_spec_config_json() -> Value {
             "child_timeout_secs": 120,
             "max_child_timeout_secs": 600
         },
+        "auto_compaction": {
+            "enabled": true,
+            "threshold_pct": 70,
+            "model_thresholds": {
+                "claude-opus-4-5": 80,
+                "claude-sonnet-4-5": 80,
+                "claude-opus-4-7": 80,
+                "claude-sonnet-4-6": 80,
+                "gpt-4o": 75,
+                "gpt-4o-mini": 70,
+                "qwen3-coder:480b": 72,
+                "kimi-k2.6:cloud": 65,
+                "glm-5.1:cloud": 65,
+                "deepseek-v4-flash:cloud": 68
+            }
+        },
+        "models": [
+            { "model_id": "glm-5.1:cloud", "provider_id": "ollama", "context_window": 198000 },
+            { "model_id": "qwen3-coder-next:cloud", "provider_id": "ollama", "context_window": 256000 },
+            { "model_id": "kimi-k2.6:cloud", "provider_id": "ollama", "context_window": 256000 },
+            { "model_id": "deepseek-v4-flash:cloud", "provider_id": "ollama", "context_window": 1000000 },
+            { "model_id": "deepseek-v4-pro:cloud", "provider_id": "ollama", "context_window": 1000000 },
+            { "model_id": "claude-opus-4-5", "provider_id": "anthropic", "reasoning_effort": "medium" }
+        ],
         "features": {},
         "trusted_projects": []
     })
@@ -751,6 +781,7 @@ fn default_spec_config_json() -> Value {
 fn default_true() -> bool {
     true
 }
+
 
 fn default_permission_profile(cwd: &str) -> PermissionProfile {
     PermissionProfile {
