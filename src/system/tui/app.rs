@@ -36,6 +36,108 @@ use super::types::{
 /// the user submits a message.  Removed when the first real agent content arrives.
 const THINKING_PLACEHOLDER_ID: &str = "__codezilla_thinking__";
 const USER_PENDING_PLACEHOLDER_ID: &str = "__codezilla_user_pending__";
+/// Item-id prefix for the in-transcript "Working" timer entry. One per turn,
+/// so historical durations persist after subsequent turns start. Not persisted
+/// and not sent to the model.
+const WORKING_ENTRY_ID_PREFIX: &str = "__codezilla_working__";
+
+fn working_entry_id(turn_id: &str) -> String {
+    format!("{WORKING_ENTRY_ID_PREFIX}{turn_id}")
+}
+
+/// Render an in-flight tool activity as a short user-facing phrase, e.g.
+/// `"Reading src/main.rs"` or `"Running git status"`. Falls back to the raw
+/// tool name when no hint is available or the verb is unknown.
+fn describe_tool_activity(tool: &super::activity::ToolActivity) -> String {
+    let verb = match tool.tool_name.as_str() {
+        "read_file" => "Reading",
+        "write_file" => "Writing",
+        "patch_file" => "Editing",
+        "list_dir" => "Listing",
+        "grep_search" => "Searching",
+        "bash_exec" | "shell_exec" => "Running",
+        "create_directory" => "Creating",
+        "remove_path" => "Removing",
+        "copy_path" => "Copying",
+        "web_fetch" => "Fetching",
+        "image_metadata" => "Inspecting image",
+        "spawn_agent" => "Running sub-agent:",
+        _ => "Calling",
+    };
+    match &tool.hint {
+        Some(h) if !h.is_empty() => format!("{verb} {h}"),
+        _ => format!("{verb} {}", tool.tool_name),
+    }
+}
+
+/// Truncate a single-line description so it fits comfortably on one
+/// transcript row. Keeps the prefix and appends an ellipsis.
+fn truncate_status_line(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Per-item char cap for the "ran"/"searched" lists in the done summary.
+fn trim_long(s: &str, max: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Join a small list, showing the first `keep` entries verbatim and a
+/// "+N more" tail when there are extras.
+fn join_with_more(items: &[String], keep: usize) -> String {
+    if items.len() <= keep {
+        return items.join(", ");
+    }
+    format!("{} +{} more", items[..keep].join(", "), items.len() - keep)
+}
+
+/// Pull the first non-blank, non-meta line from a tool-call body. Used to
+/// recover the actual command from `bash_exec` / `shell_exec` entries whose
+/// body is rendered as `<command>\ncwd: <dir>`.
+fn first_meaningful_line(body: &str) -> Option<String> {
+    body.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("cwd:"))
+        .map(|s| s.to_string())
+}
+
+/// `format_tool_call` renders grep_search bodies as `/<pattern>/  in <path>`;
+/// extract just the pattern (without slashes).
+fn extract_grep_pattern(body: &str) -> Option<String> {
+    let line = body.lines().next()?.trim();
+    let inner = line.strip_prefix('/')?;
+    let end = inner.rfind("/  in ").or_else(|| inner.rfind('/'))?;
+    Some(inner[..end].to_string())
+}
+
+/// Best-effort URL pluck from a `web_fetch` body — falls back to the first
+/// non-blank line when no http(s) URL is found.
+fn extract_first_url(body: &str) -> Option<String> {
+    for line in body.lines() {
+        for token in line.split_whitespace() {
+            let cleaned = token.trim_matches(|c: char| {
+                c == '"' || c == '\'' || c == ',' || c == '}' || c == '{' || c == ':'
+            });
+            if cleaned.starts_with("http://") || cleaned.starts_with("https://") {
+                return Some(cleaned.to_string());
+            }
+        }
+    }
+    body.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|s| s.to_string())
+}
 #[derive(Debug, Clone)]
 struct CachedTranscriptEntry {
     kind: EntryKind,
@@ -43,6 +145,9 @@ struct CachedTranscriptEntry {
     timestamp: Option<i64>,
     completed_at: Option<i64>,
     pending: bool,
+    /// True when this is the in-transcript Working timer entry; the renderer
+    /// uses this to confine the pending spinner glyph to that single row.
+    is_working_timer: bool,
     /// For markdown entries (Assistant/Summary/Reasoning), stores the original
     /// raw body text so the renderer can call md_to_lines each frame.
     /// For plain entries, this is empty.
@@ -1644,13 +1749,9 @@ impl InteractiveApp {
                 self.activity.start_turn(std::time::Instant::now());
                 self.status_message = "Thinking…".into();
                 self.error_message = None;
-                self.push_status_entry(
-                    event.event_id,
-                    EntryKind::Status,
-                    "Turn",
-                    "Assistant is preparing a response",
-                    Some(event.emitted_at / 1000),
-                );
+                if let Some(turn_id) = event.turn_id.as_deref() {
+                    self.start_working_entry(turn_id);
+                }
             }
             RuntimeEventKind::ItemStarted => self.handle_item_started(&event)?,
             RuntimeEventKind::ItemUpdated => self.handle_item_updated(&event),
@@ -1711,6 +1812,9 @@ impl InteractiveApp {
                 );
             }
             RuntimeEventKind::TurnCompleted => {
+                if let Some(turn_id) = event.turn_id.as_deref() {
+                    self.finalize_working_entry(turn_id, "Done");
+                }
                 self.active_turn_id = None;
                 self.approval.set_pending(None);
                 self.activity.end_turn();
@@ -1736,6 +1840,9 @@ impl InteractiveApp {
                 self.error_message = None;
             }
             RuntimeEventKind::TurnFailed => {
+                if let Some(turn_id) = event.turn_id.as_deref() {
+                    self.finalize_working_entry(turn_id, "Failed after");
+                }
                 self.active_turn_id = None;
                 self.streaming_turn_usage = TokenUsage::default();
                 self.approval.set_pending(None);
@@ -2158,6 +2265,7 @@ impl InteractiveApp {
     }
 
     pub fn upsert_transcript_entry(&mut self, mut entry: TranscriptEntry) {
+        let is_working = entry.item_id.starts_with(WORKING_ENTRY_ID_PREFIX);
         if let Some(index) = self.transcript_index.get(&entry.item_id).copied() {
             let previous = &self.transcript[index];
             if previous.pending && !entry.pending {
@@ -2170,7 +2278,29 @@ impl InteractiveApp {
             self.transcript_index.insert(entry.item_id.clone(), index);
             self.transcript.push(entry);
         }
+        // Keep the active (pending) Working entry pinned to the bottom of the
+        // transcript: when any other entry is added, slide the timer past it
+        // so it always renders as the last row of the current turn.
+        if !is_working {
+            self.bump_pending_working_entry_to_end();
+        }
         self.invalidate_transcript_cache();
+    }
+
+    fn bump_pending_working_entry_to_end(&mut self) {
+        let Some(turn_id) = self.active_turn_id.clone() else {
+            return;
+        };
+        let id = working_entry_id(&turn_id);
+        let Some(idx) = self.transcript_index.get(&id).copied() else {
+            return;
+        };
+        if idx + 1 >= self.transcript.len() {
+            return;
+        }
+        let entry = self.transcript.remove(idx);
+        self.transcript.push(entry);
+        self.rebuild_transcript_index();
     }
 
     pub fn push_status_entry(
@@ -2192,6 +2322,247 @@ impl InteractiveApp {
             pending: false,
         });
         // Do NOT force auto_scroll — respect user scroll position.
+    }
+
+    /// Insert the in-transcript "Working" timer entry on TurnStarted. One entry
+    /// per turn (id keyed by turn_id) so prior turns' final durations stick
+    /// around. The title is refreshed each tick via `update_working_entry`;
+    /// on TurnCompleted/TurnFailed it is frozen with total duration.
+    fn start_working_entry(&mut self, turn_id: &str) {
+        self.upsert_transcript_entry(TranscriptEntry {
+            item_id: working_entry_id(turn_id),
+            tool_call_id: None,
+            kind: EntryKind::Status,
+            title: "Working".into(),
+            body: String::new(),
+            timestamp: None,
+            completed_at: None,
+            pending: true,
+        });
+    }
+
+    /// Refresh the active turn's working entry title (elapsed time) and body
+    /// (a one-line description of what the agent is currently doing). No-op
+    /// when no turn is active.
+    pub fn update_working_entry(&mut self) {
+        let Some(turn_id) = self.active_turn_id.clone() else {
+            return;
+        };
+        let Some(elapsed) = self.activity.turn_elapsed(std::time::Instant::now()) else {
+            return;
+        };
+        let id = working_entry_id(&turn_id);
+        let Some(idx) = self.transcript_index.get(&id).copied() else {
+            return;
+        };
+        let title = format!(
+            "Working · {}",
+            super::types::format_duration(elapsed.as_secs() as i64)
+        );
+        let body = self.working_status_description();
+        let entry = &mut self.transcript[idx];
+        let mut changed = false;
+        if entry.title != title {
+            entry.title = title;
+            changed = true;
+        }
+        if entry.body != body {
+            entry.body = body;
+            changed = true;
+        }
+        if changed {
+            self.invalidate_transcript_cache();
+        }
+    }
+
+    /// Build a short description of what the agent is currently doing, derived
+    /// from the activity tracker. Used as the body line of the Working entry.
+    fn working_status_description(&self) -> String {
+        if let Some(reason) = self.activity.blocked() {
+            return reason.label().to_string();
+        }
+        // Sub-agents run alongside other tool activity; surface them first when
+        // any are alive so the user sees parallel work.
+        let live_children = self
+            .activity
+            .child_agents()
+            .iter()
+            .filter(|c| c.status == super::activity::ChildAgentStatus::Running)
+            .count();
+
+        let tools = self.activity.tools_in_flight();
+        let primary = match tools.len() {
+            0 => {
+                if self.activity.is_streaming() {
+                    "Generating response…".into()
+                } else {
+                    "Thinking…".into()
+                }
+            }
+            1 => describe_tool_activity(&tools[0]),
+            n => {
+                let mut seen = std::collections::HashSet::new();
+                let names: Vec<&str> = tools
+                    .iter()
+                    .map(|t| t.tool_name.as_str())
+                    .filter(|name| seen.insert(*name))
+                    .collect();
+                format!("Running {n} tools: {}", names.join(", "))
+            }
+        };
+
+        let combined = if live_children > 0 {
+            let suffix = if live_children == 1 {
+                "sub-agent running".to_string()
+            } else {
+                format!("{live_children} sub-agents running")
+            };
+            // If the primary already mentions a sub-agent (spawn_agent in flight),
+            // don't duplicate the count — just keep the descriptive line.
+            if primary.starts_with("Running sub-agent") {
+                primary
+            } else {
+                format!("{primary} · {suffix}")
+            }
+        } else {
+            primary
+        };
+
+        truncate_status_line(&combined, 80)
+    }
+
+    /// Freeze the working entry for `turn_id` with its final duration and clear
+    /// pending. Must be called BEFORE `activity.end_turn()`.
+    fn finalize_working_entry(&mut self, turn_id: &str, label: &str) {
+        let id = working_entry_id(turn_id);
+        let Some(idx) = self.transcript_index.get(&id).copied() else {
+            return;
+        };
+        let title = match self.activity.turn_elapsed(std::time::Instant::now()) {
+            Some(elapsed) => format!(
+                "{label} · {}",
+                super::types::format_duration(elapsed.as_secs() as i64)
+            ),
+            None => label.to_string(),
+        };
+        let summary = self.working_done_summary(turn_id);
+        let entry = &mut self.transcript[idx];
+        entry.title = title;
+        entry.body = summary;
+        entry.pending = false;
+        self.invalidate_transcript_cache();
+    }
+
+    /// Summarize what the just-finished turn actually did — quote the
+    /// commands run, patterns searched, files edited, etc. so the user sees
+    /// the work, not just counts. Empty when the turn produced nothing
+    /// beyond a plain text answer.
+    fn working_done_summary(&self, turn_id: &str) -> String {
+        let current = working_entry_id(turn_id);
+        let mut files: Vec<String> = Vec::new();
+        let mut commands: Vec<String> = Vec::new();
+        let mut searches: Vec<String> = Vec::new();
+        let mut fetches: Vec<String> = Vec::new();
+        let mut sub_agents: Vec<String> = Vec::new();
+        let mut other_tools: Vec<String> = Vec::new();
+        for entry in self.transcript.iter().rev() {
+            if entry.item_id != current && entry.item_id.starts_with(WORKING_ENTRY_ID_PREFIX) {
+                break;
+            }
+            match entry.kind {
+                EntryKind::FileChange => files.push(entry.title.clone()),
+                EntryKind::ToolCall => {
+                    let title_lower = entry.title.to_lowercase();
+                    let name = entry.title.split_whitespace().next().unwrap_or("");
+                    if title_lower.starts_with("sub-agent") {
+                        sub_agents.push(
+                            entry
+                                .title
+                                .splitn(2, ':')
+                                .nth(1)
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "sub-agent".into()),
+                        );
+                    } else {
+                        match name {
+                            "bash_exec" | "shell_exec" => {
+                                if let Some(cmd) = first_meaningful_line(&entry.body) {
+                                    commands.push(cmd);
+                                }
+                            }
+                            "grep_search" => {
+                                if let Some(p) = extract_grep_pattern(&entry.body) {
+                                    searches.push(p);
+                                }
+                            }
+                            "web_fetch" => {
+                                if let Some(u) = extract_first_url(&entry.body) {
+                                    fetches.push(u);
+                                }
+                            }
+                            // File-mutating tools already produce a FileChange
+                            // entry, so don't double-count them as tool calls.
+                            "write_file" | "patch_file" | "create_directory" | "remove_path"
+                            | "copy_path" => {}
+                            _ if !name.is_empty() => other_tools.push(name.to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Walked the transcript in reverse; flip back to chronological order.
+        files.reverse();
+        commands.reverse();
+        searches.reverse();
+        fetches.reverse();
+        sub_agents.reverse();
+        other_tools.reverse();
+
+        let mut parts: Vec<String> = Vec::new();
+        if !files.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            let unique: Vec<String> = files
+                .into_iter()
+                .filter(|f| seen.insert(f.clone()))
+                .collect();
+            parts.push(format!("Edited {}", join_with_more(&unique, 3)));
+        }
+        if !commands.is_empty() {
+            let quoted: Vec<String> = commands
+                .iter()
+                .map(|c| format!("`{}`", trim_long(c, 40)))
+                .collect();
+            parts.push(format!("ran {}", join_with_more(&quoted, 2)));
+        }
+        if !searches.is_empty() {
+            let quoted: Vec<String> = searches
+                .iter()
+                .map(|s| format!("`{}`", trim_long(s, 30)))
+                .collect();
+            parts.push(format!("searched {}", join_with_more(&quoted, 2)));
+        }
+        if !fetches.is_empty() {
+            parts.push(format!("fetched {}", join_with_more(&fetches, 2)));
+        }
+        if !sub_agents.is_empty() {
+            parts.push(format!(
+                "{} sub-agent{}",
+                sub_agents.len(),
+                if sub_agents.len() == 1 { "" } else { "s" }
+            ));
+        }
+        if parts.is_empty() && !other_tools.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            let unique: Vec<String> = other_tools
+                .into_iter()
+                .filter(|t| seen.insert(t.clone()))
+                .collect();
+            parts.push(format!("called {}", join_with_more(&unique, 2)));
+        }
+        truncate_status_line(&parts.join(", "), 120)
     }
 
     /// Remove the "thinking" placeholder from the transcript if it is still present.
@@ -2769,8 +3140,12 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
         let use_diff = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
             && is_diff_body(&entry.body);
 
+        let is_working_timer = entry.item_id.starts_with(WORKING_ENTRY_ID_PREFIX);
         let (raw_body, body_lines): (String, Vec<String>) =
-            if entry.body.is_empty() && entry.pending {
+            if entry.body.is_empty() && is_working_timer {
+                // Working timer entry uses the title for everything; render no body row.
+                (String::new(), Vec::new())
+            } else if entry.body.is_empty() && entry.pending {
                 // Build an animated working indicator that matches the visual render.
                 let spinner = super::types::spinner_frame(0);
                 let working_text = match entry.kind {
@@ -2836,7 +3211,14 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             }
         }
 
-        let line_count = 1 + body_lines.len().max(1) + 1;
+        // Working timer with no body collapses to header + trailing-blank only;
+        // every other entry guarantees at least one body row.
+        let body_line_count = if is_working_timer && body_lines.is_empty() {
+            0
+        } else {
+            body_lines.len().max(1)
+        };
+        let line_count = 1 + body_line_count + 1;
         total_lines += line_count;
         line_ends.push(total_lines);
         cached_entries.push(CachedTranscriptEntry {
@@ -2845,6 +3227,7 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             timestamp: entry.timestamp,
             completed_at: entry.completed_at,
             pending: entry.pending,
+            is_working_timer,
             raw_body,
             body_lines,
             line_count,
@@ -2927,7 +3310,11 @@ fn append_cached_transcript_entry_lines(
                 ));
             }
         }
-        if entry.pending {
+        // The pending spinner is only useful on the Working timer entry — the
+        // global "we're busy" indicator. Other pending entries (user prompt
+        // placeholders, in-flight tool calls, streaming assistant messages)
+        // don't need their own spinner now that the Working entry exists.
+        if entry.pending && entry.is_working_timer {
             header_spans.push(Span::raw("  "));
             header_spans.push(Span::styled(
                 super::types::spinner_frame(spinner_tick).to_string(),

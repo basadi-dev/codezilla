@@ -1045,7 +1045,10 @@ pub fn split_at_width(s: &str, width: usize) -> Vec<String> {
 }
 
 fn transcript_entry_line_count(entry: &TranscriptEntry, body_width: usize) -> usize {
-    let body_lines = if entry.body.is_empty() && entry.pending {
+    let is_working_timer = entry.item_id.starts_with("__codezilla_working__");
+    let body_lines = if entry.body.is_empty() && is_working_timer {
+        0
+    } else if entry.body.is_empty() && entry.pending {
         1
     } else if matches!(
         entry.kind,
@@ -1128,7 +1131,10 @@ fn append_transcript_entry_lines(
                 }
             }
         }
-        if entry.pending {
+        // Spinner is reserved for the Working timer entry; see app.rs
+        // append_cached_transcript_entry_lines for the rationale.
+        let header_is_working_timer = entry.item_id.starts_with("__codezilla_working__");
+        if entry.pending && header_is_working_timer {
             header_spans.push(Span::raw("  "));
             header_spans.push(Span::styled(
                 spinner_frame(spinner_tick).to_string(),
@@ -1146,7 +1152,17 @@ fn append_transcript_entry_lines(
         entry.kind,
         EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
     );
-    if entry.body.is_empty() && entry.pending {
+    // The Working timer entry uses the header (title + spinner) for everything;
+    // skip the body section entirely when its body is empty (both the pending
+    // placeholder fallback and the trailing-empty-line fall-through).
+    let is_working_timer = entry.item_id.starts_with("__codezilla_working__");
+    if is_working_timer && entry.body.is_empty() {
+        if current_line >= start_line && current_line < end_line {
+            out.push(Line::from(""));
+        }
+        return;
+    }
+    if entry.body.is_empty() && entry.pending && !is_working_timer {
         if current_line >= start_line && current_line < end_line {
             // Show a clear animated "working" indicator in the transcript body
             let spinner = spinner_frame(spinner_tick);
@@ -1618,11 +1634,14 @@ pub fn format_duration(secs: i64) -> String {
 pub fn entry_elapsed_secs(
     timestamp: Option<i64>,
     completed_at: Option<i64>,
-    pending: bool,
-    now: i64,
+    _pending: bool,
+    _now: i64,
 ) -> Option<i64> {
+    // Only return a duration once the entry has completed — the per-entry
+    // ticker during pending was redundant with the in-transcript Working
+    // entry, which shows the whole turn's elapsed time.
     let start = timestamp?;
-    let end = completed_at.or_else(|| pending.then_some(now))?;
+    let end = completed_at?;
     Some((end - start).max(0))
 }
 pub fn basename(path: &str) -> String {
