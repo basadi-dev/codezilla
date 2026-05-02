@@ -117,6 +117,10 @@ fn parse_gemini_response(resp: &Value) -> Result<LlmResponse> {
         prompt_tokens: u["promptTokenCount"].as_u64().unwrap_or(0),
         completion_tokens: u["candidatesTokenCount"].as_u64().unwrap_or(0),
         total_tokens: u["totalTokenCount"].as_u64().unwrap_or(0),
+        cached_tokens: u
+            .get("cachedContentTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
     });
 
     Ok(LlmResponse {

@@ -116,6 +116,8 @@ pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
 }
 
 // ── Stream chunk ──────────────────────────────────────────────────────────────

@@ -107,11 +107,23 @@ fn parse_anthropic_response(resp: &Value) -> Result<LlmResponse> {
         }
     }
 
-    let usage = resp.get("usage").map(|u| TokenUsage {
-        prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0),
-        completion_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-        total_tokens: u["input_tokens"].as_u64().unwrap_or(0)
-            + u["output_tokens"].as_u64().unwrap_or(0),
+    let usage = resp.get("usage").map(|u| {
+        let input = u["input_tokens"].as_u64().unwrap_or(0);
+        let output = u["output_tokens"].as_u64().unwrap_or(0);
+        let cache_creation = u
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cache_read = u
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        TokenUsage {
+            prompt_tokens: input,
+            completion_tokens: output,
+            total_tokens: input + output,
+            cached_tokens: cache_creation + cache_read,
+        }
     });
 
     Ok(LlmResponse {
@@ -215,6 +227,10 @@ pub async fn stream(
         let mut tool_id: Option<String> = None;
         let mut tool_idx: usize = 0;
         let mut buf = String::new();
+        // Accumulate input/cache tokens from message_start; merge with output_tokens from message_delta.
+        let mut input_tokens: u64 = 0;
+        let mut cache_creation_tokens: u64 = 0;
+        let mut cache_read_tokens: u64 = 0;
 
         while let Some(chunk) = byte_stream.next().await {
             let Ok(bytes) = chunk else { break };
@@ -232,6 +248,23 @@ pub async fn stream(
                 };
 
                 match v["type"].as_str() {
+                    Some("message_start") => {
+                        // Capture input_tokens and cache tokens from the initial message usage.
+                        if let Some(usage) = v.get("message").and_then(|m| m.get("usage")) {
+                            input_tokens = usage
+                                .get("input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            cache_creation_tokens = usage
+                                .get("cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            cache_read_tokens = usage
+                                .get("cache_read_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                        }
+                    }
                     Some("content_block_start") => {
                         let block = &v["content_block"];
                         if block["type"] == "tool_use" {
@@ -272,14 +305,18 @@ pub async fn stream(
                     }
                     Some("message_delta") => {
                         if let Some(usage) = v["usage"].as_object() {
+                            let output_tokens = usage
+                                .get("output_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let total = input_tokens + output_tokens;
+                            let cached = cache_creation_tokens + cache_read_tokens;
                             let _ = tx
                                 .send(StreamChunk::Usage(TokenUsage {
-                                    prompt_tokens: 0,
-                                    completion_tokens: usage
-                                        .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0),
-                                    total_tokens: 0,
+                                    prompt_tokens: input_tokens,
+                                    completion_tokens: output_tokens,
+                                    total_tokens: total,
+                                    cached_tokens: cached,
                                 }))
                                 .await;
                         }

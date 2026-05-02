@@ -45,8 +45,13 @@ pub enum ModelStreamEvent {
     #[allow(dead_code)]
     ReasoningDelta(String),
     ToolCalls(Vec<ToolCall>),
+    /// Incremental token usage update during streaming (live, may be partial).
+    StreamingUsage(TokenUsage),
     Completed(TokenUsage),
-    Failed(String),
+    Failed {
+        display: String,
+        raw: String,
+    },
 }
 
 pub struct ModelGateway {
@@ -172,11 +177,46 @@ impl ModelGateway {
                                 }
                             }
                             StreamChunk::Usage(tokens) => {
-                                usage = TokenUsage {
-                                    input_tokens: tokens.prompt_tokens as i64,
-                                    output_tokens: tokens.completion_tokens as i64,
-                                    cached_tokens: 0,
-                                };
+                                // Only accept provider usage if it carries real (non-zero)
+                                // completion tokens — some providers send usage chunks
+                                // with completion_tokens = 0 mid-stream, which would
+                                // overwrite our live estimate with zeros and cause the
+                                // token display to flicker/disappear.
+                                if tokens.completion_tokens > 0 {
+                                    usage = TokenUsage {
+                                        input_tokens: tokens.prompt_tokens as i64,
+                                        output_tokens: tokens.completion_tokens as i64,
+                                        cached_tokens: tokens.cached_tokens as i64,
+                                    };
+                                    // Forward the real usage to the TUI immediately so
+                                    // ctx % updates even if no more text chunks arrive.
+                                    let _ = send_model_event(
+                                        &tx,
+                                        &cancel_token,
+                                        ModelStreamEvent::StreamingUsage(TokenUsage {
+                                            input_tokens: usage.input_tokens,
+                                            output_tokens: usage.output_tokens,
+                                            cached_tokens: usage.cached_tokens,
+                                        }),
+                                    )
+                                    .await;
+                                } else if tokens.prompt_tokens > 0 {
+                                    // Provider gave us input tokens but no output yet —
+                                    // preserve the input count but keep our output estimate.
+                                    usage.input_tokens = tokens.prompt_tokens as i64;
+                                    usage.cached_tokens = tokens.cached_tokens as i64;
+                                    // Forward input token count to TUI so ctx % updates.
+                                    let _ = send_model_event(
+                                        &tx,
+                                        &cancel_token,
+                                        ModelStreamEvent::StreamingUsage(TokenUsage {
+                                            input_tokens: usage.input_tokens,
+                                            output_tokens: usage.output_tokens,
+                                            cached_tokens: usage.cached_tokens,
+                                        }),
+                                    )
+                                    .await;
+                                }
                             }
                             StreamChunk::Done => break,
                         }
@@ -240,8 +280,15 @@ impl ModelGateway {
                         )
                     {
                         let msg = cod_error::humanize(&stream_err_text, stream_kind);
-                        let _ = send_model_event(&tx, &cancel_token, ModelStreamEvent::Failed(msg))
-                            .await;
+                        let _ = send_model_event(
+                            &tx,
+                            &cancel_token,
+                            ModelStreamEvent::Failed {
+                                display: msg,
+                                raw: stream_err_text.clone(),
+                            },
+                        )
+                        .await;
                         return;
                     }
 
@@ -331,9 +378,14 @@ impl ModelGateway {
                             let _ = send_model_event(
                                 &tx,
                                 &cancel_token,
-                                ModelStreamEvent::Failed(format!(
-                                    "{stream_msg} (fallback also failed: {fallback_msg})"
-                                )),
+                                ModelStreamEvent::Failed {
+                                    display: format!(
+                                        "{stream_msg} (fallback also failed: {fallback_msg})"
+                                    ),
+                                    raw: format!(
+                                        "stream_error: {stream_err_text}; fallback_error: {complete_err_text}"
+                                    ),
+                                },
                             )
                             .await;
                         }

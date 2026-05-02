@@ -108,6 +108,7 @@ impl LlmClient for FakeLlmClient {
                     prompt_tokens: 10,
                     completion_tokens: 5,
                     total_tokens: 15,
+                    cached_tokens: 0,
                 }))
                 .await;
             let _ = tx.send(StreamChunk::Done).await;

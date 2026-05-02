@@ -224,6 +224,7 @@ struct MdRenderer {
     current_lang: String,
     table: Option<TableState>,
     in_table_head: bool,
+    in_list_item: bool,
 }
 
 impl MdRenderer {
@@ -242,6 +243,7 @@ impl MdRenderer {
             current_lang: String::new(),
             table: None,
             in_table_head: false,
+            in_list_item: false,
         }
     }
 
@@ -328,6 +330,9 @@ impl MdRenderer {
             }
 
             Tag::Paragraph => {
+                if self.in_list_item {
+                    return;
+                }
                 self.flush_inline();
             }
 
@@ -370,6 +375,7 @@ impl MdRenderer {
             }
 
             Tag::Item => {
+                self.in_list_item = true;
                 self.flush_inline();
                 let depth = self.list_depth;
                 let ordered = *self.list_ordered.last().unwrap_or(&false);
@@ -461,6 +467,7 @@ impl MdRenderer {
             }
 
             TagEnd::Item => {
+                self.in_list_item = false;
                 self.flush_word_wrapped();
             }
 

@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::system::domain::TokenUsage;
+
 use super::app::InteractiveApp;
 use super::types::{
     basename, composer_height, current_state_label, spinner_frame, split_at_width, thread_label,
@@ -620,8 +622,12 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     };
 
     // Build context info: token usage + context remaining %
-    let usage = &app.token_usage;
-    let has_tokens = usage.input_tokens > 0 || usage.output_tokens > 0;
+    // Combine completed-turn usage with the in-progress streaming turn.
+    let usage = TokenUsage {
+        input_tokens: app.token_usage.input_tokens + app.streaming_turn_usage.input_tokens,
+        output_tokens: app.token_usage.output_tokens + app.streaming_turn_usage.output_tokens,
+        cached_tokens: app.token_usage.cached_tokens + app.streaming_turn_usage.cached_tokens,
+    };
 
     // Context remaining percentage (always compute)
     let context_window = app
@@ -632,17 +638,25 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     let used_pct = (usage.input_tokens as f64 / prompt_budget as f64) * 100.0;
     let remaining_pct = (100.0 - used_pct).max(0.0);
 
-    let token_part = if has_tokens {
-        let in_k = usage.input_tokens as f64 / 1000.0;
-        let out_k = usage.output_tokens as f64 / 1000.0;
-        let cached_k = usage.cached_tokens as f64 / 1000.0;
-        if usage.cached_tokens > 0 {
-            format!("↑{in_k:.1}k ↓{out_k:.1}k ⚡{cached_k:.1}k  ")
-        } else {
-            format!("↑{in_k:.1}k ↓{out_k:.1}k  ")
+    let token_part = {
+        fn fmt_tokens(v: i64) -> String {
+            let abs = v.unsigned_abs();
+            if abs >= 1_000_000 {
+                format!("{:.1}m", v as f64 / 1_000_000.0)
+            } else if abs >= 1_000 {
+                format!("{:.1}k", v as f64 / 1_000.0)
+            } else {
+                format!("{}", v)
+            }
         }
-    } else {
-        String::new()
+        let in_s = fmt_tokens(usage.input_tokens);
+        let out_s = fmt_tokens(usage.output_tokens);
+        if usage.cached_tokens > 0 {
+            let cached_s = fmt_tokens(usage.cached_tokens);
+            format!("↑{in_s} ↓{out_s} ⚡{cached_s}  ")
+        } else {
+            format!("↑{in_s} ↓{out_s}  ")
+        }
     };
 
     let pct_str = format!("ctx {remaining_pct:.0}%");
@@ -666,9 +680,7 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     if padding > 0 {
         spans.push(Span::styled(" ".repeat(padding), Style::default()));
     }
-    if has_tokens {
-        spans.push(Span::styled(token_part, Style::default().fg(COLOR_HINT)));
-    }
+    spans.push(Span::styled(token_part, Style::default().fg(COLOR_HINT)));
     // Always show context remaining percentage
     let pct_color = if remaining_pct > 50.0 {
         COLOR_HINT // dim — plenty of room

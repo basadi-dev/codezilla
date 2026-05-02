@@ -320,7 +320,7 @@ impl TurnExecutor {
             let mut final_usage = TokenUsage::default();
             // Set to Some(error) when the model returns Failed so we can
             // handle context-overflow recovery outside the inner loop.
-            let mut pending_fail: Option<String> = None;
+            let mut pending_fail: Option<(String, String)> = None;
 
             // Guard 3 — streaming response length limit.
             // Some local models enter degenerate token loops (repeating the
@@ -397,11 +397,27 @@ impl TurnExecutor {
                     ModelStreamEvent::ToolCalls(calls) => {
                         tool_calls.extend(calls);
                     }
+                    ModelStreamEvent::StreamingUsage(usage) => {
+                        // Forward live token usage to the TUI during streaming.
+                        let _ = self
+                            .runtime
+                            .publish_event(
+                                crate::system::domain::RuntimeEventKind::TokenUsageUpdate,
+                                Some(params.thread_id.clone()),
+                                Some(turn_id.clone()),
+                                serde_json::json!({
+                                    "inputTokens": usage.input_tokens,
+                                    "outputTokens": usage.output_tokens,
+                                    "cachedTokens": usage.cached_tokens,
+                                }),
+                            )
+                            .await;
+                    }
                     ModelStreamEvent::Completed(usage) => {
                         final_usage = usage;
                     }
-                    ModelStreamEvent::Failed(error) => {
-                        pending_fail = Some(error);
+                    ModelStreamEvent::Failed { display, raw } => {
+                        pending_fail = Some((display, raw));
                         break;
                     }
                 }
@@ -414,8 +430,11 @@ impl TurnExecutor {
             // On the first context-overflow error, trim all older turns from
             // the in-memory session (keeps the current turn intact) and retry.
             // A second overflow is not retried — it surfaces as a normal error.
-            if let Some(ref error) = pending_fail {
-                if !auto_trim_attempted && is_context_overflow_error(error) {
+            if let Some((display_error, raw_error)) = pending_fail.as_ref() {
+                if !auto_trim_attempted
+                    && (is_context_overflow_error(raw_error)
+                        || is_context_overflow_error(display_error))
+                {
                     auto_trim_attempted = true;
 
                     // Notify the user via a Warning event (TUI renders this).
@@ -444,13 +463,13 @@ impl TurnExecutor {
                 }
 
                 // Second overflow or a different error — humanize and fail the turn.
-                let err_display = cod_error::from_raw(error);
+                let err_display = cod_error::from_raw(raw_error);
                 return self
                     .fail_turn(
                         &params.thread_id,
                         &turn_id,
                         err_display.kind.label(),
-                        &err_display.message,
+                        raw_error,
                     )
                     .await;
             }

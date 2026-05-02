@@ -4,7 +4,7 @@
 
 # Model selection
 model_settings:
-  model_id: "deepseek-v4-pro:cloud"
+  model_id: "glm-5.1:cloud"
   provider_id: "ollama"
   # reasoning_effort: "medium"   # low | medium | high  (Anthropic / OpenAI o-series only)
 

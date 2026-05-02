@@ -78,8 +78,10 @@ pub struct InteractiveApp {
     /// Approval modal + policy-override reducer.
     pub approval: super::approval::ApprovalState,
     pub active_turn_id: Option<String>,
-    /// Cumulative token usage for the current thread (input + output tokens).
+    /// Cumulative token usage from completed turns (input + output tokens).
     pub token_usage: TokenUsage,
+    /// Token usage for the currently streaming turn (replaced, not accumulated).
+    pub streaming_turn_usage: TokenUsage,
     pub status_message: String,
     pub error_message: Option<String>,
     pub should_quit: bool,
@@ -138,6 +140,7 @@ impl InteractiveApp {
             approval: super::approval::ApprovalState::new(),
             active_turn_id: None,
             token_usage: TokenUsage::default(),
+            streaming_turn_usage: TokenUsage::default(),
             status_message: "Ready".into(),
             error_message: None,
             should_quit: false,
@@ -226,6 +229,7 @@ impl InteractiveApp {
                 output_tokens: acc.output_tokens + t.token_usage.output_tokens,
                 cached_tokens: acc.cached_tokens + t.token_usage.cached_tokens,
             });
+        self.streaming_turn_usage = TokenUsage::default();
         self.approval.set_pending(None);
         self.transcript_selection.clear();
         self.transcript_view.jump_to_bottom();
@@ -1556,12 +1560,41 @@ impl InteractiveApp {
             | RuntimeEventKind::TurnFailed => {
                 self.refresh_threads().await?;
             }
+            RuntimeEventKind::TokenUsageUpdate => {
+                // Live token usage update during streaming — replace the
+                // streaming-turn accumulator (values are cumulative, not deltas).
+                // Ignore late events for non-active turns so we never repopulate
+                // the streaming bucket after TurnCompleted has folded the totals
+                // into `token_usage`.
+                if event.turn_id == self.active_turn_id {
+                    let input = event
+                        .payload
+                        .get("inputTokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let output = event
+                        .payload
+                        .get("outputTokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let cached = event
+                        .payload
+                        .get("cachedTokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    if input > 0 || output > 0 {
+                        self.streaming_turn_usage = TokenUsage {
+                            input_tokens: input,
+                            output_tokens: output,
+                            cached_tokens: cached,
+                        };
+                    }
+                }
+            }
             _ => {}
         }
 
         if event.thread_id.as_deref() != Some(self.current_thread_id.as_str()) {
-            // Route child-thread lifecycle events back into the parent
-            // transcript entry so sub-agent progress stays transcript-native.
             if let Some(child_thread) = event.thread_id.as_deref() {
                 if let Some(child) = self.activity.child_agent_for_thread(child_thread).cloned() {
                     match event.kind {
@@ -1607,6 +1640,7 @@ impl InteractiveApp {
             }
             RuntimeEventKind::TurnStarted => {
                 self.active_turn_id = event.turn_id.clone();
+                self.streaming_turn_usage = TokenUsage::default();
                 self.activity.start_turn(std::time::Instant::now());
                 self.status_message = "Thinking…".into();
                 self.error_message = None;
@@ -1684,23 +1718,29 @@ impl InteractiveApp {
                 if let Some(thread) = self.current_thread_meta.as_mut() {
                     thread.status = super::super::domain::ThreadStatus::Idle;
                 }
-                // Accumulate token usage from the completed turn.
-                if let Ok(meta) = serde_json::from_value::<super::super::domain::TurnMetadata>(
-                    event.payload.clone(),
-                ) {
-                    self.token_usage.input_tokens += meta.token_usage.input_tokens;
-                    self.token_usage.output_tokens += meta.token_usage.output_tokens;
-                    self.token_usage.cached_tokens += meta.token_usage.cached_tokens;
+                // Accumulate token usage from the completed turn. The payload
+                // is a TurnCompleted projection, not a full TurnMetadata, so we
+                // pull `tokenUsage` directly rather than deserializing the
+                // whole struct (which would fail on missing fields).
+                if let Some(usage_val) = event.payload.get("tokenUsage") {
+                    if let Ok(usage) = serde_json::from_value::<TokenUsage>(usage_val.clone()) {
+                        self.token_usage.input_tokens += usage.input_tokens;
+                        self.token_usage.output_tokens += usage.output_tokens;
+                        self.token_usage.cached_tokens += usage.cached_tokens;
+                    }
                 }
+                // Clear the streaming accumulator — the authoritative totals are
+                // now in token_usage from the completed-turn metadata above.
+                self.streaming_turn_usage = TokenUsage::default();
                 self.status_message = "Ready".into();
                 self.error_message = None;
             }
             RuntimeEventKind::TurnFailed => {
                 self.active_turn_id = None;
+                self.streaming_turn_usage = TokenUsage::default();
                 self.approval.set_pending(None);
                 self.activity.end_turn();
                 self.remove_thinking_placeholder();
-                // Prefer "kind" (the structured label) as the title; fall back to "reason".
                 let kind_label = event
                     .payload
                     .get("kind")
@@ -1803,6 +1843,10 @@ impl InteractiveApp {
                     &label,
                     ChildAgentStatus::Running,
                 );
+            }
+            RuntimeEventKind::TokenUsageUpdate => {
+                // Live streaming updates are handled in the first match above;
+                // this arm exists only to keep the match exhaustive.
             }
         }
 

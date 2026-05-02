@@ -83,12 +83,7 @@ impl ConversationRuntime {
                 let error_text = error.to_string();
                 let err = crate::system::error::from_raw(&error_text);
                 let _ = executor
-                    .fail_turn(
-                        &thread_id_for_task,
-                        &turn_id,
-                        err.kind.label(),
-                        &error_text,
-                    )
+                    .fail_turn(&thread_id_for_task, &turn_id, err.kind.label(), &error_text)
                     .await;
             }
         });

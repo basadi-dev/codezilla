@@ -596,6 +596,7 @@ pub fn parse_sse_delta(v: &Value) -> Vec<StreamChunk> {
             prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
             completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
             total_tokens: usage["total_tokens"].as_u64().unwrap_or(0),
+            cached_tokens: 0,
         }));
     }
     chunks
@@ -634,6 +635,7 @@ pub fn parse_openai_response(resp: &Value) -> Result<LlmResponse> {
             prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0),
             completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0),
             total_tokens: u["total_tokens"].as_u64().unwrap_or(0),
+            cached_tokens: 0,
         });
 
     Ok(LlmResponse {
@@ -689,6 +691,7 @@ fn usage_from_ollama(value: &Value) -> Option<TokenUsage> {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            cached_tokens: 0,
         })
     }
 }

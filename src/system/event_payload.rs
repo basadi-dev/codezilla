@@ -46,6 +46,7 @@ pub enum RuntimeEventPayload {
     Disconnected(DisconnectedPayload),
     CompactionStatus(CompactionStatusPayload),
     ChildAgentSpawned(ChildAgentSpawnedPayload),
+    TokenUsageUpdate(TokenUsageUpdatePayload),
 }
 
 /// Payload of `ItemStarted` and `ItemCompleted` events.
@@ -143,6 +144,15 @@ pub struct ChildAgentSpawnedPayload {
     pub label: String,
 }
 
+/// Live token-usage update emitted during streaming.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsageUpdatePayload {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: i64,
+}
+
 impl RuntimeEventPayload {
     /// Decode `event.payload` according to `event.kind`.
     pub fn from_event(event: &RuntimeEvent) -> Result<Self> {
@@ -194,6 +204,10 @@ impl RuntimeEventPayload {
             )?)),
             RuntimeEventKind::ChildAgentSpawned => Ok(Self::ChildAgentSpawned(decode(
                 "ChildAgentSpawned",
+                &event.payload,
+            )?)),
+            RuntimeEventKind::TokenUsageUpdate => Ok(Self::TokenUsageUpdate(decode(
+                "TokenUsageUpdate",
                 &event.payload,
             )?)),
         }

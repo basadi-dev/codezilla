@@ -432,6 +432,8 @@ pub enum RuntimeEventKind {
     /// TUI render a live activity tree without inferring the relationship
     /// from `agent_depth` heuristics.
     ChildAgentSpawned,
+    /// Live token usage update during streaming (partial/estimated).
+    TokenUsageUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
