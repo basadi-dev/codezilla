@@ -315,6 +315,7 @@ impl InteractiveApp {
         self.threads.set_selected(Some(thread_id.to_string()));
         self.transcript.clear();
         self.transcript_index.clear();
+        self.invalidate_transcript_cache();
         for item in &persisted.items {
             self.upsert_loaded_item(item);
         }
