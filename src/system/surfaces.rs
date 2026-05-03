@@ -138,6 +138,7 @@ impl ExecSurface {
                     approval_policy: invocation.approval_policy.clone(),
                     permission_profile: invocation.permission_profile.clone(),
                     output_schema: None,
+                    repo_map_verbosity: None,
                     agent_depth: 0,
                 },
                 SurfaceKind::Exec,

@@ -116,6 +116,7 @@ impl AgentSupervisor {
                     approval_policy: Some(request.approval_policy),
                     permission_profile: Some(request.permission_profile),
                     output_schema: None,
+                    repo_map_verbosity: None,
                     agent_depth: request.agent_depth + 1,
                 },
                 SurfaceKind::Exec,

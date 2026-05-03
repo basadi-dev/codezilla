@@ -321,6 +321,8 @@ pub struct TurnMetadata {
     pub updated_at: TimestampSeconds,
     pub status: TurnStatus,
     pub started_by_surface: SurfaceKind,
+    #[serde(default)]
+    pub estimated_token_usage: TokenUsage,
     pub token_usage: TokenUsage,
 }
 

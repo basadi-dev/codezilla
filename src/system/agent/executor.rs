@@ -17,14 +17,15 @@ use self::context::TurnContext;
 use self::utils::{
     already_read_directive, classify_turn_intent, derive_thread_title, find_repetition_start,
     intent_directive, is_degenerate_repetition, is_read_only_tool, recently_read_paths,
-    should_retry_no_tool_completion, thinking_instruction, user_requested_verification, ReadKey,
-    TurnIntent,
+    should_retry_no_tool_completion, thinking_instruction, user_requested_verification,
+    wants_verbose_repo_map, ReadKey, TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
     TokenUsage, ToolCall, ToolResult, TurnMetrics, TurnStatus, UserInput,
 };
 use crate::system::error as cod_error;
+use crate::system::runtime::RepoMapVerbosity;
 
 // ─── TurnExecutor ─────────────────────────────────────────────────────────────
 
@@ -68,6 +69,14 @@ impl TurnExecutor {
                 .await?;
         }
 
+        let turn_intent = classify_turn_intent(&params.input);
+        let verification_requested = user_requested_verification(&params.input);
+        let verbose_repo_map = match params.repo_map_verbosity {
+            Some(RepoMapVerbosity::Verbose) => true,
+            Some(RepoMapVerbosity::Lean) => false,
+            None => wants_verbose_repo_map(&params.input),
+        };
+
         // ── Codebase intelligence — build the repo map once for the entire turn ─
         // The map is expensive to build (directory walk + file reads + hashing)
         // so we compute it here and thread the result through every call to
@@ -91,7 +100,13 @@ impl TurnExecutor {
                 let repo_map = self.runtime.inner.repo_map.clone();
                 let result = tokio::task::spawn_blocking({
                     let cwd = cwd_for_persist.to_string();
-                    let cfg = intel_cfg.clone();
+                    let mut cfg = intel_cfg.clone();
+                    if verbose_repo_map {
+                        cfg.include_non_indexable = true;
+                        cfg.include_binary = true;
+                        cfg.include_hidden = true;
+                        cfg.include_excluded_paths = true;
+                    }
                     move || repo_map.build_map(&cwd, &cfg)
                 })
                 .await
@@ -121,8 +136,6 @@ impl TurnExecutor {
         };
 
         let agent_cfg = self.runtime.inner.effective_config.agent.clone();
-        let turn_intent = classify_turn_intent(&params.input);
-        let verification_requested = user_requested_verification(&params.input);
 
         // Persist the system prompt once per turn for DB-level auditing and
         // post-mortem debugging. System entries are hidden in the TUI but are
@@ -318,6 +331,7 @@ impl TurnExecutor {
             let mut reasoning_text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut final_usage = TokenUsage::default();
+            let mut estimated_usage = TokenUsage::default();
             // Set to Some(error) when the model returns Failed so we can
             // handle context-overflow recovery outside the inner loop.
             let mut pending_fail: Option<(String, String)> = None;
@@ -398,6 +412,7 @@ impl TurnExecutor {
                         tool_calls.extend(calls);
                     }
                     ModelStreamEvent::StreamingUsage(usage) => {
+                        estimated_usage = usage.clone();
                         // Forward live token usage to the TUI during streaming.
                         let _ = self
                             .runtime
@@ -721,7 +736,13 @@ impl TurnExecutor {
                     file_changes: file_changes.clone(),
                 };
                 return self
-                    .complete_turn(&params.thread_id, &turn_id, final_usage, metrics)
+                    .complete_turn(
+                        &params.thread_id,
+                        &turn_id,
+                        final_usage,
+                        estimated_usage,
+                        metrics,
+                    )
                     .await;
             }
             no_tool_nudges = 0;
@@ -1056,7 +1077,8 @@ impl TurnExecutor {
         &self,
         thread_id: &str,
         turn_id: &str,
-        usage: TokenUsage,
+        actual_usage: TokenUsage,
+        estimated_usage: TokenUsage,
         metrics: TurnMetrics,
     ) -> Result<()> {
         let thread = self
@@ -1075,7 +1097,8 @@ impl TurnExecutor {
                 turn.status = TurnStatus::Completed;
                 turn.metadata.status = TurnStatus::Completed;
                 turn.metadata.updated_at = now_seconds();
-                turn.metadata.token_usage = usage;
+                turn.metadata.token_usage = actual_usage;
+                turn.metadata.estimated_token_usage = estimated_usage;
                 self.runtime
                     .inner
                     .persistence_manager
@@ -1100,6 +1123,7 @@ impl TurnExecutor {
                     "turnId": metadata.turn_id,
                     "threadId": metadata.thread_id,
                     "status": metadata.status,
+                    "estimatedTokenUsage": metadata.estimated_token_usage,
                     "tokenUsage": metadata.token_usage,
                     "metrics": metrics,
                 }),

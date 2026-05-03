@@ -120,6 +120,7 @@ impl ConversationRuntime {
                 updated_at: turn.updated_at,
                 status: turn.status,
                 started_by_surface: turn.started_by_surface,
+                estimated_token_usage: turn.estimated_token_usage,
                 token_usage: turn.token_usage,
             };
             turn_map.insert(turn.turn_id, new_turn.clone());

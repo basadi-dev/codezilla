@@ -442,9 +442,13 @@ impl InteractiveApp {
         match rx.try_recv() {
             Ok(result) => {
                 self.pending_compact = None;
+                // Preserve token usage before reloading thread (which resets it)
+                let preserved_usage = self.token_usage.clone();
                 match result {
                     Ok(r) => {
                         self.load_thread(&self.current_thread_id.clone()).await?;
+                        // Restore token usage to show total since last compaction
+                        self.token_usage = preserved_usage;
                         self.status_message = format!(
                             "✓ Compacted — {} item(s) replaced with summary",
                             r.items_removed
@@ -452,15 +456,17 @@ impl InteractiveApp {
                         self.error_message = None;
                     }
                     Err(e) => {
+                        self.load_thread(&self.current_thread_id.clone()).await?;
+                        self.token_usage = preserved_usage;
                         self.error_message = Some(format!("Compact failed: {e}"));
                     }
                 }
                 Ok(true)
             }
-            Err(oneshot::error::TryRecvError::Empty) => Ok(false),
-            Err(oneshot::error::TryRecvError::Closed) => {
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => Ok(false),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                 self.pending_compact = None;
-                self.error_message = Some("Compaction task dropped unexpectedly".into());
+                self.error_message = Some("Compact failed: background task closed".into());
                 Ok(true)
             }
         }
@@ -1075,6 +1081,7 @@ impl InteractiveApp {
                         approval_policy: self.current_approval_policy_override(),
                         permission_profile: None,
                         output_schema: None,
+                        repo_map_verbosity: None,
                         agent_depth: 0,
                     },
                     super::super::domain::SurfaceKind::Interactive,
@@ -1721,13 +1728,22 @@ impl InteractiveApp {
                 // is a TurnCompleted projection, not a full TurnMetadata, so we
                 // pull `tokenUsage` directly rather than deserializing the
                 // whole struct (which would fail on missing fields).
-                if let Some(usage_val) = event.payload.get("tokenUsage") {
-                    if let Ok(usage) = serde_json::from_value::<TokenUsage>(usage_val.clone()) {
-                        self.latest_prompt_input_tokens = usage.input_tokens;
-                        self.token_usage.input_tokens += usage.input_tokens;
-                        self.token_usage.output_tokens += usage.output_tokens;
-                        self.token_usage.cached_tokens += usage.cached_tokens;
-                    }
+                let actual_usage = event
+                    .payload
+                    .get("tokenUsage")
+                    .and_then(|v| serde_json::from_value::<TokenUsage>(v.clone()).ok());
+                let estimated_usage = event
+                    .payload
+                    .get("estimatedTokenUsage")
+                    .and_then(|v| serde_json::from_value::<TokenUsage>(v.clone()).ok());
+                if let Some(chosen_usage) = actual_usage
+                    .filter(|u| u.input_tokens > 0 || u.output_tokens > 0 || u.cached_tokens > 0)
+                    .or(estimated_usage)
+                {
+                    self.latest_prompt_input_tokens = chosen_usage.input_tokens;
+                    self.token_usage.input_tokens += chosen_usage.input_tokens;
+                    self.token_usage.output_tokens += chosen_usage.output_tokens;
+                    self.token_usage.cached_tokens += chosen_usage.cached_tokens;
                 }
                 // Clear the streaming accumulator — the authoritative totals are
                 // now in token_usage from the completed-turn metadata above.

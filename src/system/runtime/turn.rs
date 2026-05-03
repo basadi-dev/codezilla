@@ -47,6 +47,7 @@ impl ConversationRuntime {
                 updated_at: now_seconds(),
                 status: TurnStatus::Created,
                 started_by_surface: surface,
+                estimated_token_usage: TokenUsage::default(),
                 token_usage: TokenUsage::default(),
             };
             self.inner.persistence_manager.create_turn(&turn)?;

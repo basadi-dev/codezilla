@@ -124,6 +124,19 @@ impl ModelGateway {
             match stream_result {
                 Ok(mut stream) => {
                     let mut usage = TokenUsage::default();
+                    // Estimated usage that is updated in real time from streaming text.
+                    let mut estimated_usage = TokenUsage {
+                        input_tokens: estimate_messages_tokens(&messages) as i64,
+                        output_tokens: 0,
+                        cached_tokens: 0,
+                    };
+                    // Publish initial prompt estimate immediately (before first token arrives).
+                    let _ = send_model_event(
+                        &tx,
+                        &cancel_token,
+                        ModelStreamEvent::StreamingUsage(estimated_usage.clone()),
+                    )
+                    .await;
                     let mut partial_tools: HashMap<
                         usize,
                         (Option<String>, Option<String>, String),
@@ -138,6 +151,8 @@ impl ModelGateway {
                         };
                         match chunk {
                             StreamChunk::Text(text) => {
+                                // Live output estimate: update on every streamed text delta.
+                                estimated_usage.output_tokens += estimate_text_tokens(&text) as i64;
                                 if !send_model_event(
                                     &tx,
                                     &cancel_token,
@@ -147,6 +162,12 @@ impl ModelGateway {
                                 {
                                     return;
                                 }
+                                let _ = send_model_event(
+                                    &tx,
+                                    &cancel_token,
+                                    ModelStreamEvent::StreamingUsage(estimated_usage.clone()),
+                                )
+                                .await;
                             }
                             StreamChunk::Thinking(thought) => {
                                 if !send_model_event(
@@ -188,32 +209,26 @@ impl ModelGateway {
                                         output_tokens: tokens.completion_tokens as i64,
                                         cached_tokens: tokens.cached_tokens as i64,
                                     };
+                                    // If provider usage arrives, treat it as authoritative while streaming.
+                                    estimated_usage = usage.clone();
                                     // Forward the real usage to the TUI immediately so
                                     // ctx % updates even if no more text chunks arrive.
                                     let _ = send_model_event(
                                         &tx,
                                         &cancel_token,
-                                        ModelStreamEvent::StreamingUsage(TokenUsage {
-                                            input_tokens: usage.input_tokens,
-                                            output_tokens: usage.output_tokens,
-                                            cached_tokens: usage.cached_tokens,
-                                        }),
+                                        ModelStreamEvent::StreamingUsage(estimated_usage.clone()),
                                     )
                                     .await;
                                 } else if tokens.prompt_tokens > 0 {
                                     // Provider gave us input tokens but no output yet —
                                     // preserve the input count but keep our output estimate.
-                                    usage.input_tokens = tokens.prompt_tokens as i64;
-                                    usage.cached_tokens = tokens.cached_tokens as i64;
+                                    estimated_usage.input_tokens = tokens.prompt_tokens as i64;
+                                    estimated_usage.cached_tokens = tokens.cached_tokens as i64;
                                     // Forward input token count to TUI so ctx % updates.
                                     let _ = send_model_event(
                                         &tx,
                                         &cancel_token,
-                                        ModelStreamEvent::StreamingUsage(TokenUsage {
-                                            input_tokens: usage.input_tokens,
-                                            output_tokens: usage.output_tokens,
-                                            cached_tokens: usage.cached_tokens,
-                                        }),
+                                        ModelStreamEvent::StreamingUsage(estimated_usage.clone()),
                                     )
                                     .await;
                                 }
@@ -261,6 +276,8 @@ impl ModelGateway {
                             return;
                         }
                     }
+                    // If provider did not return final usage, keep `usage` at zero.
+                    // The executor/TUI can then continue to use estimated usage.
                     let _ =
                         send_model_event(&tx, &cancel_token, ModelStreamEvent::Completed(usage))
                             .await;
@@ -424,6 +441,42 @@ const RESERVED_OUTPUT_TOKENS: usize = 8_192;
 
 /// Default context window if not specified by the model settings.
 pub const DEFAULT_CONTEXT_WINDOW: usize = 100_000;
+
+fn estimate_text_tokens(text: &str) -> usize {
+    text.len().saturating_add(CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
+}
+
+fn estimate_len_tokens(len: usize) -> usize {
+    len.saturating_add(CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
+}
+
+fn estimate_messages_tokens(messages: &[llm::Message]) -> usize {
+    messages
+        .iter()
+        .map(|m| {
+            let tool_calls_len: usize = m
+                .tool_calls
+                .iter()
+                .map(|c| c.id.len() + c.function.name.len() + c.function.arguments.len())
+                .sum();
+            let tool_result_len = m
+                .tool_result
+                .as_ref()
+                .map(|r| {
+                    r.tool_call_id.len()
+                        + r.name.len()
+                        + r.result.as_deref().unwrap_or("").len()
+                        + r.error.as_deref().unwrap_or("").len()
+                })
+                .unwrap_or(0);
+            estimate_text_tokens(&m.content)
+                + estimate_text_tokens(&m.think_content)
+                + estimate_text_tokens(&m.role.to_string())
+                + estimate_len_tokens(tool_calls_len + tool_result_len)
+                + 8
+        })
+        .sum()
+}
 
 pub fn calculate_prompt_budget(context_window: Option<usize>) -> usize {
     let window = context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW);

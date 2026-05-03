@@ -75,8 +75,8 @@ impl PersistenceManager {
                 r#"
             INSERT INTO turns (
                 turn_id, thread_id, created_at, updated_at, status, started_by_surface,
-                token_usage_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                token_usage_json, token_usage_estimated_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
                 params![
                     metadata.turn_id,
@@ -86,6 +86,7 @@ impl PersistenceManager {
                     enum_json(&metadata.status)?,
                     enum_json(&metadata.started_by_surface)?,
                     serde_json::to_string(&metadata.token_usage)?,
+                    serde_json::to_string(&metadata.estimated_token_usage)?,
                 ],
             )?;
             conn.execute(
@@ -134,7 +135,7 @@ impl PersistenceManager {
             conn.execute(
                 r#"
             UPDATE turns
-            SET updated_at = ?3, status = ?4, token_usage_json = ?5
+            SET updated_at = ?3, status = ?4, token_usage_json = ?5, token_usage_estimated_json = ?6
             WHERE turn_id = ?1 AND thread_id = ?2
             "#,
                 params![
@@ -143,6 +144,7 @@ impl PersistenceManager {
                     turn.updated_at,
                     enum_json(&turn.status)?,
                     serde_json::to_string(&turn.token_usage)?,
+                    serde_json::to_string(&turn.estimated_token_usage)?,
                 ],
             )?;
             Ok(())
@@ -223,7 +225,7 @@ impl PersistenceManager {
 
             let turns = {
                 let mut stmt = conn.prepare(
-                    "SELECT turn_id, thread_id, created_at, updated_at, status, started_by_surface, token_usage_json
+                    "SELECT turn_id, thread_id, created_at, updated_at, status, started_by_surface, token_usage_json, token_usage_estimated_json
                      FROM turns WHERE thread_id = ?1 ORDER BY created_at ASC",
                 )?;
                 let mut rows = stmt.query(params![thread_id])?;
@@ -237,6 +239,7 @@ impl PersistenceManager {
                         status: serde_json::from_str(&row.get::<_, String>(4)?)?,
                         started_by_surface: serde_json::from_str(&row.get::<_, String>(5)?)?,
                         token_usage: serde_json::from_str(&row.get::<_, String>(6)?)?,
+                        estimated_token_usage: serde_json::from_str(&row.get::<_, String>(7)?)?,
                     });
                 }
                 turns
@@ -444,7 +447,8 @@ impl PersistenceManager {
                 updated_at INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 started_by_surface TEXT NOT NULL,
-                token_usage_json TEXT NOT NULL
+                token_usage_json TEXT NOT NULL,
+                token_usage_estimated_json TEXT NOT NULL DEFAULT '{"inputTokens":0,"outputTokens":0,"cachedTokens":0}'
             );
             CREATE TABLE IF NOT EXISTS items (
                 item_id TEXT PRIMARY KEY,
@@ -464,6 +468,19 @@ impl PersistenceManager {
                 message TEXT NOT NULL
             );
             "#,
+            )?;
+            conn.execute(
+                "ALTER TABLE turns ADD COLUMN token_usage_estimated_json TEXT NOT NULL DEFAULT '{\"inputTokens\":0,\"outputTokens\":0,\"cachedTokens\":0}'",
+                [],
+            )
+            .ok();
+            conn.execute(
+                "UPDATE turns
+                 SET token_usage_estimated_json = token_usage_json
+                 WHERE token_usage_estimated_json IS NULL
+                    OR token_usage_estimated_json = ''
+                    OR token_usage_estimated_json = '{\"inputTokens\":0,\"outputTokens\":0,\"cachedTokens\":0}'",
+                [],
             )?;
             Ok(())
         })

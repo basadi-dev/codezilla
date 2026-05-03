@@ -157,6 +157,13 @@ pub struct ThreadModelSettingsParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum RepoMapVerbosity {
+    Lean,
+    Verbose,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnStartParams {
     pub thread_id: ThreadId,
     #[serde(default)]
@@ -166,6 +173,8 @@ pub struct TurnStartParams {
     pub approval_policy: Option<ApprovalPolicy>,
     pub permission_profile: Option<PermissionProfile>,
     pub output_schema: Option<Value>,
+    #[serde(default)]
+    pub repo_map_verbosity: Option<RepoMapVerbosity>,
     /// Agent nesting depth — 0 for top-level, incremented by spawn_agent.
     #[serde(default)]
     pub agent_depth: u32,
@@ -588,6 +597,7 @@ mod fake_model_tests {
                     approval_policy: None,
                     permission_profile: None,
                     output_schema: None,
+                    repo_map_verbosity: None,
                     agent_depth,
                 },
                 SurfaceKind::Exec,
@@ -1045,6 +1055,7 @@ mod fake_model_tests {
                     approval_policy: None,
                     permission_profile: None,
                     output_schema: None,
+                    repo_map_verbosity: None,
                     agent_depth: 0,
                 },
                 SurfaceKind::Exec,
@@ -1440,6 +1451,7 @@ mod fake_model_tests {
                     approval_policy: None,
                     permission_profile: None,
                     output_schema: None,
+                    repo_map_verbosity: None,
                     agent_depth: 0,
                 },
                 SurfaceKind::Exec,

@@ -47,6 +47,22 @@ pub struct CodebaseIntelConfig {
     /// Token budget for the formatted map. Default: 2000.
     #[serde(default = "default_token_budget")]
     pub token_budget: usize,
+    /// Include non-indexable files (docs/config) in the repo map.
+    /// Default: false.
+    #[serde(default)]
+    pub include_non_indexable: bool,
+    /// Include binary files in the repo map.
+    /// Default: false.
+    #[serde(default)]
+    pub include_binary: bool,
+    /// Include hidden files/directories during walk.
+    /// Default: false.
+    #[serde(default)]
+    pub include_hidden: bool,
+    /// Include entries from excluded/internal directories (e.g. `.git`, `target`).
+    /// Default: false.
+    #[serde(default)]
+    pub include_excluded_paths: bool,
 }
 
 impl Default for CodebaseIntelConfig {
@@ -56,6 +72,10 @@ impl Default for CodebaseIntelConfig {
             max_files: 500,
             max_depth: 4,
             token_budget: 2000,
+            include_non_indexable: false,
+            include_binary: false,
+            include_hidden: false,
+            include_excluded_paths: false,
         }
     }
 }
@@ -113,7 +133,13 @@ impl RepoMap {
 
         let t0 = std::time::Instant::now();
 
-        let file_list = walk_repo(root, config.max_depth, config.max_files);
+        let file_list = walk_repo(
+            root,
+            config.max_depth,
+            config.max_files,
+            config.include_hidden,
+            config.include_excluded_paths,
+        );
         let walk_elapsed = t0.elapsed();
 
         if file_list.is_empty() {
@@ -139,7 +165,13 @@ impl RepoMap {
             })
             .collect();
 
-        let map = format_repo_map(cwd, &entries, config.token_budget);
+        let map = format_repo_map(
+            cwd,
+            &entries,
+            config.token_budget,
+            config.include_non_indexable,
+            config.include_binary,
+        );
         let total_elapsed = t0.elapsed();
 
         if map.trim().is_empty() {

@@ -480,6 +480,7 @@ impl AppServer {
                             approval_policy: None,
                             permission_profile: None,
                             output_schema: None,
+                            repo_map_verbosity: None,
                             agent_depth: 0,
                         },
                         super::domain::SurfaceKind::Review,

@@ -32,7 +32,13 @@ pub struct FileEntry<'a> {
 /// `token_budget` is the maximum number of *tokens* (chars ÷ 4) to emit.
 /// Files with symbols are prioritised; binary / non-indexable files are listed
 /// last with a single line annotation.
-pub fn format_repo_map(cwd: &str, files: &[FileEntry<'_>], token_budget: usize) -> String {
+pub fn format_repo_map(
+    cwd: &str,
+    files: &[FileEntry<'_>],
+    token_budget: usize,
+    include_non_indexable: bool,
+    include_binary: bool,
+) -> String {
     let char_budget = token_budget * 4;
     let mut out = String::new();
     let _ = writeln!(out, "## Repository map  (cwd: {cwd})");
@@ -78,11 +84,21 @@ pub fn format_repo_map(cwd: &str, files: &[FileEntry<'_>], token_budget: usize) 
         }
     }
 
-    // Append non-indexable files (config, markdown, binary…)
+    // Optionally append non-indexable files (config, markdown, binary…).
+    if !include_non_indexable {
+        if truncated {
+            out.push_str("... (map truncated — use list_dir for the full file tree)\n");
+        }
+        return out;
+    }
+
     let mut other_header_written = false;
     for entry in &non_indexable {
         if truncated {
             break;
+        }
+        if entry.summary.is_binary && !include_binary {
+            continue;
         }
         let path_str = entry.summary.rel_path.display().to_string();
         let ann = if entry.summary.is_binary {
@@ -152,7 +168,7 @@ mod tests {
                 line: 1,
             }],
         };
-        let map = format_repo_map("/repo", &[entry], 2000);
+        let map = format_repo_map("/repo", &[entry], 2000, true, true);
         assert!(map.contains("src/main.rs"));
         assert!(map.contains("fn main"));
     }
@@ -175,7 +191,7 @@ mod tests {
             })
             .collect();
         // Very small budget → must truncate
-        let map = format_repo_map("/repo", &entries, 50);
+        let map = format_repo_map("/repo", &entries, 50, true, true);
         assert!(map.contains("truncated"));
     }
 }

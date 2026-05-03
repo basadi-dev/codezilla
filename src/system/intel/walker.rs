@@ -102,12 +102,18 @@ pub struct FileSummary {
 /// Respects `.gitignore`, `.ignore`, and `.codezillaignore` files.
 /// Binary files are included in the listing (so the model knows they exist)
 /// but flagged with `is_binary = true`.
-pub fn walk_repo(root: &Path, max_depth: usize, max_files: usize) -> Vec<FileSummary> {
+pub fn walk_repo(
+    root: &Path,
+    max_depth: usize,
+    max_files: usize,
+    include_hidden: bool,
+    include_excluded_paths: bool,
+) -> Vec<FileSummary> {
     let mut results = Vec::new();
 
     let walker = WalkBuilder::new(root)
         .max_depth(Some(max_depth))
-        .hidden(false) // include dot-files; .gitignore still applies
+        .hidden(!include_hidden)
         .ignore(true) // respect .ignore
         .git_ignore(true) // respect .gitignore
         .git_global(false) // skip global gitignore (avoids user-specific noise)
@@ -129,6 +135,11 @@ pub fn walk_repo(root: &Path, max_depth: usize, max_files: usize) -> Vec<FileSum
             continue;
         }
 
+        let rel_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+        if !include_excluded_paths && is_excluded_path(&rel_path) {
+            continue;
+        }
+
         let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
 
         // Skip very large files (> 1 MB) — too expensive to scan
@@ -138,8 +149,6 @@ pub fn walk_repo(root: &Path, max_depth: usize, max_files: usize) -> Vec<FileSum
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let lang = Language::from_extension(ext);
-
-        let rel_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
 
         // Binary detection: read first 8 KB and check for null bytes.
         let is_binary = is_binary_file(path);
@@ -153,6 +162,23 @@ pub fn walk_repo(root: &Path, max_depth: usize, max_files: usize) -> Vec<FileSum
     }
 
     results
+}
+
+fn is_excluded_path(rel_path: &Path) -> bool {
+    const EXCLUDED_DIRS: &[&str] = &[
+        ".git",
+        "target",
+        "node_modules",
+        ".next",
+        "dist",
+        "build",
+        ".cache",
+        "coverage",
+    ];
+    rel_path.components().any(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        EXCLUDED_DIRS.contains(&name.as_ref())
+    })
 }
 
 fn is_binary_file(path: &Path) -> bool {

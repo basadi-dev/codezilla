@@ -77,6 +77,33 @@ pub(crate) fn classify_turn_intent(inputs: &[UserInput]) -> TurnIntent {
     TurnIntent::Unknown
 }
 
+/// Returns true when the user explicitly asks for low-level repo internals in
+/// the map (e.g. binary files, `.git`, or full file tree).
+pub(crate) fn wants_verbose_repo_map(inputs: &[UserInput]) -> bool {
+    let text = inputs
+        .iter()
+        .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if text.is_empty() {
+        return false;
+    }
+    let mentions_binary = text.contains("binary")
+        || text.contains("bin files")
+        || text.contains("non-text")
+        || text.contains("compiled artifacts");
+    let mentions_git_internal = text.contains(".git")
+        || text.contains("git objects")
+        || text.contains("git internals")
+        || text.contains("object store");
+    let mentions_full_tree = text.contains("full file tree")
+        || text.contains("entire tree")
+        || text.contains("everything in the repo map")
+        || text.contains("all files including");
+    mentions_binary || mentions_git_internal || mentions_full_tree
+}
+
 pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
     let missing = |field: &'static str| format!("missing required argument `{field}`");
     let non_empty_string = |name: &'static str| -> Option<Cow<'static, str>> {
