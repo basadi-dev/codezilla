@@ -392,7 +392,9 @@ impl ConversationRuntime {
             max_empty_responses = agent_cfg.max_empty_responses,
             max_total_nudges = agent_cfg.max_total_nudges,
             max_response_chars = agent_cfg.max_response_chars,
+            max_concurrent_agents = agent_cfg.max_concurrent_agents,
             max_child_agents = agent_cfg.max_child_agents,
+            max_concurrent_child_agents = agent_cfg.max_concurrent_child_agents(),
             max_spawn_depth = agent_cfg.max_spawn_depth,
             child_timeout_secs = agent_cfg.child_timeout_secs,
             max_child_timeout_secs = agent_cfg.max_child_timeout_secs,
@@ -403,7 +405,13 @@ impl ConversationRuntime {
         me.inner
             .tool_orchestrator
             .register_provider(Arc::new(SpawnAgentToolProviderReal::new(
-                AgentSupervisor::new(me.clone(), me.inner.effective_config.agent.max_child_agents),
+                AgentSupervisor::new(
+                    me.clone(),
+                    me.inner
+                        .effective_config
+                        .agent
+                        .max_concurrent_child_agents(),
+                ),
             )));
 
         Ok(me)

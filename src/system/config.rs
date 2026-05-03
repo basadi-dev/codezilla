@@ -35,6 +35,9 @@ pub struct AgentConfig {
     /// Streaming text guard for a single model response.
     #[serde(default = "default_agent_max_response_chars")]
     pub max_response_chars: usize,
+    /// Maximum total concurrent agents (top-level + child agents).
+    #[serde(default = "default_agent_max_concurrent_agents")]
+    pub max_concurrent_agents: usize,
     /// Maximum concurrent child agents spawned by one runtime.
     #[serde(default = "default_agent_max_child_agents")]
     pub max_child_agents: usize,
@@ -59,6 +62,7 @@ impl Default for AgentConfig {
             max_empty_responses: default_agent_max_empty_responses(),
             max_total_nudges: default_agent_max_total_nudges(),
             max_response_chars: default_agent_max_response_chars(),
+            max_concurrent_agents: default_agent_max_concurrent_agents(),
             max_child_agents: default_agent_max_child_agents(),
             max_spawn_depth: default_agent_max_spawn_depth(),
             child_timeout_secs: default_agent_child_timeout_secs(),
@@ -75,10 +79,18 @@ impl AgentConfig {
         self.max_empty_responses = self.max_empty_responses.max(1);
         self.max_total_nudges = self.max_total_nudges.max(1);
         self.max_response_chars = self.max_response_chars.max(1);
+        self.max_concurrent_agents = self.max_concurrent_agents.max(1);
         self.max_child_agents = self.max_child_agents.max(1);
         self.child_timeout_secs = self.child_timeout_secs.max(1);
         self.max_child_timeout_secs = self.max_child_timeout_secs.max(self.child_timeout_secs);
         self
+    }
+
+    /// Child-agent concurrency derived from the total-agent budget.
+    /// Reserves one slot for the top-level agent.
+    pub fn max_concurrent_child_agents(&self) -> usize {
+        self.max_child_agents
+            .min(self.max_concurrent_agents.saturating_sub(1))
     }
 }
 
@@ -108,6 +120,10 @@ fn default_agent_max_total_nudges() -> usize {
 
 fn default_agent_max_response_chars() -> usize {
     256_000
+}
+
+fn default_agent_max_concurrent_agents() -> usize {
+    4
 }
 
 fn default_agent_max_child_agents() -> usize {
@@ -746,6 +762,7 @@ fn default_spec_config_json() -> Value {
             "max_empty_responses": 2,
             "max_total_nudges": 4,
             "max_response_chars": 256000,
+            "max_concurrent_agents": 4,
             "max_child_agents": 4,
             "max_spawn_depth": 3,
             "child_timeout_secs": 120,

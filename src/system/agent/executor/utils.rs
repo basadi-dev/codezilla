@@ -123,6 +123,29 @@ pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
                 None
             }
         }
+        "spawn_agent" => {
+            if call
+                .arguments
+                .get("prompt")
+                .and_then(Value::as_str)
+                .map(|v| !v.trim().is_empty())
+                != Some(true)
+            {
+                return Some(missing("prompt"));
+            }
+            if let Some(write_paths) = call.arguments.get("write_paths") {
+                let Some(items) = write_paths.as_array() else {
+                    return Some("`write_paths` must be an array of strings".into());
+                };
+                if items
+                    .iter()
+                    .any(|v| v.as_str().map(|s| s.trim().is_empty()).unwrap_or(true))
+                {
+                    return Some("`write_paths` entries must be non-empty strings".into());
+                }
+            }
+            None
+        }
         "patch_file" => {
             if call.arguments.get("path").and_then(Value::as_str).is_none() {
                 return Some(missing("path"));
@@ -285,6 +308,69 @@ fn normalize_path(p: &str) -> String {
 
 // ─── partition_into_batches ───────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WriteSet {
+    None,
+    Paths(Vec<String>),
+    Unknown,
+}
+
+pub(crate) fn write_set_for_call(call: &ToolCall) -> WriteSet {
+    match call.tool_name.as_str() {
+        "write_file" | "patch_file" | "create_directory" | "remove_path" => call
+            .arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .map(normalize_path)
+            .map(|p| WriteSet::Paths(vec![p]))
+            .unwrap_or(WriteSet::Unknown),
+        "copy_path" => {
+            let source = call.arguments.get("source").and_then(Value::as_str);
+            let target = call.arguments.get("target").and_then(Value::as_str);
+            match (source, target) {
+                (Some(s), Some(t)) => WriteSet::Paths(vec![normalize_path(s), normalize_path(t)]),
+                _ => WriteSet::Unknown,
+            }
+        }
+        "spawn_agent" => match call.arguments.get("write_paths").and_then(Value::as_array) {
+            Some(paths) if paths.is_empty() => WriteSet::None,
+            Some(paths) => {
+                let normalized: Vec<String> = paths
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(normalize_path)
+                    .collect();
+                if normalized.is_empty() {
+                    WriteSet::Unknown
+                } else {
+                    WriteSet::Paths(normalized)
+                }
+            }
+            None => WriteSet::Unknown,
+        },
+        _ => WriteSet::None,
+    }
+}
+
+fn write_sets_conflict(a: &WriteSet, b: &WriteSet) -> bool {
+    match (a, b) {
+        (WriteSet::None, WriteSet::None) => false,
+        (WriteSet::Unknown, WriteSet::None) | (WriteSet::None, WriteSet::Unknown) => true,
+        (WriteSet::Unknown, _) | (_, WriteSet::Unknown) => true,
+        (WriteSet::Paths(a_paths), WriteSet::Paths(b_paths)) => a_paths
+            .iter()
+            .any(|a| b_paths.iter().any(|b| paths_overlap(a, b))),
+        (WriteSet::Paths(_), WriteSet::None) | (WriteSet::None, WriteSet::Paths(_)) => false,
+    }
+}
+
+fn paths_overlap(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
 /// Split an ordered slice of `ToolCall`s into sequential execution batches.
 ///
 /// Consecutive calls that are all parallel-safe are grouped into a single batch
@@ -308,6 +394,14 @@ where
 
     for (i, call) in calls.iter().enumerate() {
         if is_parallel(&call.tool_name) {
+            let candidate_write_set = write_set_for_call(call);
+            let conflicts = current.iter().any(|(_, existing)| {
+                let existing_write_set = write_set_for_call(existing);
+                write_sets_conflict(&candidate_write_set, &existing_write_set)
+            });
+            if conflicts && !current.is_empty() {
+                batches.push(std::mem::take(&mut current));
+            }
             current.push((i, call.clone()));
         } else {
             if !current.is_empty() {
@@ -938,6 +1032,15 @@ mod tests {
         }
     }
 
+    fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            tool_call_id: format!("call_{name}"),
+            provider_kind: crate::system::domain::ToolProviderKind::Builtin,
+            tool_name: name.to_string(),
+            arguments,
+        }
+    }
+
     #[test]
     fn retries_agentic_user_request_with_no_tool_call() {
         let items = vec![user_item("go ahead and implement the ideal solution")];
@@ -976,6 +1079,60 @@ mod tests {
             &items,
             1
         ));
+    }
+
+    #[test]
+    fn spawn_agent_requires_non_empty_prompt() {
+        let call = tool_call("spawn_agent", json!({ "prompt": "" }));
+        assert!(validate_tool_call(&call).is_some());
+    }
+
+    #[test]
+    fn spawn_agent_write_paths_must_be_string_array() {
+        let bad = tool_call(
+            "spawn_agent",
+            json!({ "prompt": "analyze", "write_paths": "src/lib.rs" }),
+        );
+        assert!(validate_tool_call(&bad).is_some());
+
+        let good = tool_call(
+            "spawn_agent",
+            json!({ "prompt": "analyze", "write_paths": ["src/a.rs", "src/b.rs"] }),
+        );
+        assert!(validate_tool_call(&good).is_none());
+    }
+
+    #[test]
+    fn partition_splits_parallel_batch_on_write_conflict() {
+        let calls = vec![
+            tool_call(
+                "spawn_agent",
+                json!({ "prompt": "a", "write_paths": ["src/a.rs"] }),
+            ),
+            tool_call(
+                "spawn_agent",
+                json!({ "prompt": "b", "write_paths": ["src/b.rs"] }),
+            ),
+            tool_call(
+                "spawn_agent",
+                json!({ "prompt": "c", "write_paths": ["src/a.rs"] }),
+            ),
+        ];
+        let batches = partition_into_batches(&calls, |_| true);
+        let sizes: Vec<usize> = batches.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![2, 1]);
+    }
+
+    #[test]
+    fn partition_treats_missing_spawn_agent_write_paths_as_serialization_barrier() {
+        let calls = vec![
+            tool_call("spawn_agent", json!({ "prompt": "a", "write_paths": [] })),
+            tool_call("spawn_agent", json!({ "prompt": "b" })),
+            tool_call("spawn_agent", json!({ "prompt": "c", "write_paths": [] })),
+        ];
+        let batches = partition_into_batches(&calls, |_| true);
+        let sizes: Vec<usize> = batches.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![1, 1, 1]);
     }
 
     #[test]

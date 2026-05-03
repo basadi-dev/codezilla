@@ -437,15 +437,18 @@ impl ToolProvider for SpawnAgentToolProviderReal {
 
     fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
         let agent_cfg = &self.supervisor.runtime.inner.effective_config.agent;
+        let child_budget = agent_cfg.max_concurrent_child_agents();
         vec![ToolDefinition {
             name: "spawn_agent".into(),
             description: format!(
                 "Spawn an independent sub-agent for a bounded task. \
                 The sub-agent runs with full tool access and returns its final answer as text. \
                 Use this for a small number of independent sub-tasks, such as analysing specific files or modules. \
-                At most {} child agents run concurrently; extra calls queue behind that limit. \
+                At most {} total agents run concurrently (including the parent); this allows up to {} child agents at once. \
+                Extra calls queue behind that limit. \
                 Avoid exhaustive directory inventory tasks unless the child can summarize partial/truncated evidence and finish promptly.",
-                agent_cfg.max_child_agents
+                agent_cfg.max_concurrent_agents,
+                child_budget
             ),
             input_schema: json!({
                 "type": "object",
@@ -453,6 +456,11 @@ impl ToolProvider for SpawnAgentToolProviderReal {
                     "prompt": {
                         "type": "string",
                         "description": "The task description for the sub-agent. Be specific and self-contained."
+                    },
+                    "write_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional ownership declaration for paths this sub-agent may edit. Use an empty array for read-only analysis tasks. Omit only if edits are not expected."
                     },
                     "timeout_secs": {
                         "type": "integer",
@@ -473,6 +481,16 @@ impl ToolProvider for SpawnAgentToolProviderReal {
 
     async fn execute(&self, call: &ToolCall, ctx: &ToolExecutionContext) -> Result<ToolResult> {
         let agent_cfg = &self.supervisor.runtime.inner.effective_config.agent;
+        if agent_cfg.max_concurrent_child_agents() == 0 {
+            return Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({ "error": "child_agent_concurrency_disabled" }),
+                error_message: Some(
+                    "spawn_agent disabled: max_concurrent_agents leaves no child slots".into(),
+                ),
+            });
+        }
 
         // Depth guard: prevent unbounded recursive agent spawning.
         if ctx.agent_depth >= agent_cfg.max_spawn_depth {
