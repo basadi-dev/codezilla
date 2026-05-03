@@ -14,8 +14,8 @@ use super::markdown::md_to_lines;
 
 use super::super::domain::{
     ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalResolution, ConversationItem,
-    ItemKind, PendingApproval, RuntimeEvent, RuntimeEventKind, ThreadMetadata, TokenUsage,
-    ToolResult, TurnStatus, UserInput,
+    ItemKind, PendingApproval, ReasoningEffort, RuntimeEvent, RuntimeEventKind, ThreadMetadata,
+    TokenUsage, ToolResult, TurnStatus, UserInput,
 };
 use super::super::error as cod_error;
 use super::super::runtime::{
@@ -637,7 +637,7 @@ impl InteractiveApp {
         let (model, reasoning) = {
             let ms = self.effective_model_settings();
             let model = format!("{}/{}", ms.provider_id, ms.model_id);
-            let reasoning = ms.reasoning_effort.unwrap_or_default();
+            let reasoning = ms.reasoning_effort.as_str().to_string();
             (model, reasoning)
         };
         let approval_icon = if self.auto_approve_tools_enabled() {
@@ -666,7 +666,11 @@ impl InteractiveApp {
         let mut right = cwd.to_string();
         right.push_str(" │ ");
         right.push_str(&model);
-        if !reasoning.is_empty() {
+        if self
+            .effective_model_settings()
+            .reasoning_effort
+            .is_explicit()
+        {
             right.push_str(" │ ");
             right.push_str(&format!("reasoning:{reasoning}"));
         }
@@ -1210,7 +1214,7 @@ impl InteractiveApp {
             true
         } else if matches!(command, "/model") {
             let ms = self.effective_model_settings();
-            let reasoning = ms.reasoning_effort.as_deref().unwrap_or("off");
+            let reasoning = ms.reasoning_effort.as_str();
             self.status_message = format!(
                 "Model: {}/{} · reasoning: {reasoning}",
                 ms.provider_id, ms.model_id
@@ -1251,21 +1255,22 @@ impl InteractiveApp {
             let effort = self
                 .effective_model_settings()
                 .reasoning_effort
-                .as_deref()
-                .unwrap_or("off")
+                .as_str()
                 .to_string();
             self.status_message = format!("Reasoning: {effort}");
             self.error_message = None;
             true
         } else if let Some(rest) = command.strip_prefix("/reasoning ") {
-            let rest = rest.trim();
-            let mut ms = self.effective_model_settings();
-            ms.reasoning_effort = if rest == "off" {
-                None
-            } else {
-                Some(rest.to_string())
+            let rest = rest.trim().to_ascii_lowercase();
+            let Some(effort) = ReasoningEffort::parse(&rest) else {
+                self.error_message = Some(format!(
+                    "Invalid reasoning effort: {rest}. Use auto, off, low, medium, or high."
+                ));
+                return Ok(true);
             };
-            let label = ms.reasoning_effort.as_deref().unwrap_or("off");
+            let mut ms = self.effective_model_settings();
+            ms.reasoning_effort = effort;
+            let label = ms.reasoning_effort.as_str();
             self.status_message = format!("Reasoning set to {label}");
             self.error_message = None;
             self.model_settings_override = Some(ms);
@@ -1275,7 +1280,7 @@ impl InteractiveApp {
                 "Keys: Tab/↑↓ autocomplete, Ctrl+A/E start/end-of-line, Ctrl+N new, Ctrl+F fork, \
                  Ctrl+C interrupt (double-tap clears composer), Ctrl+Q quit  ·  \
                  Approval: Y approve  U approve+auto  D deny  ·  \
-                 Commands: /model [provider/model]  /reasoning [low|medium|high|off]  \
+                 Commands: /model [provider/model]  /reasoning [auto|off|low|medium|high]  \
                  /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads (autocomplete)  ·  \
                  CLI: codezilla -r (resume last thread)".into();
             self.error_message = None;
@@ -1375,7 +1380,7 @@ impl InteractiveApp {
         super::super::domain::ModelSettings {
             model_id,
             provider_id,
-            reasoning_effort: cfg.model_settings.reasoning_effort.clone(),
+            reasoning_effort: cfg.model_settings.reasoning_effort,
             summary_mode: None,
             service_tier: None,
             web_search_enabled: false,
@@ -1391,7 +1396,7 @@ impl InteractiveApp {
         }
 
         let ms = self.effective_model_settings();
-        let cur_reasoning = ms.reasoning_effort.as_deref().unwrap_or("off");
+        let cur_reasoning = ms.reasoning_effort.as_str();
         let cur_model_key = format!("{}/{}", ms.provider_id, ms.model_id);
         let cfg_models = self.runtime.effective_config().models.clone();
 
@@ -1430,9 +1435,9 @@ impl InteractiveApp {
             all.push(AutocompleteItem::labeled(value, label));
         }
 
-        // ── /reasoning: sorted off → low → medium → high with current marker ─
+        // ── /reasoning: sorted auto → off → low → medium → high ──────────────
         all.push(AutocompleteItem::simple("/reasoning"));
-        for level in &["off", "low", "medium", "high"] {
+        for level in &["auto", "off", "low", "medium", "high"] {
             let value = format!("/reasoning {level}");
             let marker = if *level == cur_reasoning { "  ←" } else { "" };
             let label = format!("{value}{marker}");

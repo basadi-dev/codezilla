@@ -54,21 +54,60 @@ fn build_chat_body(
     reasoning_effort: Option<&str>,
 ) -> Value {
     let msgs = build_chat_messages(messages);
-    let think = matches!(reasoning_effort, Some(e) if e != "off");
     let mut body = json!({
         "model": model,
         "messages": msgs,
         "stream": stream,
-        "think": think,
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
         }
     });
+    match ollama_think_value(model, reasoning_effort) {
+        OllamaThink::Omit => {}
+        OllamaThink::Bool(v) => body["think"] = json!(v),
+        OllamaThink::Level(level) => body["think"] = json!(level),
+    }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
     body
+}
+
+enum OllamaThink<'a> {
+    Omit,
+    Bool(bool),
+    Level(&'a str),
+}
+
+fn ollama_think_value<'a>(model: &str, reasoning_effort: Option<&'a str>) -> OllamaThink<'a> {
+    let Some(raw) = reasoning_effort else {
+        // Default behavior: let model/provider decide by omitting `think`.
+        return OllamaThink::Omit;
+    };
+
+    let effort = raw.trim().to_ascii_lowercase();
+    match effort.as_str() {
+        "auto" | "" => OllamaThink::Omit,
+        "off" | "none" => OllamaThink::Bool(false),
+        "low" | "medium" | "high" => {
+            if model_supports_think_levels(model) {
+                OllamaThink::Level(match effort.as_str() {
+                    "low" => "low",
+                    "medium" => "medium",
+                    _ => "high",
+                })
+            } else {
+                OllamaThink::Bool(true)
+            }
+        }
+        _ => OllamaThink::Bool(true),
+    }
+}
+
+fn model_supports_think_levels(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    normalized.contains("gpt-oss")
 }
 
 fn build_chat_messages(messages: &[Message]) -> Vec<Value> {

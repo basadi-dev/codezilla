@@ -23,7 +23,8 @@ use super::{
 use crate::system::agent::model_gateway::build_compaction_messages;
 use crate::system::domain::{
     now_seconds, ApprovalPolicy, ConversationItem, ItemKind, MemoryMode, ModelSettings,
-    PersistedThread, RuntimeEventKind, ThreadFilter, ThreadMetadata, ThreadStatus, TurnMetadata,
+    PersistedThread, ReasoningEffort, RuntimeEventKind, ThreadFilter, ThreadMetadata, ThreadStatus,
+    TurnMetadata,
 };
 
 impl ConversationRuntime {
@@ -205,7 +206,7 @@ impl ConversationRuntime {
         let model_settings = ModelSettings {
             model_id: persisted.metadata.model_id.clone(),
             provider_id: persisted.metadata.provider_id.clone(),
-            reasoning_effort: None, // no extended thinking needed for summaries
+            reasoning_effort: ReasoningEffort::Off, // no extended thinking needed for summaries
             summary_mode: None,
             service_tier: None,
             web_search_enabled: false,

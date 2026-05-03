@@ -45,7 +45,7 @@ fn build_body(
         body["tools"] = json!(tools);
     }
     if let Some(effort) = reasoning_effort {
-        if !effort.is_empty() && effort != "none" {
+        if !effort.is_empty() && effort != "none" && effort != "off" && effort != "auto" {
             body["reasoning_effort"] = json!(effort);
         }
     }

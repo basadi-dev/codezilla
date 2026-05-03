@@ -80,7 +80,7 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     let (model, reasoning) = {
         let ms = app.effective_model_settings();
         let model = format!("{}/{}", ms.provider_id, ms.model_id);
-        let reasoning = ms.reasoning_effort.unwrap_or_default();
+        let reasoning = ms.reasoning_effort.as_str().to_string();
         (model, reasoning)
     };
     let approval_icon = if app.auto_approve_tools_enabled() {
@@ -146,7 +146,11 @@ fn render_header(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     right_spans.push(Span::styled(cwd.clone(), Style::default().fg(Color::White)));
     right_spans.push(Span::styled(" │ ", Style::default().fg(COLOR_BORDER)));
     right_spans.push(Span::styled(model, Style::default().fg(COLOR_MUTED)));
-    if !reasoning.is_empty() {
+    if app
+        .effective_model_settings()
+        .reasoning_effort
+        .is_explicit()
+    {
         right_spans.push(Span::styled(" │ ", Style::default().fg(COLOR_BORDER)));
         right_spans.push(Span::styled(
             format!("reasoning:{reasoning}"),

@@ -326,7 +326,7 @@ where
 
 pub(crate) fn thinking_instruction(reasoning_effort: Option<&str>) -> Option<String> {
     match reasoning_effort {
-        None | Some("off") => None,
+        None | Some("off") | Some("auto") => None,
         Some("low") => Some(
             "Think briefly before responding. A short internal reasoning pass is enough.".into(),
         ),

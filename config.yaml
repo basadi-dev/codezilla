@@ -6,7 +6,7 @@
 model_settings:
   model_id: "glm-5.1:cloud"
   provider_id: "ollama"
-  # reasoning_effort: "medium"   # low | medium | high  (Anthropic / OpenAI o-series only)
+  # reasoning_effort: "auto"     # auto | off | low | medium | high
 
 # Model presets shown in the /model autocomplete list.
 # Format: model_id + provider_id required; reasoning_effort optional.

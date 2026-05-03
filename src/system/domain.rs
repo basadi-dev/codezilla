@@ -177,7 +177,8 @@ pub struct TokenUsage {
 pub struct ModelSettings {
     pub model_id: ModelId,
     pub provider_id: ProviderId,
-    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
     pub summary_mode: Option<String>,
     pub service_tier: Option<String>,
     #[serde(default)]
@@ -191,13 +192,74 @@ impl Default for ModelSettings {
         Self {
             model_id: "glm-5.1:cloud".into(),
             provider_id: "ollama".into(),
-            reasoning_effort: None,
+            reasoning_effort: ReasoningEffort::Auto,
             summary_mode: None,
             service_tier: None,
             web_search_enabled: false,
             context_window: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    #[default]
+    Auto,
+    #[serde(alias = "none")]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReasoningEffort::Auto => "auto",
+            ReasoningEffort::Off => "off",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+        }
+    }
+
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(ReasoningEffort::Auto),
+            "off" | "none" => Some(ReasoningEffort::Off),
+            "low" => Some(ReasoningEffort::Low),
+            "medium" => Some(ReasoningEffort::Medium),
+            "high" => Some(ReasoningEffort::High),
+            _ => None,
+        }
+    }
+
+    pub fn is_explicit(self) -> bool {
+        !matches!(self, ReasoningEffort::Auto | ReasoningEffort::Off)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningCapability {
+    #[default]
+    Boolean,
+    None,
+    Levels,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelPreset {
+    pub model_id: ModelId,
+    pub provider_id: ProviderId,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub reasoning_capability: Option<ReasoningCapability>,
+    #[serde(default)]
+    pub context_window: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

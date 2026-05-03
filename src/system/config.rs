@@ -211,8 +211,8 @@ fn default_ollama_url() -> String {
 
 use super::domain::{
     now_seconds, AccountSession, ApprovalPolicy, ApprovalsReviewerKind, AuthMode,
-    ConversationPathSet, FeatureKey, McpServerConfig, ModelSettings, PathString, PermissionProfile,
-    SandboxMode,
+    ConversationPathSet, FeatureKey, McpServerConfig, ModelPreset, ModelSettings, PathString,
+    PermissionProfile, ReasoningEffort, SandboxMode,
 };
 
 // ── Process context ───────────────────────────────────────────────────────────
@@ -299,7 +299,7 @@ pub struct EffectiveConfig {
     pub log_file: String,
     /// User-defined model presets shown in the /model autocomplete list.
     #[serde(default)]
-    pub models: Vec<ModelSettings>,
+    pub models: Vec<ModelPreset>,
     #[serde(default)]
     pub auto_compaction: AutoCompactionConfig,
     #[serde(default)]
@@ -349,7 +349,7 @@ struct RawSpecConfig {
     #[serde(default = "default_log_file")]
     pub log_file: String,
     #[serde(default)]
-    pub models: Vec<ModelSettings>,
+    pub models: Vec<ModelPreset>,
     #[serde(default)]
     pub auto_compaction: AutoCompactionConfig,
     #[serde(default)]
@@ -453,8 +453,10 @@ impl ConfigManager {
             if model_settings.context_window.is_none() {
                 model_settings.context_window = preset.context_window;
             }
-            if model_settings.reasoning_effort.is_none() {
-                model_settings.reasoning_effort = preset.reasoning_effort.clone();
+            if model_settings.reasoning_effort == ReasoningEffort::Auto {
+                if let Some(effort) = preset.reasoning_effort {
+                    model_settings.reasoning_effort = effort;
+                }
             }
         }
 

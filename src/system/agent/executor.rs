@@ -302,10 +302,7 @@ impl TurnExecutor {
                 let already_read = recently_read_paths(&turn_ctx.items, 8);
                 self.system_instructions(
                     &turn_ctx.cwd,
-                    turn_ctx
-                        .effective_model_settings
-                        .reasoning_effort
-                        .as_deref(),
+                    Some(turn_ctx.effective_model_settings.reasoning_effort.as_str()),
                     repo_map_text.as_deref(),
                     turn_intent,
                     &already_read,
@@ -1161,17 +1158,21 @@ impl TurnExecutor {
             .copied()
             .unwrap_or(cfg.threshold_pct);
 
-        let model_settings = self
+        let context_window = self
             .runtime
             .inner
             .effective_config
             .models
             .iter()
             .find(|m| m.model_id == model_id)
-            .cloned()
-            .unwrap_or_else(|| self.runtime.inner.effective_config.model_settings.clone());
-        let prompt_budget =
-            super::model_gateway::calculate_prompt_budget(model_settings.context_window);
+            .and_then(|m| m.context_window)
+            .or(self
+                .runtime
+                .inner
+                .effective_config
+                .model_settings
+                .context_window);
+        let prompt_budget = super::model_gateway::calculate_prompt_budget(context_window);
 
         let used_pct = estimate_items_token_pct(&persisted.items, prompt_budget);
         if used_pct < threshold as f64 {

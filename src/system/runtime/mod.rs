@@ -458,7 +458,7 @@ mod fake_model_tests {
     use crate::system::config::{AgentConfig, AutoCompactionConfig, EffectiveConfig, LlmConfig};
     use crate::system::domain::{
         ApprovalDecision, ApprovalPolicy, ApprovalsReviewerKind, ItemKind, ModelSettings,
-        PermissionProfile, SandboxMode, SurfaceKind, UserInput,
+        PermissionProfile, ReasoningEffort, SandboxMode, SurfaceKind, UserInput,
     };
     use crate::system::intel::CodebaseIntelConfig;
     use std::path::PathBuf;
@@ -490,7 +490,7 @@ mod fake_model_tests {
             model_settings: ModelSettings {
                 model_id: "fake-model".into(),
                 provider_id: "fake".into(),
-                reasoning_effort: None,
+                reasoning_effort: ReasoningEffort::Auto,
                 summary_mode: None,
                 service_tier: None,
                 web_search_enabled: false,

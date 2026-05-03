@@ -75,7 +75,13 @@ impl ModelGateway {
             display_name: settings.model_id.clone(),
             hidden: false,
             is_default: true,
-            reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
+            reasoning_efforts: vec![
+                "auto".into(),
+                "off".into(),
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+            ],
         }]
     }
 
@@ -116,7 +122,7 @@ impl ModelGateway {
                     &tools,
                     &model_settings.model_id,
                     0.2,
-                    model_settings.reasoning_effort.as_deref(),
+                    Some(model_settings.reasoning_effort.as_str()),
                     8192,
                 ) => result,
             };
@@ -322,7 +328,7 @@ impl ModelGateway {
                             &tools,
                             &model_settings.model_id,
                             0.2,
-                            model_settings.reasoning_effort.as_deref(),
+                            Some(model_settings.reasoning_effort.as_str()),
                             8192,
                         ) => result,
                     };

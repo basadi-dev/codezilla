@@ -86,8 +86,7 @@ impl TurnContext {
                         .inner
                         .effective_config
                         .model_settings
-                        .reasoning_effort
-                        .clone(),
+                        .reasoning_effort,
                     summary_mode: None,
                     service_tier: None,
                     web_search_enabled: false,
