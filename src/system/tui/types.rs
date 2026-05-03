@@ -1288,29 +1288,59 @@ fn append_transcript_entry_lines(
             }
         }
     } else if entry.kind == EntryKind::Command {
-        // Command entries: first line is the command ($ prefix), rest is output
-        let mut is_first = true;
-        for body_line in entry.body.split('\n') {
+        // Command entries: first line is the command ($ prefix), rest is output.
+        // If the output portion looks like a unified diff, render it with
+        // diff highlighting (green/red backgrounds, syntax colouring).
+        let mut lines_iter = entry.body.split('\n');
+        let cmd_line = lines_iter.next().unwrap_or("");
+        let output_rest: Vec<&str> = lines_iter.collect();
+        let output_body: String = output_rest.join("\n");
+        let diff_output = is_diff_body(&output_body);
+        let diff_lang = if diff_output {
+            diff_lang_for_body(&output_body)
+        } else {
+            ""
+        };
+
+        // Render the command line ($ prefix)
+        for chunk in split_at_width(cmd_line, body_width) {
+            if current_line >= start_line && current_line < end_line {
+                out.push(Line::from(vec![
+                    Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                    Span::styled(
+                        "$ ",
+                        Style::default()
+                            .fg(COLOR_WARNING)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(chunk, Style::default().fg(body_color)),
+                ]));
+            }
+            current_line += 1;
+        }
+
+        // Render output lines — diff-highlighted or plain
+        for body_line in &output_rest {
             for chunk in split_at_width(body_line, body_width) {
                 if current_line >= start_line && current_line < end_line {
-                    let prefix = if is_first { "$ " } else { "  " };
-                    is_first = false;
-                    out.push(Line::from(vec![
-                        Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
-                        Span::styled(
-                            prefix,
-                            Style::default()
-                                .fg(COLOR_WARNING)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(chunk, Style::default().fg(body_color)),
-                    ]));
+                    if diff_output {
+                        let spans = render_diff_chunk(&chunk, diff_lang);
+                        let mut line_spans =
+                            vec![Span::styled("  │  ", Style::default().fg(COLOR_MUTED))];
+                        line_spans.extend(spans);
+                        out.push(Line::from(line_spans));
+                    } else {
+                        out.push(Line::from(vec![
+                            Span::styled("  │  ", Style::default().fg(COLOR_MUTED)),
+                            Span::styled("  ", Style::default()),
+                            Span::styled(chunk, Style::default().fg(body_color)),
+                        ]));
+                    }
                 }
                 current_line += 1;
             }
         }
     } else if entry.kind == EntryKind::FileChange {
-        // Non-diff FileChange entries (summary-only): render as plain text
         for body_line in entry.body.split('\n') {
             for chunk in split_at_width(body_line, body_width) {
                 if current_line >= start_line && current_line < end_line {
@@ -1896,10 +1926,22 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
         "patch_file" => {
             // Produce a unified-diff-like body so is_diff_body() triggers
             // and render_diff_chunk() applies syntax highlighting.
-            let path = arguments.get("path").and_then(Value::as_str).unwrap_or("file");
-            let start_line = arguments.get("start_line").and_then(Value::as_u64).unwrap_or(1);
-            let end_line = arguments.get("end_line").and_then(Value::as_u64).unwrap_or(1);
-            let content = arguments.get("content").and_then(Value::as_str).unwrap_or("");
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            let start_line = arguments
+                .get("start_line")
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            let end_line = arguments
+                .get("end_line")
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            let content = arguments
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let content_lines: Vec<&str> = content.lines().collect();
             let new_count = content_lines.len().max(1);
             let mut lines = Vec::new();
@@ -1919,14 +1961,21 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
         "write_file" => {
             // Produce a 📄-prefixed body so is_read_file_body() triggers
             // and render_read_file_body_lines() applies syntax highlighting.
-            let path = arguments.get("path").and_then(Value::as_str).unwrap_or("file");
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("file");
             let content = arguments.get("content").and_then(Value::as_str);
             let line_count = content.map(|c| c.lines().count()).unwrap_or(0).max(1);
             let mut lines = Vec::new();
             lines.push(format!("📄 {path}  ({line_count} lines · writing)"));
             lines.push(String::new());
             if let Some(content) = content {
-                lines.push(summarise_long_output(content, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS));
+                lines.push(summarise_long_output(
+                    content,
+                    TOOL_OUTPUT_MAX_LINES,
+                    TOOL_OUTPUT_MAX_CHARS,
+                ));
             }
             lines.join("\n")
         }
