@@ -37,29 +37,7 @@ pub fn md_to_lines(markdown: &str, body_color: Color, body_width: usize) -> Vec<
     r.finish()
 }
 
-/// Like `md_to_lines` but also returns a source-line map:
-/// `source_map[i]` is the raw-markdown line index (0-based) that generated visual line `i`.
-///
-/// Used by the copy-to-clipboard path to extract only the selected raw markdown lines
-/// rather than the whole entry.
-pub fn md_to_lines_with_source_map(
-    markdown: &str,
-    body_color: Color,
-    body_width: usize,
-) -> (Vec<Line<'static>>, Vec<usize>) {
-    let width = body_width.max(10);
-    let mut r = MdRenderer::new(body_color, width);
-    let mut source_map = r.render_mapped(markdown);
-    let last_src = source_map.last().copied().unwrap_or(0);
-    let out = r.finish();
-    // finish() may flush remaining inline content or strip trailing blank lines.
-    while source_map.len() < out.len() {
-        source_map.push(last_src);
-    }
-    source_map.truncate(out.len());
-    (out, source_map)
-}
-
+// ─── Inline style ─────────────────────────────────────────────────────────────
 // ─── Inline style ─────────────────────────────────────────────────────────────
 
 #[derive(Default, Clone)]
@@ -253,49 +231,6 @@ impl MdRenderer {
             dispatch_md_event(self, event);
         }
         self.flush_inline();
-    }
-
-    /// Like `render` but builds a source-line map in parallel.
-    /// Returns a `Vec<usize>` where index `i` is the raw source line that generated `self.out[i]`.
-    fn render_mapped(&mut self, markdown: &str) -> Vec<usize> {
-        // Build byte-offset → line-number table for O(log n) lookups.
-        let line_starts: Vec<usize> = std::iter::once(0)
-            .chain(markdown.match_indices('\n').map(|(i, _)| i + 1))
-            .collect();
-        let byte_to_line = |b: usize| line_starts.partition_point(|&s| s <= b).saturating_sub(1);
-
-        let opts = Options::all();
-        let mut source_map: Vec<usize> = Vec::new();
-        let mut table_start_src = 0usize;
-
-        for (event, range) in Parser::new_ext(markdown, opts).into_offset_iter() {
-            let cur_src = byte_to_line(range.start);
-
-            if matches!(event, Event::Start(Tag::Table(_))) {
-                table_start_src = cur_src;
-            }
-
-            let is_end_table = matches!(event, Event::End(TagEnd::Table));
-            let before = self.out.len();
-            dispatch_md_event(self, event);
-            let added = self.out.len() - before;
-
-            if is_end_table && added > 1 {
-                // Table visual lines are all flushed at once. Distribute them linearly
-                // across [table_start_src..=cur_src] so selecting any portion of the
-                // rendered table maps back to a source line within the table.
-                let src_span = cur_src.saturating_sub(table_start_src);
-                for i in 0..added {
-                    let src = table_start_src + (i * src_span) / (added - 1);
-                    source_map.push(src);
-                }
-            } else {
-                for _ in 0..added {
-                    source_map.push(cur_src);
-                }
-            }
-        }
-        source_map
     }
 
     // ── Tag open ──────────────────────────────────────────────────────────────

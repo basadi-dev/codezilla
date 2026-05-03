@@ -782,7 +782,6 @@ fn default_true() -> bool {
     true
 }
 
-
 fn default_permission_profile(cwd: &str) -> PermissionProfile {
     PermissionProfile {
         sandbox_mode: SandboxMode::WorkspaceWrite,

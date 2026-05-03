@@ -10,7 +10,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use super::markdown::{md_to_lines, md_to_lines_with_source_map};
+use super::markdown::md_to_lines;
 
 use super::super::domain::{
     ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalResolution, ConversationItem,
@@ -924,26 +924,6 @@ impl InteractiveApp {
         let width = self.transcript_area.width;
         self.ensure_transcript_render_cache(width);
 
-        // ── Try partial raw-markdown copy for markdown entries ────────────────
-        if let Some(raw_text) = self.try_copy_partial_markdown(&sel, width) {
-            let char_count = raw_text.chars().count();
-            match arboard::Clipboard::new() {
-                Ok(mut cb) => match cb.set_text(raw_text) {
-                    Ok(_) => {
-                        self.status_message = format!("✓ Copied {char_count} chars (markdown)");
-                        self.error_message = None;
-                    }
-                    Err(e) => {
-                        self.error_message = Some(format!("Clipboard write failed: {e}"));
-                    }
-                },
-                Err(e) => {
-                    self.error_message = Some(format!("Clipboard unavailable: {e}"));
-                }
-            }
-            return;
-        }
-
         // ── Header line (line 0) ────────────────────────────────────────────
         if sel.start_line == 0 {
             let header_text = self.header_plain_text();
@@ -973,7 +953,7 @@ impl InteractiveApp {
             return;
         }
 
-        // ── Fallback: rendered visual text (non-markdown entries) ─────────────
+        // ── Rendered visual text ─────────────────────────────────────────────
         let (lines, total) = self.transcript_lines_all(width, None);
         let end_clamped = sel.end_line.min(total.saturating_sub(1));
         if sel.start_line > end_clamped {
@@ -1026,109 +1006,11 @@ impl InteractiveApp {
         }
     }
 
-    /// For a selection that falls within a single markdown entry, extract the raw
-    /// markdown source lines that correspond to the selected visual lines.
-    ///
-    /// Uses a source-line map built from the rendered output to find which raw
-    /// markdown lines generated the selected visual lines, then expands to the
-    /// nearest block boundaries (empty lines) so complete paragraphs/tables/code
-    /// blocks are always returned rather than mid-block fragments.
-    fn try_copy_partial_markdown(&self, sel: &SelectionRange, width: u16) -> Option<String> {
-        let cache = &self.transcript_render_cache;
-        if cache.entries.is_empty() {
-            return None;
-        }
-
-        let start_idx = cache
-            .line_ends
-            .partition_point(|&end| end <= sel.start_line);
-        let end_idx = cache.line_ends.partition_point(|&end| end <= sel.end_line);
-        if start_idx >= cache.entries.len() {
-            return None;
-        }
-
-        let entry = &cache.entries[start_idx];
-        if !matches!(
-            entry.kind,
-            EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
-        ) {
-            return None;
-        }
-        if entry.raw_body.is_empty() {
-            return None;
-        }
-
-        // The entry layout is: 1 header line + N body lines + 1 trailing blank.
-        // body_start is the first visual line of the markdown body within the entry.
-        let entry_vis_start = if start_idx == 0 {
-            0
-        } else {
-            cache.line_ends[start_idx - 1]
-        };
-        let body_vis_start = entry_vis_start + 1;
-
-        let bw = (width as usize).saturating_sub(5).max(10);
-        let (_, source_map) =
-            md_to_lines_with_source_map(&entry.raw_body, ratatui::style::Color::White, bw);
-        if source_map.is_empty() {
-            return None;
-        }
-
-        // Convert absolute visual lines → relative to body start.
-        let rel_start = sel.start_line.saturating_sub(body_vis_start);
-        let rel_end = if end_idx == start_idx {
-            sel.end_line.saturating_sub(body_vis_start)
-        } else {
-            source_map.len().saturating_sub(1)
-        }
-        .min(source_map.len().saturating_sub(1));
-
-        if rel_start >= source_map.len() {
-            return None;
-        }
-
-        let src_a = *source_map.get(rel_start).unwrap_or(&0);
-        let src_b = *source_map.get(rel_end).unwrap_or(&src_a);
-        let (src_start, src_end) = (src_a.min(src_b), src_a.max(src_b));
-
-        // Expand to nearest block boundaries (empty lines) so we always return
-        // complete blocks: whole paragraphs, full tables, fenced code blocks, etc.
-        let raw_lines: Vec<&str> = entry.raw_body.lines().collect();
-        let n = raw_lines.len();
-        if n == 0 {
-            return None;
-        }
-
-        let is_empty = |i: usize| {
-            raw_lines
-                .get(i)
-                .map(|l| l.trim().is_empty())
-                .unwrap_or(true)
-        };
-
-        let block_start = (0..=src_start.min(n - 1))
-            .rev()
-            .find(|&i| i == 0 || is_empty(i.saturating_sub(1)))
-            .unwrap_or(0);
-
-        let block_end = (src_end.min(n - 1)..n)
-            .find(|&i| is_empty(i + 1) || i + 1 >= n)
-            .unwrap_or(n - 1);
-
-        let excerpt = raw_lines[block_start..=block_end].join("\n");
-        if excerpt.trim().is_empty() {
-            None
-        } else {
-            Some(excerpt)
-        }
-    }
-
     pub async fn submit_composer(&mut self) -> Result<()> {
         let trimmed = self.composer.trimmed_text();
         if trimmed.is_empty() {
             return Ok(());
         }
-
         let raw = self.composer.take_text();
         self.reset_composer_history_navigation();
         if self.try_handle_slash_command(raw.trim()).await? {
@@ -2510,9 +2392,9 @@ impl InteractiveApp {
                         sub_agents.push(
                             entry
                                 .title
-                                .splitn(2, ':')
-                                .nth(1)
-                                .map(|s| s.trim().to_string())
+                                .split_once(':')
+                                .map(|(_, s)| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
                                 .filter(|s| !s.is_empty())
                                 .unwrap_or_else(|| "sub-agent".into()),
                         );
@@ -3421,10 +3303,7 @@ fn append_cached_transcript_entry_lines(
         }
         // Show collapse/expand chevron on collapsible (auto-collapsed) entries.
         if entry.collapsed && !entry.pending {
-            header_spans.push(Span::styled(
-                "  ▸",
-                Style::default().fg(COLOR_MUTED),
-            ));
+            header_spans.push(Span::styled("  ▸", Style::default().fg(COLOR_MUTED)));
         }
         out.push(Line::from(header_spans));
     }

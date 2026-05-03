@@ -1178,10 +1178,7 @@ fn append_transcript_entry_lines(
         }
         // Show collapse/expand chevron on collapsible entries.
         if entry.collapsed && !entry.pending {
-            header_spans.push(Span::styled(
-                "  ▸",
-                Style::default().fg(COLOR_MUTED),
-            ));
+            header_spans.push(Span::styled("  ▸", Style::default().fg(COLOR_MUTED)));
         }
         out.push(Line::from(header_spans));
     }
@@ -1796,10 +1793,7 @@ fn format_tool_call_title(tool_name: &str, arguments: &Value) -> String {
             }
         }
         "list_dir" => {
-            let path = arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or(".");
+            let path = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
             let short = basename(path);
             format!("{tool_name}  {short}")
         }
@@ -1816,10 +1810,7 @@ fn format_tool_call_title(tool_name: &str, arguments: &Value) -> String {
             format!("{tool_name}  /{pattern}/  in {path}")
         }
         "web_fetch" => {
-            let url = arguments
-                .get("url")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
+            let url = arguments.get("url").and_then(Value::as_str).unwrap_or("?");
             // Show just the domain for brevity.
             let short = url
                 .strip_prefix("https://")
