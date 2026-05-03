@@ -1134,31 +1134,7 @@ impl InteractiveApp {
         &self,
         persisted: &super::super::domain::PersistedThread,
     ) -> Result<Vec<String>> {
-        let current = extract_user_message_history(&persisted.items);
-        if !current.is_empty() {
-            return Ok(current);
-        }
-
-        for previous_thread in self
-            .threads
-            .threads()
-            .iter()
-            .filter(|thread| thread.thread_id != persisted.metadata.thread_id)
-        {
-            let fallback = self
-                .runtime
-                .read_thread(ThreadReadParams {
-                    thread_id: previous_thread.thread_id.clone(),
-                })
-                .await?
-                .thread;
-            let history = extract_user_message_history(&fallback.items);
-            if !history.is_empty() {
-                return Ok(history);
-            }
-        }
-
-        Ok(Vec::new())
+        Ok(extract_user_message_history(&persisted.items))
     }
 
     fn push_composer_history_entry(&mut self, raw: &str) {

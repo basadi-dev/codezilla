@@ -1777,10 +1777,9 @@ fn format_tool_call_title(tool_name: &str, arguments: &Value) -> String {
         "spawn_agent" => spawn_agent_label(arguments)
             .map(|label| format!("sub-agent: {label}"))
             .unwrap_or_else(|| "sub-agent".to_string()),
-
         // Read-only / collapsible tools: embed the key argument in the title
         // so collapsed entries show context (e.g. "read_file  main.rs").
-        "read_file" | "write_file" | "create_directory" | "remove_path" => {
+        "read_file" | "write_file" | "patch_file" | "create_directory" | "remove_path" => {
             let path = arguments
                 .get("path")
                 .and_then(Value::as_str)
@@ -1894,16 +1893,47 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
             let path = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
             format!("/{pattern}/  in {path}")
         }
-        "read_file" | "write_file" | "create_directory" | "remove_path" => {
+        "patch_file" => {
+            // Produce a unified-diff-like body so is_diff_body() triggers
+            // and render_diff_chunk() applies syntax highlighting.
+            let path = arguments.get("path").and_then(Value::as_str).unwrap_or("file");
+            let start_line = arguments.get("start_line").and_then(Value::as_u64).unwrap_or(1);
+            let end_line = arguments.get("end_line").and_then(Value::as_u64).unwrap_or(1);
+            let content = arguments.get("content").and_then(Value::as_str).unwrap_or("");
+            let content_lines: Vec<&str> = content.lines().collect();
+            let new_count = content_lines.len().max(1);
+            let mut lines = Vec::new();
+            lines.push(format!("{path}  ·  editing lines {start_line}–{end_line}"));
+            lines.push(String::new());
+            lines.push(format!("--- a/{path}"));
+            lines.push(format!("+++ b/{path}"));
+            lines.push(format!(
+                "@@ -{start_line},{} +{start_line},{new_count} @@",
+                (end_line - start_line + 1).max(1)
+            ));
+            for line in &content_lines {
+                lines.push(format!("+{line}"));
+            }
+            lines.join("\n")
+        }
+        "write_file" => {
+            // Produce a 📄-prefixed body so is_read_file_body() triggers
+            // and render_read_file_body_lines() applies syntax highlighting.
+            let path = arguments.get("path").and_then(Value::as_str).unwrap_or("file");
+            let content = arguments.get("content").and_then(Value::as_str);
+            let line_count = content.map(|c| c.lines().count()).unwrap_or(0).max(1);
+            let mut lines = Vec::new();
+            lines.push(format!("📄 {path}  ({line_count} lines · writing)"));
+            lines.push(String::new());
+            if let Some(content) = content {
+                lines.push(summarise_long_output(content, TOOL_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_CHARS));
+            }
+            lines.join("\n")
+        }
+        "read_file" | "create_directory" | "remove_path" => {
             let mut lines = Vec::new();
             if let Some(path) = arguments.get("path").and_then(Value::as_str) {
                 lines.push(path.to_string());
-            }
-            if tool_name == "write_file" {
-                if let Some(content) = arguments.get("content").and_then(Value::as_str) {
-                    let line_count = content.lines().count().max(1);
-                    lines.push(format!("content: {line_count} lines"));
-                }
             }
             if lines.is_empty() {
                 pretty_json_or_text(Some(arguments), None)
