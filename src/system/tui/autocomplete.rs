@@ -15,12 +15,71 @@
 //! needs runtime/config context (model presets, threads list, current model).
 //! That responsibility can move out separately once we have a clean way to
 //! express the inputs without coupling back to `InteractiveApp`.
-
 use super::types::AutocompleteItem;
 
 /// How many suggestions render at once. Used to clamp the scroll offset.
 pub const AUTOCOMPLETE_VIEWPORT: usize = 8;
 
+// ─── Matching ─────────────────────────────────────────────────────────────────
+
+/// Score a candidate label against a query. Higher = better. `None` = no match.
+fn match_score(label: &str, query: &str) -> Option<u32> {
+    let label_lower = label.to_lowercase();
+    let query_lower = query.to_lowercase();
+
+    // Exact match
+    if label_lower == query_lower {
+        return Some(1000);
+    }
+    // Prefix match
+    if label_lower.starts_with(&query_lower) {
+        return Some(900);
+    }
+    // Word-boundary prefix (e.g. "mod" matches "/model", "rea" matches "/reasoning")
+    if let Some(pos) = label_lower.find(&query_lower) {
+        // Earlier substring = higher score
+        return Some(800u32.saturating_sub(pos as u32));
+    }
+    // Fuzzy: all query chars appear in order
+    if fuzzy_match(&label_lower, &query_lower) {
+        return Some(500);
+    }
+    None
+}
+
+/// True when every char in `query` appears in `label` in order (not necessarily contiguous).
+fn fuzzy_match(label: &str, query: &str) -> bool {
+    let mut chars = label.chars();
+    for qc in query.chars() {
+        loop {
+            match chars.next() {
+                Some(lc) if lc == qc => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+/// Filter and rank candidates by query. Returns items sorted best-match-first.
+pub fn filter_and_rank(candidates: Vec<AutocompleteItem>, query: &str) -> Vec<AutocompleteItem> {
+    if query.is_empty() {
+        return candidates;
+    }
+    let mut scored: Vec<(u32, AutocompleteItem)> = candidates
+        .into_iter()
+        .filter_map(|item| {
+            // Match against both label (display) and value (inserted text).
+            let score =
+                match_score(&item.label, query).or_else(|| match_score(&item.value, query))?;
+            Some((score, item))
+        })
+        .collect();
+    scored
+        .sort_by(|(s1, i1), (s2, i2)| s2.cmp(s1).then_with(|| i1.label.len().cmp(&i2.label.len())));
+    scored.into_iter().map(|(_, item)| item).collect()
+}
 #[derive(Debug, Default)]
 pub struct AutocompleteState {
     suggestions: Vec<AutocompleteItem>,
@@ -198,5 +257,88 @@ mod tests {
         assert_eq!(s.selected_item().map(|i| i.value.as_str()), Some("/cmd-0"));
         s.select_next();
         assert_eq!(s.selected_item().map(|i| i.value.as_str()), Some("/cmd-1"));
+    }
+
+    // ── matching tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn filter_and_rank_exact_match_first() {
+        let candidates = vec![
+            AutocompleteItem::simple("/model"),
+            AutocompleteItem::simple("/model gpt-4"),
+            AutocompleteItem::simple("/approve"),
+        ];
+        let result = filter_and_rank(candidates, "/model");
+        assert_eq!(result[0].value, "/model");
+    }
+
+    #[test]
+    fn filter_and_rank_prefix_match() {
+        let candidates = vec![
+            AutocompleteItem::simple("/approve"),
+            AutocompleteItem::simple("/approve auto"),
+            AutocompleteItem::simple("/model"),
+        ];
+        let result = filter_and_rank(candidates, "/approve");
+        assert_eq!(result[0].value, "/approve");
+        assert_eq!(result[1].value, "/approve auto");
+    }
+
+    #[test]
+    fn filter_and_rank_substring_match() {
+        let candidates = vec![
+            AutocompleteItem::simple("/approve"),
+            AutocompleteItem::simple("/model"),
+            AutocompleteItem::simple("/reasoning"),
+        ];
+        // "mod" is a substring of "/model"
+        let result = filter_and_rank(candidates, "mod");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].value, "/model");
+    }
+
+    #[test]
+    fn filter_and_rank_fuzzy_match() {
+        let candidates = vec![
+            AutocompleteItem::simple("/approve"),
+            AutocompleteItem::simple("/model"),
+            AutocompleteItem::simple("/reasoning"),
+        ];
+        // "mdl" fuzzy-matches "/model"
+        let result = filter_and_rank(candidates, "mdl");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].value, "/model");
+    }
+
+    #[test]
+    fn filter_and_rank_no_match_returns_empty() {
+        let candidates = vec![
+            AutocompleteItem::simple("/approve"),
+            AutocompleteItem::simple("/model"),
+        ];
+        let result = filter_and_rank(candidates, "xyz");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_and_rank_scores_better_match_higher() {
+        let candidates = vec![
+            AutocompleteItem::simple("/reasoning"),
+            AutocompleteItem::simple("/model"),
+            AutocompleteItem::simple("/approve"),
+        ];
+        // "re" is prefix of "/reasoning", substring of "/approve"
+        let result = filter_and_rank(candidates, "re");
+        assert_eq!(result[0].value, "/reasoning");
+    }
+
+    #[test]
+    fn filter_and_rank_empty_query_returns_all() {
+        let candidates = vec![
+            AutocompleteItem::simple("/model"),
+            AutocompleteItem::simple("/approve"),
+        ];
+        let result = filter_and_rank(candidates, "");
+        assert_eq!(result.len(), 2);
     }
 }

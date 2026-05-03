@@ -1443,12 +1443,8 @@ impl InteractiveApp {
             all.push(AutocompleteItem::labeled(value, display));
         }
 
-        let filtered: Vec<AutocompleteItem> = all
-            .into_iter()
-            .filter(|item| {
-                item.label.starts_with(text.as_str()) || item.value.starts_with(text.as_str())
-            })
-            .collect();
+        let filtered: Vec<AutocompleteItem> =
+            super::autocomplete::filter_and_rank(all, text.as_str());
         self.autocomplete.set_suggestions(filtered);
     }
 
