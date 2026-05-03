@@ -1761,6 +1761,14 @@ impl InteractiveApp {
                     self.finalize_working_entry(turn_id, "Failed after");
                 }
                 self.active_turn_id = None;
+                // Preserve the streaming turn's prompt token count so the
+                // context-remaining % in the status bar stays accurate after
+                // an interrupt (Ctrl+C). Without this, `streaming_turn_usage`
+                // is zeroed and `latest_prompt_input_tokens` still holds the
+                // previous completed turn's value, making ctx% jump backwards.
+                if self.streaming_turn_usage.input_tokens > 0 {
+                    self.latest_prompt_input_tokens = self.streaming_turn_usage.input_tokens;
+                }
                 self.streaming_turn_usage = TokenUsage::default();
                 self.approval.set_pending(None);
                 self.activity.end_turn();
