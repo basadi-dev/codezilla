@@ -646,7 +646,11 @@ fn render_status_bar(app: &InteractiveApp, frame: &mut Frame, area: Rect) {
     } else {
         app.latest_prompt_input_tokens
     };
-    let used_pct = (context_input_tokens as f64 / prompt_budget as f64) * 100.0;
+    let used_pct = if prompt_budget == 0 {
+        100.0
+    } else {
+        (context_input_tokens as f64 / prompt_budget as f64) * 100.0
+    };
     let remaining_pct = (100.0 - used_pct).max(0.0);
 
     let token_part = {

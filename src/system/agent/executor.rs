@@ -173,9 +173,11 @@ impl TurnExecutor {
         // trim this turn. We only retry once to avoid an infinite loop.
         let mut auto_trim_attempted = false;
 
+        // Saved items from auto-trim, keyed by turn_id.  If the retry also
+        // fails we restore these so the in-memory session is not left corrupted.
+        let mut trimmed_turn_items: HashMap<String, Vec<ConversationItem>> = HashMap::new();
+
         // ── Loop-break guards ─────────────────────────────────────────────────
-        //
-        // Guard 1 — consecutive failures: incremented each iteration where
         // every tool call in that round returned ok:false; reset to 0 as soon
         // as any tool succeeds. Catches stuck loops (e.g. bad args that keep
         // failing) without harming legitimate long tasks.
@@ -442,12 +444,20 @@ impl TurnExecutor {
             // On the first context-overflow error, trim all older turns from
             // the in-memory session (keeps the current turn intact) and retry.
             // A second overflow is not retried — it surfaces as a normal error.
+            // Items are saved before trimming so they can be restored if the
+            // retry also fails, preventing data loss.
             if let Some((display_error, raw_error)) = pending_fail.as_ref() {
                 if !auto_trim_attempted
                     && (is_context_overflow_error(raw_error)
                         || is_context_overflow_error(display_error))
                 {
                     auto_trim_attempted = true;
+
+                    tracing::warn!(
+                        turn_id = %turn_id,
+                        raw_error = %&raw_error[..raw_error.len().min(200)],
+                        "executor: context overflow detected — auto-trimming older turns"
+                    );
 
                     // Notify the user via a Warning event (TUI renders this).
                     self.runtime.publish_event(
@@ -459,19 +469,34 @@ impl TurnExecutor {
                         }),
                     ).await?;
 
-                    // Drop items from every completed turn so only the current
-                    // turn's items remain in memory. Layer 1's token-budget guard
-                    // will then fit the history safely on the next iteration.
+                    // Save items from every completed turn before clearing, so
+                    // we can restore them if the retry also fails.
                     {
                         let mut guard = turn_ctx.thread.lock().await;
                         for lt in guard.turns.iter_mut() {
                             if lt.metadata.turn_id != turn_id {
-                                lt.items.clear();
+                                let saved = std::mem::take(&mut lt.items);
+                                trimmed_turn_items.insert(lt.metadata.turn_id.clone(), saved);
                             }
                         }
                     }
 
                     continue; // retry the outer agent loop
+                }
+
+                // If we auto-trimmed but still failed, restore the saved items
+                // so the in-memory session is not left corrupted.
+                if !trimmed_turn_items.is_empty() {
+                    tracing::warn!(
+                        turn_id = %turn_id,
+                        "executor: auto-trim retry also failed — restoring trimmed items"
+                    );
+                    let mut guard = turn_ctx.thread.lock().await;
+                    for lt in guard.turns.iter_mut() {
+                        if let Some(saved) = trimmed_turn_items.remove(&lt.metadata.turn_id) {
+                            lt.items = saved;
+                        }
+                    }
                 }
 
                 // Second overflow or a different error — humanize and fail the turn.
@@ -1175,6 +1200,13 @@ impl TurnExecutor {
         let prompt_budget = super::model_gateway::calculate_prompt_budget(context_window);
 
         let used_pct = estimate_items_token_pct(&persisted.items, prompt_budget);
+        tracing::debug!(
+            thread_id,
+            used_pct = format!("{used_pct:.1}"),
+            threshold,
+            items_count = persisted.items.len(),
+            "maybe_auto_compact: context usage check"
+        );
         if used_pct < threshold as f64 {
             return;
         }
@@ -1207,6 +1239,46 @@ impl TurnExecutor {
 
             match result {
                 Ok(r) => {
+                    let mut summary_chars: Option<usize> = None;
+                    let mut summary_tokens_est: Option<usize> = None;
+                    if let Some(summary_item_id) = r.summary_item_id.as_ref() {
+                        if let Ok(persisted) =
+                            runtime.inner.persistence_manager.read_thread(&r.thread_id)
+                        {
+                            if let Some(item) = persisted
+                                .items
+                                .iter()
+                                .find(|i| &i.item_id == summary_item_id)
+                            {
+                                if let Some(text) =
+                                    item.payload.get("text").and_then(|v| v.as_str())
+                                {
+                                    let chars = text.chars().count();
+                                    summary_chars = Some(chars);
+                                    // Keep estimator aligned with current heuristic in model_gateway.
+                                    let raw: usize = text
+                                        .split_whitespace()
+                                        .map(|word| match word.len() {
+                                            0 => 0,
+                                            1..=4 => 1,
+                                            n => n.div_ceil(3), // ceil(len / 3)
+                                        })
+                                        .sum();
+                                    summary_tokens_est =
+                                        Some(raw.max(1).saturating_mul(11).div_ceil(10));
+                                }
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        thread_id = %r.thread_id,
+                        strategy = "SUMMARIZE_PREFIX",
+                        items_removed = r.items_removed,
+                        summary_item_id = ?r.summary_item_id,
+                        summary_chars = summary_chars.unwrap_or(0),
+                        summary_tokens_est = summary_tokens_est.unwrap_or(0),
+                        "auto-compaction completed"
+                    );
                     let _ = runtime
                         .publish_event(
                             crate::system::domain::RuntimeEventKind::CompactionStatus,

@@ -439,23 +439,50 @@ pub fn is_context_overflow_error(err: &str) -> bool {
 
 // ─── Token budget constants ───────────────────────────────────────────────────
 
-/// Conservative estimate: 4 characters ≈ 1 token (GPT/Claude average).
-const CHARS_PER_TOKEN: usize = 4;
-
 /// Tokens we always reserve for the model's output.
 const RESERVED_OUTPUT_TOKENS: usize = 8_192;
 
 /// Default context window if not specified by the model settings.
 pub const DEFAULT_CONTEXT_WINDOW: usize = 100_000;
 
+// ─── Token estimation ─────────────────────────────────────────────────────────
+//
+// We use a word-boundary-aware estimator that is more accurate than raw char/4,
+// especially for code (which has many single-char tokens like `{`, `;`, `(`).
+//
+// Approach:
+//   - Split on whitespace to get "words".
+//   - Each word ≤ 4 chars ≈ 1 token (common for code punctuation/keywords).
+//   - Longer words: ~1 token per 3 chars (English average; code identifiers
+//     tend to be longer but still tokenize efficiently with BPE).
+//   - Add a 10% safety margin so we slightly overestimate rather than
+//     underestimate (underestimation causes context-overflow errors).
+
+/// Estimate tokens for a string using word-boundary-aware heuristics.
 fn estimate_text_tokens(text: &str) -> usize {
-    text.len().saturating_add(CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
+    if text.is_empty() {
+        return 0;
+    }
+    let raw: usize = text
+        .split_whitespace()
+        .map(|word| match word.len() {
+            0 => 0,
+            1..=4 => 1,
+            n => n.div_ceil(3), // ceil(len / 3)
+        })
+        .sum();
+    // Safety margin: +10%, minimum 1 token for any non-empty string.
+    raw.max(1).saturating_mul(11).div_ceil(10)
 }
 
 fn estimate_len_tokens(len: usize) -> usize {
-    len.saturating_add(CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
+    if len == 0 {
+        return 0;
+    }
+    // For raw byte lengths (tool args, results), use char/3 with safety margin.
+    let raw = len.div_ceil(3);
+    raw.max(1).saturating_mul(11).div_ceil(10)
 }
-
 fn estimate_messages_tokens(messages: &[llm::Message]) -> usize {
     messages
         .iter()
@@ -491,12 +518,17 @@ pub fn calculate_prompt_budget(context_window: Option<usize>) -> usize {
 
 /// Rough token count for a single `ConversationItem`.
 fn item_token_estimate(item: &ConversationItem) -> usize {
-    item.payload.to_string().len().saturating_add(32) / CHARS_PER_TOKEN
+    estimate_text_tokens(&item.payload.to_string())
 }
 
 /// Returns estimated context usage as a percentage of the given `prompt_budget`.
 /// Used by auto-compaction to decide when to compact.
 pub fn estimate_items_token_pct(items: &[ConversationItem], prompt_budget: usize) -> f64 {
+    if prompt_budget == 0 {
+        // Degenerate config (context window <= reserved output budget):
+        // treat as fully used so callers trigger protective behavior.
+        return 100.0;
+    }
     let used: usize = items.iter().map(item_token_estimate).sum();
     (used as f64 / prompt_budget as f64) * 100.0
 }
@@ -518,7 +550,7 @@ pub fn build_llm_messages(
     // ── 1. Measure system tokens ──────────────────────────────────────────────
     let system_tokens: usize = system_instructions
         .iter()
-        .map(|s| s.len().saturating_add(16) / CHARS_PER_TOKEN)
+        .map(|s| estimate_text_tokens(s))
         .sum();
     let mut remaining_budget = prompt_budget.saturating_sub(system_tokens);
 
@@ -561,9 +593,25 @@ pub fn build_llm_messages(
     let truncated = kept_indices.len() < turns.len();
     let dropped_turns = turns.len().saturating_sub(kept_indices.len());
 
+    // ── Observability: log context budget decisions ──────────────────────────
+    if truncated {
+        let kept_items: usize = kept_indices.iter().map(|&i| turns[i].len()).sum();
+        let total_items: usize = turns.iter().map(|t| t.len()).sum();
+        tracing::info!(
+            prompt_budget,
+            system_tokens,
+            total_turns = turns.len(),
+            kept_turns = kept_indices.len(),
+            dropped_turns,
+            total_items,
+            kept_items,
+            remaining_budget,
+            "build_llm_messages: context budget guard dropped turns to fit"
+        );
+    }
+
     // ── 4. Assemble messages ──────────────────────────────────────────────────
     let mut messages = Vec::new();
-
     for instruction in system_instructions {
         messages.push(llm::Message::system(instruction.clone()));
     }

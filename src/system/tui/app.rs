@@ -330,22 +330,43 @@ impl InteractiveApp {
                 )
             })
             .map(|t| t.turn_id.clone());
-        // Aggregate token usage from all completed turns.
+        // Aggregate token usage from all completed turns. Prefer provider-reported
+        // actual usage when present; fall back to estimated usage otherwise.
         self.token_usage = persisted
             .turns
             .iter()
             .filter(|t| t.status == TurnStatus::Completed)
-            .fold(TokenUsage::default(), |acc, t| TokenUsage {
-                input_tokens: acc.input_tokens + t.token_usage.input_tokens,
-                output_tokens: acc.output_tokens + t.token_usage.output_tokens,
-                cached_tokens: acc.cached_tokens + t.token_usage.cached_tokens,
+            .fold(TokenUsage::default(), |acc, t| {
+                let actual = &t.token_usage;
+                let chosen = if actual.input_tokens > 0
+                    || actual.output_tokens > 0
+                    || actual.cached_tokens > 0
+                {
+                    actual
+                } else {
+                    &t.estimated_token_usage
+                };
+                TokenUsage {
+                    input_tokens: acc.input_tokens + chosen.input_tokens,
+                    output_tokens: acc.output_tokens + chosen.output_tokens,
+                    cached_tokens: acc.cached_tokens + chosen.cached_tokens,
+                }
             });
         self.latest_prompt_input_tokens = persisted
             .turns
             .iter()
             .filter(|t| t.status == TurnStatus::Completed)
             .max_by_key(|t| t.updated_at)
-            .map(|t| t.token_usage.input_tokens)
+            .map(|t| {
+                if t.token_usage.input_tokens > 0
+                    || t.token_usage.output_tokens > 0
+                    || t.token_usage.cached_tokens > 0
+                {
+                    t.token_usage.input_tokens
+                } else {
+                    t.estimated_token_usage.input_tokens
+                }
+            })
             .unwrap_or(0);
         self.streaming_turn_usage = TokenUsage::default();
         self.approval.set_pending(None);
@@ -3056,11 +3077,7 @@ fn tool_hint_from_arguments(arguments: Option<&Value>) -> Option<String> {
         .and_then(Value::as_str)
         .map(|s| {
             let short = s.rsplit('/').next().unwrap_or(s);
-            if short.len() > 40 {
-                format!("{}…", &short[..37])
-            } else {
-                short.to_string()
-            }
+            truncate_chars(short, 40)
         })
 }
 

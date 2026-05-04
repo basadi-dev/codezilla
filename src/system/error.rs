@@ -143,7 +143,11 @@ pub fn classify(raw: &str) -> ErrorKind {
     if is_context_overflow(raw) {
         return ErrorKind::ContextOverflow;
     }
-    if lower.contains("401") || lower.contains("unauthori") || lower.contains("invalid api key") {
+    if lower.contains("401")
+        || lower.contains("unauthori")
+        || lower.contains("authoriz")
+        || lower.contains("invalid api key")
+    {
         return ErrorKind::AuthError;
     }
     if lower.contains("api error")
@@ -167,7 +171,7 @@ pub fn from_raw(raw: &str) -> CodError {
     CodError { kind, message }
 }
 
-// ─── Humanization ─────────────────────────────────────────────────────────────
+// ─── Humanization ────────���────────────────────────────────────────────────────
 
 /// Rewrite a terse / opaque error string into plain-English user copy.
 pub fn humanize(raw: &str, kind: ErrorKind) -> String {
@@ -275,18 +279,85 @@ pub fn humanize_warning(payload: &serde_json::Value) -> String {
     serde_json::to_string(payload).unwrap_or_else(|_| payload.to_string())
 }
 
-// ─── Context overflow helper (re-export for model_gateway) ───────────────────
+// ─── Context overflow detection ───────────────────────────────────────────────
+
+/// Provider-specific context-overflow patterns.
+///
+/// Each provider has subtly different error messages.  We check these first
+/// (exact match), then fall back to the generic patterns below.
+fn provider_overflow_patterns(provider_id: &str, lower: &str) -> bool {
+    match provider_id {
+        "openai" | "openai-compatible" => {
+            lower.contains("maximum context length")
+                || lower.contains("context_length_exceeded")
+                || lower.contains("reduce the length")
+                || (lower.contains("400") && lower.contains("context"))
+        }
+        "anthropic" => {
+            lower.contains("prompt is too long")
+                || lower.contains("prompt too long")
+                || lower.contains("context window")
+                || lower.contains("number of tokens")
+        }
+        "google" | "gemini" => {
+            lower.contains("token count")
+                || lower.contains("exceeds the maximum")
+                || lower.contains("context window")
+                || lower.contains("too many tokens")
+        }
+        "groq" => {
+            lower.contains("context length")
+                || lower.contains("too many tokens")
+                || lower.contains("reduce your prompt")
+        }
+        "deepseek" => {
+            lower.contains("context length")
+                || lower.contains("maximum context")
+                || lower.contains("too long")
+        }
+        "ollama" => {
+            lower.contains("context exceeded")
+                || lower.contains("max context")
+                || lower.contains("too many tokens")
+        }
+        _ => false, // unknown provider → fall through to generic patterns
+    }
+}
 
 /// Returns `true` if the error message indicates a context-window overflow.
-/// Kept in sync with the classifier above.
+///
+/// Checks provider-specific patterns first (when `provider_id` is known),
+/// then falls back to generic substring matching.  Logs a warning when the
+/// generic fallback matches so we can add new provider patterns.
 pub fn is_context_overflow(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
-    lower.contains("context exceeded")
+    is_context_overflow_for_provider("", &lower)
+}
+
+/// Like [`is_context_overflow`] but checks provider-specific patterns first.
+/// Callers that know the provider should use this directly.
+pub fn is_context_overflow_for_provider(provider_id: &str, lower: &str) -> bool {
+    if !provider_id.is_empty() && provider_overflow_patterns(provider_id, lower) {
+        return true;
+    }
+
+    // Generic fallback patterns (catch-all).
+    let hit = lower.contains("context exceeded")
         || lower.contains("maximum context length")
         || lower.contains("context window")
         || lower.contains("prompt is too long")
         || lower.contains("prompt too long")
-        || (lower.contains("api error 400") && lower.contains("context"))
+        || (lower.contains("api error 400") && lower.contains("context"));
+
+    if hit && !provider_id.is_empty() {
+        tracing::warn!(
+            provider_id,
+            error_snippet = %&lower[..lower.len().min(200)],
+            "is_context_overflow: matched via generic fallback — consider adding provider-specific pattern"
+        );
+    }
+
+    hit
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -366,4 +437,331 @@ fn strip_codezilla_prefix(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── classify ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn classify_context_overflow() {
+        assert_eq!(classify("context exceeded"), ErrorKind::ContextOverflow);
+        assert_eq!(
+            classify("maximum context length exceeded"),
+            ErrorKind::ContextOverflow
+        );
+        assert_eq!(
+            classify("the prompt is too long: 150000 tokens"),
+            ErrorKind::ContextOverflow
+        );
+        assert_eq!(
+            classify("prompt too long: 200000 tokens > 128000 maximum"),
+            ErrorKind::ContextOverflow
+        );
+        assert_eq!(
+            classify("This model's maximum context window"),
+            ErrorKind::ContextOverflow
+        );
+        assert_eq!(
+            classify("API error 400: context window exceeded"),
+            ErrorKind::ContextOverflow
+        );
+    }
+
+    #[test]
+    fn classify_auth_error() {
+        assert_eq!(classify("401 Unauthorized"), ErrorKind::AuthError);
+        assert_eq!(classify("invalid api key provided"), ErrorKind::AuthError);
+        assert_eq!(
+            classify("Authorization failed for provider"),
+            ErrorKind::AuthError
+        );
+    }
+
+    #[test]
+    fn classify_tool_errors() {
+        assert_eq!(
+            classify("tool_not_found: bash_exec"),
+            ErrorKind::ToolNotFound
+        );
+        assert_eq!(
+            classify("tool_invalid_arguments: missing field"),
+            ErrorKind::ToolInvalidArguments
+        );
+        assert_eq!(
+            classify("tool_execution_timeout: exceeded 30s"),
+            ErrorKind::ToolTimeout
+        );
+        assert_eq!(
+            classify("tool_execution: permission denied"),
+            ErrorKind::ToolExecutionError
+        );
+    }
+
+    #[test]
+    fn classify_session_errors() {
+        assert_eq!(
+            classify("thread_not_found: abc123"),
+            ErrorKind::SessionError
+        );
+        assert_eq!(classify("turn_not_found: xyz"), ErrorKind::SessionError);
+    }
+
+    #[test]
+    fn classify_permission_errors() {
+        assert_eq!(
+            classify("permission_denied: write to /etc"),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            classify("sandbox_denied: network access"),
+            ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn classify_stream_and_api_errors() {
+        assert_eq!(
+            classify("stream failed: connection reset"),
+            ErrorKind::StreamFailure
+        );
+        assert_eq!(classify("stream error: timeout"), ErrorKind::StreamFailure);
+        assert_eq!(
+            classify("API error 500: internal server error"),
+            ErrorKind::ApiError
+        );
+        assert_eq!(classify("http error 502: bad gateway"), ErrorKind::ApiError);
+    }
+
+    #[test]
+    fn classify_unknown_fallback() {
+        assert_eq!(
+            classify("something completely unexpected"),
+            ErrorKind::Unknown
+        );
+    }
+
+    // ── is_context_overflow ───────────────────────────────────────────────────
+
+    #[test]
+    fn context_overflow_generic_patterns() {
+        assert!(is_context_overflow("context exceeded"));
+        assert!(is_context_overflow("maximum context length exceeded"));
+        assert!(is_context_overflow(
+            "This model's maximum context window is 128K tokens"
+        ));
+        assert!(is_context_overflow("the prompt is too long: 150000 tokens"));
+        assert!(is_context_overflow("prompt too long"));
+        assert!(is_context_overflow(
+            "API error 400: context window exceeded"
+        ));
+        // Case insensitive
+        assert!(is_context_overflow("CONTEXT EXCEEDED"));
+        assert!(is_context_overflow("Maximum Context Length"));
+    }
+
+    #[test]
+    fn context_overflow_negative() {
+        assert!(!is_context_overflow("network timeout"));
+        assert!(!is_context_overflow("invalid api key"));
+        assert!(!is_context_overflow("tool not found"));
+        assert!(!is_context_overflow("API error 400: rate limit exceeded"));
+    }
+
+    // ── is_context_overflow_for_provider ──────────────────────────────────────
+
+    #[test]
+    fn context_overflow_openai_patterns() {
+        assert!(is_context_overflow_for_provider(
+            "openai",
+            "this model's maximum context length is 4096 tokens"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "openai",
+            "context_length_exceeded"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "openai",
+            "Please reduce the length of the messages"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "openai",
+            "400 bad request: context too long"
+        ));
+        // Should NOT match "400" without "context"
+        assert!(!is_context_overflow_for_provider(
+            "openai",
+            "400 bad request: rate limit"
+        ));
+    }
+
+    #[test]
+    fn context_overflow_anthropic_patterns() {
+        assert!(is_context_overflow_for_provider(
+            "anthropic",
+            "prompt is too long: 200000 tokens > 100000 maximum"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "anthropic",
+            "prompt too long"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "anthropic",
+            "exceeds the context window"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "anthropic",
+            "number of tokens exceeded"
+        ));
+    }
+
+    #[test]
+    fn context_overflow_gemini_patterns() {
+        assert!(is_context_overflow_for_provider(
+            "google",
+            "token count exceeds the maximum"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "gemini",
+            "exceeds the maximum number of tokens"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "google",
+            "context window exceeded"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "gemini",
+            "too many tokens in request"
+        ));
+    }
+
+    #[test]
+    fn context_overflow_groq_patterns() {
+        assert!(is_context_overflow_for_provider(
+            "groq",
+            "context length exceeded"
+        ));
+        assert!(is_context_overflow_for_provider("groq", "too many tokens"));
+        assert!(is_context_overflow_for_provider(
+            "groq",
+            "Please reduce your prompt"
+        ));
+    }
+
+    #[test]
+    fn context_overflow_deepseek_patterns() {
+        assert!(is_context_overflow_for_provider(
+            "deepseek",
+            "context length exceeded"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "deepseek",
+            "maximum context exceeded"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "deepseek",
+            "prompt too long"
+        ));
+    }
+
+    #[test]
+    fn context_overflow_ollama_patterns() {
+        assert!(is_context_overflow_for_provider(
+            "ollama",
+            "context exceeded"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "ollama",
+            "max context exceeded"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "ollama",
+            "too many tokens"
+        ));
+    }
+
+    #[test]
+    fn context_overflow_unknown_provider_falls_through() {
+        // Unknown provider should fall through to generic patterns
+        assert!(is_context_overflow_for_provider(
+            "unknown_provider",
+            "context exceeded"
+        ));
+        assert!(is_context_overflow_for_provider(
+            "unknown_provider",
+            "maximum context length"
+        ));
+        // But should NOT match provider-specific-only patterns
+        assert!(!is_context_overflow_for_provider(
+            "unknown_provider",
+            "reduce the length"
+        ));
+    }
+
+    // ── humanize ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn humanize_context_overflow() {
+        let msg = humanize("context exceeded", ErrorKind::ContextOverflow);
+        assert!(msg.contains("/compact") || msg.contains("context window"));
+    }
+
+    #[test]
+    fn humanize_auth_error() {
+        let msg = humanize("401 Unauthorized", ErrorKind::AuthError);
+        assert!(msg.contains("Authentication failed"));
+    }
+
+    #[test]
+    fn humanize_tool_not_found() {
+        let msg = humanize("tool_not_found: my_tool", ErrorKind::ToolNotFound);
+        assert!(msg.contains("my_tool"));
+        assert!(msg.contains("not available"));
+    }
+
+    #[test]
+    fn humanize_unknown() {
+        let msg = humanize("some random error", ErrorKind::Unknown);
+        assert_eq!(msg, "some random error");
+    }
+
+    // ── from_raw ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_raw_classifies_and_humanizes() {
+        let err = from_raw("context exceeded");
+        assert_eq!(err.kind, ErrorKind::ContextOverflow);
+        assert!(!err.message.is_empty());
+    }
+
+    // ── ErrorKind ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_kind_labels() {
+        assert_eq!(ErrorKind::ContextOverflow.label(), "Context Limit");
+        assert_eq!(ErrorKind::AuthError.label(), "Auth Error");
+        assert_eq!(ErrorKind::StreamFailure.label(), "Stream Error");
+        assert_eq!(ErrorKind::Unknown.label(), "Error");
+    }
+
+    #[test]
+    fn error_kind_is_retryable() {
+        assert!(ErrorKind::StreamFailure.is_retryable());
+        assert!(ErrorKind::ApiError.is_retryable());
+        assert!(!ErrorKind::ContextOverflow.is_retryable());
+        assert!(!ErrorKind::AuthError.is_retryable());
+    }
+
+    #[test]
+    fn error_kind_is_fatal() {
+        assert!(ErrorKind::ContextOverflow.is_fatal());
+        assert!(ErrorKind::AuthError.is_fatal());
+        assert!(ErrorKind::PermissionDenied.is_fatal());
+        assert!(!ErrorKind::ApiError.is_fatal());
+        assert!(!ErrorKind::StreamFailure.is_fatal());
+    }
 }

@@ -76,8 +76,7 @@ pub fn filter_and_rank(candidates: Vec<AutocompleteItem>, query: &str) -> Vec<Au
             Some((score, item))
         })
         .collect();
-    scored
-        .sort_by(|(s1, i1), (s2, i2)| s2.cmp(s1).then_with(|| i1.label.len().cmp(&i2.label.len())));
+    scored.sort_by(|(s1, _), (s2, _)| s2.cmp(s1));
     scored.into_iter().map(|(_, item)| item).collect()
 }
 #[derive(Debug, Default)]

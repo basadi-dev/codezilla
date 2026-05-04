@@ -1951,7 +1951,7 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
             lines.push(format!("+++ b/{path}"));
             lines.push(format!(
                 "@@ -{start_line},{} +{start_line},{new_count} @@",
-                (end_line - start_line + 1).max(1)
+                end_line.saturating_sub(start_line) + 1
             ));
             for line in &content_lines {
                 lines.push(format!("+{line}"));
