@@ -21,23 +21,59 @@ pub type PluginId = String;
 pub type SkillId = String;
 pub type McpServerName = String;
 pub type ConnectorId = String;
-
 // ── Display labels ──────────────────────────────────────────────────────────
 pub const LABEL_ASSISTANT: &str = "Codezilla";
 pub const LABEL_USER: &str = "You";
 pub const LABEL_SYSTEM: &str = "System";
 pub const LABEL_ERROR: &str = "Error";
+pub const LABEL_REASONING: &str = "Reasoning";
+pub const LABEL_RUNTIME: &str = "Runtime";
+pub const LABEL_THINKING: &str = "thinking";
+pub const LABEL_TOOL_FALLBACK: &str = "tool";
 
 // ── Status strings (used in JSON output matching & display) ─────────────────
+#[allow(dead_code)]
 pub const STATUS_INTERRUPTED: &str = "interrupted";
 pub const STATUS_TIMEOUT: &str = "timeout";
 pub const STATUS_FAILED: &str = "failed";
 pub const STATUS_COMPLETED: &str = "completed";
 pub const STATUS_TIMED_OUT: &str = "timed out";
 pub const STATUS_RUNNING: &str = "running";
+pub const STATUS_DONE: &str = "done";
+pub const STATUS_STARTING: &str = "starting";
+pub const STATUS_QUEUED: &str = "queued";
+#[allow(dead_code)]
+pub const STATUS_STOPPED: &str = "stopped";
+pub const STATUS_NOT_SPAWNED: &str = "not_spawned";
 
-// ── JSON keys ───────────────────────────────────────────────────────────────
+// ── Event kind discriminators ──────────────────────────────────────────────
+pub const EVENT_KIND_AGENT_MESSAGE: &str = "AGENT_MESSAGE";
+pub const EVENT_KIND_REASONING_TEXT: &str = "REASONING_TEXT";
+pub const EVENT_KIND_REASONING_SUMMARY: &str = "REASONING_SUMMARY";
+
+// ── JSON payload keys ──────────────────────────────────────────────────────
+#[allow(dead_code)]
 pub const KEY_ERROR: &str = "error";
+pub const KEY_TEXT: &str = "text";
+pub const KEY_KIND: &str = "kind";
+pub const KEY_TOOL_NAME: &str = "toolName";
+pub const KEY_ARGUMENTS: &str = "arguments";
+pub const KEY_TOOL_CALL_ID: &str = "toolCallId";
+pub const KEY_TURN_ID: &str = "turnId";
+pub const KEY_THREAD_ID: &str = "threadId";
+pub const KEY_RESULT: &str = "result";
+pub const KEY_REASON: &str = "reason";
+pub const KEY_MESSAGE: &str = "message";
+pub const KEY_STATUS: &str = "status";
+pub const KEY_OUTPUT: &str = "output";
+pub const KEY_ERROR_MESSAGE: &str = "errorMessage";
+#[allow(dead_code)]
+pub const KEY_APPROVED: &str = "approved";
+#[allow(dead_code)]
+pub const KEY_RAW: &str = "raw";
+// snake_case variants (used in spawn_agent output)
+pub const KEY_THREAD_ID_SNAKE: &str = "thread_id";
+pub const KEY_TURN_ID_SNAKE: &str = "turn_id";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

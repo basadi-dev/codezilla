@@ -14,9 +14,14 @@ use super::markdown::md_to_lines;
 
 use super::super::domain::{
     ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalResolution, ConversationItem,
-    ItemKind, PendingApproval, ReasoningEffort, RuntimeEvent, RuntimeEventKind, ThreadMetadata,
-    TokenUsage, ToolResult, TurnStatus, UserInput, KEY_ERROR, LABEL_ASSISTANT, LABEL_USER,
-    STATUS_FAILED, STATUS_INTERRUPTED, STATUS_TIMED_OUT, STATUS_TIMEOUT,
+    EVENT_KIND_AGENT_MESSAGE, EVENT_KIND_REASONING_SUMMARY, EVENT_KIND_REASONING_TEXT, ItemKind,
+    KEY_ARGUMENTS, KEY_ERROR, KEY_ERROR_MESSAGE, KEY_KIND, KEY_MESSAGE, KEY_OUTPUT, KEY_REASON,
+    KEY_STATUS, KEY_TEXT, KEY_THREAD_ID, KEY_THREAD_ID_SNAKE, KEY_TOOL_CALL_ID, KEY_TOOL_NAME,
+    KEY_TURN_ID, KEY_TURN_ID_SNAKE, LABEL_ASSISTANT, LABEL_REASONING, LABEL_RUNTIME,
+    LABEL_THINKING, LABEL_TOOL_FALLBACK, LABEL_USER, PendingApproval, ReasoningEffort,
+    RuntimeEvent, RuntimeEventKind, STATUS_DONE, STATUS_FAILED, STATUS_INTERRUPTED,
+    STATUS_NOT_SPAWNED, STATUS_TIMED_OUT, STATUS_TIMEOUT, ThreadMetadata, TokenUsage, ToolResult,
+    TurnStatus, UserInput,
 };
 use super::super::error as cod_error;
 use super::super::runtime::{
@@ -26,12 +31,12 @@ use super::super::runtime::{
 };
 use super::activity::ChildAgentStatus;
 use super::types::{
-    basename, current_state_label, entry_elapsed_secs, entry_from_item, entry_style,
-    format_timestamp, format_tool_result, is_diff_body, is_read_file_body, relative_time_ago,
-    render_diff_chunk, render_read_file_body_lines, short_turn_id, spinner_frame, split_at_width,
-    thread_label, transcript_lines, AutocompleteItem, ComposerState, EntryKind, FocusPane,
-    PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
-    COLOR_MUTED, THREAD_LIMIT,
+    AutocompleteItem, COLOR_ACCENT, COLOR_MUTED, ComposerState, EntryKind, FocusPane,
+    PendingApprovalView, SelectionPoint, SelectionRange, THREAD_LIMIT, TranscriptEntry, basename,
+    current_state_label, entry_elapsed_secs, entry_from_item, entry_style, format_timestamp,
+    format_tool_result, is_diff_body, is_read_file_body, relative_time_ago, render_diff_chunk,
+    render_read_file_body_lines, short_turn_id, spinner_frame, split_at_width, thread_label,
+    transcript_lines,
 };
 /// Sentinel item-id for the "thinking" placeholder injected immediately after
 /// the user submits a message.  Removed when the first real agent content arrives.
@@ -435,6 +440,14 @@ impl InteractiveApp {
 
         self.status_message = "Compacting… (summarising with LLM)".into();
         self.error_message = None;
+        let started_at = super::super::domain::now_millis();
+        self.push_status_entry(
+            format!("manual_compaction_started_{started_at}"),
+            EntryKind::Status,
+            "Compaction",
+            "Compacting…",
+            Some(started_at / 1000),
+        );
 
         let (tx, rx) = oneshot::channel();
         let runtime = self.runtime.clone();
@@ -472,16 +485,34 @@ impl InteractiveApp {
                         self.load_thread(&self.current_thread_id.clone()).await?;
                         // Restore token usage to show total since last compaction
                         self.token_usage = preserved_usage;
-                        self.status_message = format!(
+                        let done_msg = format!(
                             "✓ Compacted — {} item(s) replaced with summary",
                             r.items_removed
+                        );
+                        self.status_message = done_msg.clone();
+                        let completed_at = super::super::domain::now_millis();
+                        self.push_status_entry(
+                            format!("manual_compaction_completed_{completed_at}"),
+                            EntryKind::Status,
+                            "Compaction",
+                            &done_msg,
+                            Some(completed_at / 1000),
                         );
                         self.error_message = None;
                     }
                     Err(e) => {
                         self.load_thread(&self.current_thread_id.clone()).await?;
                         self.token_usage = preserved_usage;
-                        self.error_message = Some(format!("Compact failed: {e}"));
+                        let msg = format!("Compact failed: {e}");
+                        self.error_message = Some(msg.clone());
+                        let failed_at = super::super::domain::now_millis();
+                        self.push_status_entry(
+                            format!("manual_compaction_failed_{failed_at}"),
+                            EntryKind::Error,
+                            "Compaction",
+                            &msg,
+                            Some(failed_at / 1000),
+                        );
                     }
                 }
                 Ok(true)
@@ -1612,7 +1643,8 @@ impl InteractiveApp {
                 if let Some(child) = self.activity.child_agent_for_thread(child_thread).cloned() {
                     match event.kind {
                         RuntimeEventKind::TurnCompleted => {
-                            let status = match event.payload.get("status").and_then(Value::as_str) {
+                            let status = match event.payload.get(KEY_STATUS).and_then(Value::as_str)
+                            {
                                 Some("Interrupted") => ChildAgentStatus::Interrupted,
                                 _ => ChildAgentStatus::Completed,
                             };
@@ -1776,12 +1808,12 @@ impl InteractiveApp {
                 self.remove_thinking_placeholder();
                 let kind_label = event
                     .payload
-                    .get("kind")
+                    .get(KEY_KIND)
                     .and_then(|v| v.as_str())
                     .unwrap_or("Error");
                 let reason = event
                     .payload
-                    .get("reason")
+                    .get(KEY_REASON)
                     .and_then(|v| v.as_str())
                     .unwrap_or("turn failed");
                 self.error_message = Some(format!("{kind_label}: {reason}"));
@@ -1819,12 +1851,53 @@ impl InteractiveApp {
                 );
             }
             RuntimeEventKind::CompactionStatus => {
+                if event.thread_id.as_deref() != Some(&self.current_thread_id) {
+                    return Ok(());
+                }
+                let status = event
+                    .payload
+                    .get(KEY_STATUS)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 let msg = event
                     .payload
-                    .get("message")
+                    .get(KEY_MESSAGE)
                     .and_then(|v| v.as_str())
                     .unwrap_or("Compacting…");
-                self.status_message = msg.to_string();
+
+                if !is_background_compaction_status_event(&event, &self.current_thread_id) {
+                    if status != "started" {
+                        self.status_message = msg.to_string();
+                    }
+                    return Ok(());
+                }
+
+                // Auto-compaction runs out-of-band and mutates persisted
+                // thread items. Reload the current thread on completion so the
+                // transcript and caches reflect the compacted state
+                // immediately.
+                if status == "completed"
+                    && event.thread_id.as_deref() == Some(&self.current_thread_id)
+                {
+                    let preserved_usage = self.token_usage.clone();
+                    self.load_thread(&self.current_thread_id.clone()).await?;
+                    self.token_usage = preserved_usage;
+                }
+                if status != "started" {
+                    self.status_message = msg.to_string();
+                }
+                let kind = if status == "failed" {
+                    EntryKind::Error
+                } else {
+                    EntryKind::Status
+                };
+                self.push_status_entry(
+                    event.event_id,
+                    kind,
+                    "Compaction",
+                    msg,
+                    Some(event.emitted_at / 1000),
+                );
             }
             RuntimeEventKind::ChildAgentSpawned => {
                 // Sub-agent visibility: register the child in the activity
@@ -1895,21 +1968,23 @@ impl InteractiveApp {
             .ok_or_else(|| anyhow!("missing itemId"))?;
         let kind = event
             .payload
-            .get("kind")
+            .get(KEY_KIND)
             .and_then(|v| v.as_str())
-            .unwrap_or("AGENT_MESSAGE");
+            .unwrap_or(EVENT_KIND_AGENT_MESSAGE);
 
         let entry_kind = match kind {
             "USER_MESSAGE" => EntryKind::User,
-            "AGENT_MESSAGE" => EntryKind::Assistant,
-            "REASONING_TEXT" | "REASONING_SUMMARY" => EntryKind::Reasoning,
+            k if k == EVENT_KIND_AGENT_MESSAGE => EntryKind::Assistant,
+            k if k == EVENT_KIND_REASONING_TEXT || k == EVENT_KIND_REASONING_SUMMARY => {
+                EntryKind::Reasoning
+            }
             _ => EntryKind::Status,
         };
         let title = match entry_kind {
             EntryKind::User => LABEL_USER,
             EntryKind::Assistant => LABEL_ASSISTANT,
-            EntryKind::Reasoning => "Reasoning",
-            _ => "Runtime",
+            EntryKind::Reasoning => LABEL_REASONING,
+            _ => LABEL_RUNTIME,
         };
         // Once real content starts, the thinking placeholder is no longer needed.
         if entry_kind == EntryKind::Assistant {
@@ -1939,18 +2014,18 @@ impl InteractiveApp {
             "TOOL_CALL" => {
                 let tool_name = event
                     .payload
-                    .get("toolName")
+                    .get(KEY_TOOL_NAME)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("tool");
+                    .unwrap_or(LABEL_TOOL_FALLBACK);
                 let tool_call_id = event
                     .payload
-                    .get("toolCallId")
+                    .get(KEY_TOOL_CALL_ID)
                     .and_then(|v| v.as_str())
                     .unwrap_or(item_id);
                 // Best-effort short label: first arg (path/command) if present.
                 let hint = event
                     .payload
-                    .get("arguments")
+                    .get(KEY_ARGUMENTS)
                     .and_then(|a| {
                         a.get("path")
                             .or_else(|| a.get("command"))
@@ -2023,11 +2098,13 @@ impl InteractiveApp {
         } else {
             let kind = event
                 .payload
-                .get("kind")
+                .get(KEY_KIND)
                 .and_then(|v| v.as_str())
-                .unwrap_or("AGENT_MESSAGE");
+                .unwrap_or(EVENT_KIND_AGENT_MESSAGE);
             let (entry_kind, title) = match kind {
-                "REASONING_TEXT" | "REASONING_SUMMARY" => (EntryKind::Reasoning, "thinking"),
+                k if k == EVENT_KIND_REASONING_TEXT || k == EVENT_KIND_REASONING_SUMMARY => {
+                    (EntryKind::Reasoning, LABEL_THINKING)
+                }
                 _ => (EntryKind::Assistant, LABEL_ASSISTANT),
             };
             self.upsert_transcript_entry(TranscriptEntry {
@@ -2132,18 +2209,20 @@ impl InteractiveApp {
         item: &ConversationItem,
         result: &ToolResult,
     ) {
-        let result_body =
-            format_tool_result(item.payload.get("output"), item.payload.get("errorMessage"));
+        let result_body = format_tool_result(
+            item.payload.get(KEY_OUTPUT),
+            item.payload.get(KEY_ERROR_MESSAGE),
+        );
         let base_suffix = if tool_result_not_spawned(result) {
             "skipped"
         } else {
-            "done"
+            STATUS_DONE
         };
 
         // For collapsed entries, extract a brief summary from the result output
         // so the header reads e.g. "read_file  main.rs → done  (142 lines)".
         let suffix = if self.transcript.get(call_idx).is_some_and(|e| e.collapsed) {
-            let output = item.payload.get("output");
+            let output = item.payload.get(KEY_OUTPUT);
             let summary = collapsed_result_summary(output);
             if summary.is_empty() {
                 base_suffix.to_string()
@@ -2194,15 +2273,15 @@ impl InteractiveApp {
     fn start_tool_activity_from_item(&mut self, item: &ConversationItem) {
         let tool_name = item
             .payload
-            .get("toolName")
+            .get(KEY_TOOL_NAME)
             .and_then(Value::as_str)
-            .unwrap_or("tool");
+            .unwrap_or(LABEL_TOOL_FALLBACK);
         let tool_call_id = item
             .payload
-            .get("toolCallId")
+            .get(KEY_TOOL_CALL_ID)
             .and_then(Value::as_str)
             .unwrap_or(item.item_id.as_str());
-        let hint = tool_hint_from_arguments(item.payload.get("arguments"));
+        let hint = tool_hint_from_arguments(item.payload.get(KEY_ARGUMENTS));
 
         self.activity.start_tool(
             tool_call_id,
@@ -2805,8 +2884,8 @@ impl InteractiveApp {
     fn apply_spawn_agent_result_status(&mut self, result: &ToolResult) {
         let Some(child_thread_id) = result
             .output
-            .get("thread_id")
-            .or_else(|| result.output.get("threadId"))
+            .get(KEY_THREAD_ID_SNAKE)
+            .or_else(|| result.output.get(KEY_THREAD_ID))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
         else {
@@ -2814,8 +2893,8 @@ impl InteractiveApp {
         };
         let child_turn_id = result
             .output
-            .get("turn_id")
-            .or_else(|| result.output.get("turnId"))
+            .get(KEY_TURN_ID_SNAKE)
+            .or_else(|| result.output.get(KEY_TURN_ID))
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
@@ -2924,7 +3003,7 @@ impl InteractiveApp {
                     }
                     continue;
                 }
-                ChildAgentStatus::Completed => "done",
+                ChildAgentStatus::Completed => STATUS_DONE,
                 ChildAgentStatus::Failed => STATUS_FAILED,
                 ChildAgentStatus::Interrupted => STATUS_INTERRUPTED,
                 ChildAgentStatus::TimedOut => STATUS_TIMED_OUT,
@@ -3116,7 +3195,7 @@ fn collapsed_result_summary(output: Option<&Value>) -> String {
     }
 
     // web_fetch: { url, status, total_chars }
-    if let Some(status) = output.get("status").and_then(Value::as_u64) {
+    if let Some(status) = output.get(KEY_STATUS).and_then(Value::as_u64) {
         if output.get("url").is_some() {
             let chars = output
                 .get("total_chars")
@@ -3310,7 +3389,7 @@ fn extract_user_message_history(items: &[ConversationItem]) -> Vec<String> {
     items
         .iter()
         .filter(|item| item.kind == ItemKind::UserMessage)
-        .filter_map(|item| item.payload.get("text").and_then(Value::as_str))
+        .filter_map(|item| item.payload.get(KEY_TEXT).and_then(Value::as_str))
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .filter(|text| !is_synthetic_sub_agent_prompt(text))
@@ -3624,5 +3703,51 @@ fn tool_result_failed(result: &ToolResult) -> bool {
 }
 
 fn tool_result_not_spawned(result: &ToolResult) -> bool {
-    result.output.get("status").and_then(Value::as_str) == Some("not_spawned")
+    result.output.get(KEY_STATUS).and_then(Value::as_str) == Some(STATUS_NOT_SPAWNED)
+}
+
+fn is_background_compaction_status_event(event: &RuntimeEvent, current_thread_id: &str) -> bool {
+    event.kind == RuntimeEventKind::CompactionStatus
+        && event.thread_id.as_deref() == Some(current_thread_id)
+        // This event kind is also used for turn-local status such as codebase
+        // indexing. Only turn-less events are actual background compaction
+        // lifecycle updates.
+        && event.turn_id.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::domain::now_millis;
+    use serde_json::json;
+
+    fn compaction_event(thread_id: &str, turn_id: Option<&str>) -> RuntimeEvent {
+        RuntimeEvent {
+            event_id: "evt_test".into(),
+            kind: RuntimeEventKind::CompactionStatus,
+            thread_id: Some(thread_id.into()),
+            turn_id: turn_id.map(str::to_string),
+            sequence: 1,
+            payload: json!({ "status": "started", "message": "Auto-compacting context..." }),
+            emitted_at: now_millis(),
+        }
+    }
+
+    #[test]
+    fn background_compaction_event_has_no_turn_id() {
+        let event = compaction_event("thread_a", None);
+        assert!(is_background_compaction_status_event(&event, "thread_a"));
+    }
+
+    #[test]
+    fn turn_scoped_status_is_not_compaction() {
+        let event = compaction_event("thread_a", Some("turn_a"));
+        assert!(!is_background_compaction_status_event(&event, "thread_a"));
+    }
+
+    #[test]
+    fn other_thread_status_is_not_current_compaction() {
+        let event = compaction_event("thread_b", None);
+        assert!(!is_background_compaction_status_event(&event, "thread_a"));
+    }
 }

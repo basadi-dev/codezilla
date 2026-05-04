@@ -37,7 +37,6 @@ use super::domain::{
     TurnMetadata, TurnStatus, UserInput,
 };
 use super::persistence::PersistenceManager;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadStartParams {
@@ -467,6 +466,8 @@ mod fake_model_tests {
     use crate::system::domain::{
         ApprovalDecision, ApprovalPolicy, ApprovalsReviewerKind, ItemKind, ModelSettings,
         PermissionProfile, ReasoningEffort, SandboxMode, SurfaceKind, UserInput,
+        KEY_ERROR_MESSAGE, KEY_KIND, KEY_OUTPUT, KEY_REASON, KEY_STATUS, KEY_TEXT,
+        KEY_THREAD_ID_SNAKE, KEY_TOOL_NAME,
     };
     use crate::system::intel::CodebaseIntelConfig;
     use std::path::PathBuf;
@@ -654,7 +655,7 @@ mod fake_model_tests {
             .filter(|i| i.kind == ItemKind::AgentMessage)
             .filter_map(|i| {
                 i.payload
-                    .get("text")
+                    .get(KEY_TEXT)
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             })
@@ -694,13 +695,13 @@ mod fake_model_tests {
                 ItemKind::ToolCall => {
                     tool_calls += 1;
                     assert_eq!(
-                        item.payload.get("toolName").and_then(|v| v.as_str()),
+                        item.payload.get(KEY_TOOL_NAME).and_then(|v| v.as_str()),
                         Some("list_dir")
                     );
                 }
                 ItemKind::ToolResult => tool_results += 1,
                 ItemKind::AgentMessage => {
-                    if let Some(t) = item.payload.get("text").and_then(|v| v.as_str()) {
+                    if let Some(t) = item.payload.get(KEY_TEXT).and_then(|v| v.as_str()) {
                         final_text = t.to_string();
                     }
                 }
@@ -730,12 +731,12 @@ mod fake_model_tests {
 
         let kind = evt
             .payload
-            .get("kind")
+            .get(KEY_KIND)
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         let reason = evt
             .payload
-            .get("reason")
+            .get(KEY_REASON)
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         assert_eq!(
@@ -786,7 +787,7 @@ mod fake_model_tests {
         );
         let err_msg = tool_result
             .payload
-            .get("errorMessage")
+            .get(KEY_ERROR_MESSAGE)
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         assert!(
@@ -826,9 +827,9 @@ mod fake_model_tests {
             tool_result.payload.get("ok").and_then(|v| v.as_bool()),
             Some(false)
         );
-        let output = tool_result.payload.get("output").unwrap();
+        let output = tool_result.payload.get(KEY_OUTPUT).unwrap();
         assert_eq!(
-            output.get("status").and_then(|v| v.as_str()),
+            output.get(KEY_STATUS).and_then(|v| v.as_str()),
             Some("not_spawned")
         );
         assert_eq!(
@@ -843,7 +844,7 @@ mod fake_model_tests {
             Some("bin")
         );
         assert!(
-            output.get("thread_id").is_none(),
+            output.get(KEY_THREAD_ID_SNAKE).is_none(),
             "redirect should not spawn a child thread: {output}"
         );
     }
@@ -924,7 +925,7 @@ mod fake_model_tests {
         );
         let err_msg = tool_result
             .payload
-            .get("errorMessage")
+            .get(KEY_ERROR_MESSAGE)
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         assert!(
@@ -939,7 +940,7 @@ mod fake_model_tests {
             .items
             .iter()
             .filter(|i| i.kind == ItemKind::AgentMessage)
-            .filter_map(|i| i.payload.get("text").and_then(|v| v.as_str()))
+            .filter_map(|i| i.payload.get(KEY_TEXT).and_then(|v| v.as_str()))
             .next_back()
             .unwrap_or_default()
             .to_string();

@@ -10,9 +10,13 @@ use super::markdown::{highlight_code_line, lang_for_path, md_to_lines};
 
 use crate::system::domain::PendingApproval;
 use crate::system::domain::{
-    ConversationItem, ItemKind, ThreadMetadata, KEY_ERROR, LABEL_ASSISTANT, LABEL_ERROR,
-    LABEL_SYSTEM, LABEL_USER, STATUS_COMPLETED, STATUS_FAILED, STATUS_INTERRUPTED,
-    STATUS_TIMED_OUT, STATUS_TIMEOUT,
+    ConversationItem, ItemKind, ThreadMetadata,
+    KEY_ARGUMENTS, KEY_ERROR, KEY_ERROR_MESSAGE, KEY_KIND, KEY_MESSAGE, KEY_OUTPUT, KEY_REASON,
+    KEY_RESULT, KEY_STATUS, KEY_TEXT, KEY_THREAD_ID, KEY_THREAD_ID_SNAKE, KEY_TOOL_CALL_ID,
+    KEY_TOOL_NAME, KEY_TURN_ID, KEY_TURN_ID_SNAKE,
+    LABEL_ASSISTANT, LABEL_ERROR, LABEL_SYSTEM, LABEL_THINKING, LABEL_TOOL_FALLBACK, LABEL_USER,
+    STATUS_COMPLETED, STATUS_FAILED, STATUS_INTERRUPTED, STATUS_NOT_SPAWNED, STATUS_TIMED_OUT,
+    STATUS_TIMEOUT,
 };
 
 // ─── Colour palette ── (Claude Code / Codex CLI inspired) ────────────────────
@@ -656,7 +660,7 @@ pub fn should_auto_collapse_tool(tool_name: &str) -> bool {
 pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
     let tool_call_id = item
         .payload
-        .get("toolCallId")
+        .get(KEY_TOOL_CALL_ID)
         .and_then(|v: &serde_json::Value| v.as_str())
         .map(ToOwned::to_owned);
 
@@ -669,7 +673,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             title: LABEL_USER.into(),
             body: item
                 .payload
-                .get("text")
+                .get(KEY_TEXT)
                 .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
@@ -686,7 +690,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             title: LABEL_SYSTEM.into(),
             body: item
                 .payload
-                .get("text")
+                .get(KEY_TEXT)
                 .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
@@ -703,7 +707,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             title: LABEL_ASSISTANT.into(),
             body: item
                 .payload
-                .get("text")
+                .get(KEY_TEXT)
                 .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
@@ -715,12 +719,12 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         ItemKind::ToolCall => {
             let tool_name = item
                 .payload
-                .get("toolName")
+                .get(KEY_TOOL_NAME)
                 .and_then(|v: &serde_json::Value| v.as_str())
-                .unwrap_or("tool");
+                .unwrap_or(LABEL_TOOL_FALLBACK);
             let arguments = item
                 .payload
-                .get("arguments")
+                .get(KEY_ARGUMENTS)
                 .unwrap_or(&serde_json::Value::Null);
             TranscriptEntry {
                 item_id: item.item_id.clone(),
@@ -741,7 +745,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             tool_call_id,
             kind: EntryKind::ToolResult,
             title: "result".into(),
-            body: format_tool_result(item.payload.get("output"), item.payload.get("errorMessage")),
+            body: format_tool_result(item.payload.get(KEY_OUTPUT), item.payload.get(KEY_ERROR_MESSAGE)),
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,
@@ -755,7 +759,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             title: "summary".into(),
             body: item
                 .payload
-                .get("text")
+                .get(KEY_TEXT)
                 .or_else(|| item.payload.get("summary"))
                 .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or_else(|| item.payload.as_str().unwrap_or_default())
@@ -770,10 +774,10 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::Reasoning,
-            title: "thinking".into(),
+            title: LABEL_THINKING.into(),
             body: item
                 .payload
-                .get("text")
+                .get(KEY_TEXT)
                 .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
@@ -803,16 +807,16 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             // Prefer structured { kind, message } payload produced by the new error pipeline.
             let kind_label = item
                 .payload
-                .get("kind")
+                .get(KEY_KIND)
                 .and_then(|v| v.as_str())
                 .unwrap_or(LABEL_ERROR)
                 .to_string();
             let fallback_body = pretty_json_or_text(Some(&item.payload), None);
             let message = item
                 .payload
-                .get("message")
+                .get(KEY_MESSAGE)
                 .and_then(|v| v.as_str())
-                .or_else(|| item.payload.get("reason").and_then(|v| v.as_str()))
+                .or_else(|| item.payload.get(KEY_REASON).and_then(|v| v.as_str()))
                 .map(|s| s.to_string())
                 .unwrap_or(fallback_body);
             TranscriptEntry {
@@ -2078,12 +2082,12 @@ pub fn format_tool_result(output: Option<&Value>, error_message: Option<&Value>)
 }
 
 fn format_spawn_agent_not_spawned_result(output: &Value) -> Option<String> {
-    if output.get("status").and_then(Value::as_str) != Some("not_spawned") {
+    if output.get(KEY_STATUS).and_then(Value::as_str) != Some(STATUS_NOT_SPAWNED) {
         return None;
     }
 
     let reason = output
-        .get("reason")
+        .get(KEY_REASON)
         .and_then(Value::as_str)
         .unwrap_or("This task should use direct tools instead of a sub-agent.");
     let mut lines = vec![
@@ -2110,12 +2114,12 @@ fn format_spawn_agent_not_spawned_result(output: &Value) -> Option<String> {
 
 fn format_spawn_agent_result(output: &Value, error_message: Option<&Value>) -> Option<String> {
     let thread_id = output
-        .get("thread_id")
-        .or_else(|| output.get("threadId"))
+        .get(KEY_THREAD_ID_SNAKE)
+        .or_else(|| output.get(KEY_THREAD_ID))
         .and_then(Value::as_str)?;
     let turn_id = output
-        .get("turn_id")
-        .or_else(|| output.get("turnId"))
+        .get(KEY_TURN_ID_SNAKE)
+        .or_else(|| output.get(KEY_TURN_ID))
         .and_then(Value::as_str)
         .unwrap_or_default();
     let error = output.get(KEY_ERROR).and_then(Value::as_str);
@@ -2142,7 +2146,7 @@ fn format_spawn_agent_result(output: &Value, error_message: Option<&Value>) -> O
     }
 
     let result = output
-        .get("result")
+        .get(KEY_RESULT)
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();

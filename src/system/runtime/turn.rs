@@ -17,8 +17,8 @@ use super::{
 };
 use crate::system::agent::TurnExecutor;
 use crate::system::domain::{
-    now_seconds, ApprovalDecision, ApprovalResolution, PrefixRule, RuntimeEventKind, SurfaceKind,
-    ThreadStatus, TokenUsage, TurnMetadata, TurnStatus,
+    now_seconds, ApprovalDecision, ApprovalResolution, KEY_TOOL_CALL_ID, PrefixRule,
+    RuntimeEventKind, SurfaceKind, ThreadStatus, TokenUsage, TurnMetadata, TurnStatus,
 };
 
 impl ConversationRuntime {
@@ -208,7 +208,7 @@ impl ConversationRuntime {
             if item.turn_id != turn_id || item.kind != crate::system::domain::ItemKind::ToolCall {
                 continue;
             }
-            let Some(call_id) = item.payload.get("toolCallId").and_then(|v| v.as_str()) else {
+            let Some(call_id) = item.payload.get(KEY_TOOL_CALL_ID).and_then(|v| v.as_str()) else {
                 continue;
             };
             let one = self.undo_tool_call(call_id)?;

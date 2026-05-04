@@ -21,8 +21,8 @@ use self::utils::{
     wants_verbose_repo_map, ReadKey, TurnIntent,
 };
 use crate::system::domain::{
-    now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
-    TokenUsage, ToolCall, ToolResult, TurnMetrics, TurnStatus, UserInput,
+    now_seconds, ConversationItem, FileChangeSummary, ItemKind, KEY_TEXT, RuntimeEventKind,
+    ThreadStatus, TokenUsage, ToolCall, ToolResult, TurnMetrics, TurnStatus, UserInput,
 };
 use crate::system::error as cod_error;
 use crate::system::runtime::RepoMapVerbosity;
@@ -1263,21 +1263,12 @@ impl TurnExecutor {
                                 .find(|i| &i.item_id == summary_item_id)
                             {
                                 if let Some(text) =
-                                    item.payload.get("text").and_then(|v| v.as_str())
+                                    item.payload.get(KEY_TEXT).and_then(|v| v.as_str())
                                 {
                                     let chars = text.chars().count();
                                     summary_chars = Some(chars);
-                                    // Keep estimator aligned with current heuristic in model_gateway.
-                                    let raw: usize = text
-                                        .split_whitespace()
-                                        .map(|word| match word.len() {
-                                            0 => 0,
-                                            1..=4 => 1,
-                                            n => n.div_ceil(3), // ceil(len / 3)
-                                        })
-                                        .sum();
                                     summary_tokens_est =
-                                        Some(raw.max(1).saturating_mul(11).div_ceil(10));
+                                        Some(super::model_gateway::estimate_text_tokens(text));
                                 }
                             }
                         }

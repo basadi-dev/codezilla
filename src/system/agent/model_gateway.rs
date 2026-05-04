@@ -250,7 +250,9 @@ impl ModelGateway {
                         for (_, (id, name, args)) in partial_tools {
                             let tool_name = name.unwrap_or_default();
                             if tool_name.is_empty() {
-                                tracing::warn!("model_gateway: discarding tool call with empty name (args: {args:?})");
+                                tracing::warn!(
+                                    "model_gateway: discarding tool call with empty name (args: {args:?})"
+                                );
                                 continue;
                             }
                             let base_id = id.unwrap_or_else(|| {
@@ -348,7 +350,9 @@ impl ModelGateway {
                                 let mut calls = Vec::new();
                                 for c in response.tool_calls {
                                     if c.function.name.is_empty() {
-                                        tracing::warn!("model_gateway: discarding tool call with empty name in complete() fallback");
+                                        tracing::warn!(
+                                            "model_gateway: discarding tool call with empty name in complete() fallback"
+                                        );
                                         continue;
                                     }
                                     let argument_list = parse_tool_arguments_lenient(
@@ -445,42 +449,99 @@ const RESERVED_OUTPUT_TOKENS: usize = 8_192;
 /// Default context window if not specified by the model settings.
 pub const DEFAULT_CONTEXT_WINDOW: usize = 100_000;
 
+/// Per-message framing overhead for most roles.
+/// OpenAI documents ~4 tokens; we use 5 for safety.
+const MSG_OVERHEAD_TOKENS: usize = 5;
+
+/// Tool result messages have simpler framing.
+const TOOL_RESULT_OVERHEAD_TOKENS: usize = 3;
+
 // ─── Token estimation ─────────────────────────────────────────────────────────
 //
-// We use a word-boundary-aware estimator that is more accurate than raw char/4,
-// especially for code (which has many single-char tokens like `{`, `;`, `(`).
-//
-// Approach:
-//   - Split on whitespace to get "words".
-//   - Each word ≤ 4 chars ≈ 1 token (common for code punctuation/keywords).
-//   - Longer words: ~1 token per 3 chars (English average; code identifiers
-//     tend to be longer but still tokenize efficiently with BPE).
-//   - Add a 10% safety margin so we slightly overestimate rather than
-//     underestimate (underestimation causes context-overflow errors).
+// We use a lightweight tokenizer-shaped estimator. It is still heuristic, but
+// it is intentionally closer to the prompt sent to providers than raw char/4:
+//   - ASCII words/identifiers are counted by length.
+//   - Code punctuation/operators count as token-bearing units.
+//   - Newlines are counted individually (tokenizers encode them as tokens).
+//   - Non-ASCII text is counted per character to avoid undercounting CJK.
+//   - A safety margin biases estimates upward, because underestimation causes
+//     context-overflow errors.
 
 /// Estimate tokens for a string using word-boundary-aware heuristics.
-fn estimate_text_tokens(text: &str) -> usize {
+pub(crate) fn estimate_text_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    let raw: usize = text
-        .split_whitespace()
-        .map(|word| match word.len() {
-            0 => 0,
-            1..=4 => 1,
-            n => n.div_ceil(3), // ceil(len / 3)
-        })
-        .sum();
+    let mut raw = 0usize;
+    let mut word_len = 0usize;
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            word_len += 1;
+            continue;
+        }
+
+        raw += estimate_ascii_word_tokens(word_len);
+        word_len = 0;
+
+        if ch == '\n' {
+            raw += 1; // newlines are almost always a separate token
+            continue;
+        }
+        if ch.is_whitespace() {
+            continue; // spaces/tabs are usually merged into adjacent tokens
+        }
+
+        raw += if ch.is_ascii() {
+            // Punctuation-heavy code tends to tokenize into small pieces.
+            1
+        } else {
+            estimate_non_ascii_char_tokens(ch)
+        };
+    }
+
+    raw += estimate_ascii_word_tokens(word_len);
     // Safety margin: +10%, minimum 1 token for any non-empty string.
     raw.max(1).saturating_mul(11).div_ceil(10)
+}
+
+fn estimate_ascii_word_tokens(len: usize) -> usize {
+    match len {
+        0 => 0,
+        1..=4 => 1,
+        n => n.div_ceil(3),
+    }
+}
+
+fn estimate_non_ascii_char_tokens(ch: char) -> usize {
+    if is_cjk_char(ch) {
+        1
+    } else {
+        ch.len_utf8().div_ceil(3).max(1)
+    }
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x30000..=0x3134F
+    )
 }
 
 fn estimate_len_tokens(len: usize) -> usize {
     if len == 0 {
         return 0;
     }
-    // For raw byte lengths (tool args, results), use char/3 with safety margin.
-    let raw = len.div_ceil(3);
+    // JSON structural overhead (quotes, colons, braces) tokenizes less
+    // efficiently than prose — use ~2.5 chars/token.
+    let raw = (len * 2).div_ceil(5);
     raw.max(1).saturating_mul(11).div_ceil(10)
 }
 fn estimate_messages_tokens(messages: &[llm::Message]) -> usize {
@@ -502,13 +563,24 @@ fn estimate_messages_tokens(messages: &[llm::Message]) -> usize {
                         + r.error.as_deref().unwrap_or("").len()
                 })
                 .unwrap_or(0);
-            estimate_text_tokens(&m.content)
-                + estimate_text_tokens(&m.think_content)
-                + estimate_text_tokens(&m.role.to_string())
-                + estimate_len_tokens(tool_calls_len + tool_result_len)
-                + 8
+            estimate_message_tokens(m, tool_calls_len + tool_result_len)
         })
         .sum()
+}
+
+fn estimate_message_tokens(message: &llm::Message, structured_len: usize) -> usize {
+    // Note: think_content (reasoning tokens) is intentionally excluded.
+    // Providers track reasoning tokens separately; they don't consume the
+    // context window for input, so counting them causes premature compaction.
+    let overhead = if message.role == llm::Role::Tool {
+        TOOL_RESULT_OVERHEAD_TOKENS
+    } else {
+        MSG_OVERHEAD_TOKENS
+    };
+    estimate_text_tokens(&message.content)
+        + estimate_text_tokens(&message.role.to_string())
+        + estimate_len_tokens(structured_len)
+        + overhead
 }
 
 pub fn calculate_prompt_budget(context_window: Option<usize>) -> usize {
@@ -518,7 +590,30 @@ pub fn calculate_prompt_budget(context_window: Option<usize>) -> usize {
 
 /// Rough token count for a single `ConversationItem`.
 fn item_token_estimate(item: &ConversationItem) -> usize {
-    estimate_text_tokens(&item.payload.to_string())
+    if let Some(message) = item_to_llm_message(item) {
+        return estimate_messages_tokens(&[message]);
+    }
+
+    if is_expected_llm_item_kind(item.kind) {
+        // If a persisted LLM-facing item is malformed, keep a conservative
+        // fallback instead of silently undercounting it.
+        return estimate_text_tokens(&item.payload.to_string());
+    }
+
+    0
+}
+
+fn is_expected_llm_item_kind(kind: ItemKind) -> bool {
+    matches!(
+        kind,
+        ItemKind::UserMessage
+            | ItemKind::SystemMessage
+            | ItemKind::UserAttachment
+            | ItemKind::AgentMessage
+            | ItemKind::ReasoningSummary
+            | ItemKind::ToolCall
+            | ItemKind::ToolResult
+    )
 }
 
 /// Returns estimated context usage as a percentage of the given `prompt_budget`.
@@ -1000,4 +1095,85 @@ fn looks_like_diagnostic(output: &str, tool_name: &str) -> bool {
             || lower.contains("FAILED");
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::domain::now_seconds;
+    use serde_json::json;
+
+    fn item(kind: ItemKind, payload: Value) -> ConversationItem {
+        ConversationItem {
+            item_id: "item_test".into(),
+            thread_id: "thread_test".into(),
+            turn_id: "turn_test".into(),
+            created_at: now_seconds(),
+            kind,
+            payload,
+        }
+    }
+
+    #[test]
+    fn status_items_do_not_inflate_context_estimate() {
+        let user = item(
+            ItemKind::UserMessage,
+            json!({ "text": "please inspect main.rs" }),
+        );
+        let status = item(
+            ItemKind::Status,
+            json!({ "message": "Compacting...", "debug": "x".repeat(10_000) }),
+        );
+
+        let without_status = estimate_items_token_pct(std::slice::from_ref(&user), 10_000);
+        let with_status = estimate_items_token_pct(&[user, status], 10_000);
+
+        assert_eq!(with_status, without_status);
+    }
+
+    #[test]
+    fn code_punctuation_counts_as_token_bearing() {
+        let prose = estimate_text_tokens("foo bar baz qux value test next item");
+        let code = estimate_text_tokens("foo.bar(baz[0]).unwrap_or_default();");
+
+        assert!(
+            code > prose,
+            "dense code should not be undercounted: code={code}, prose={prose}"
+        );
+    }
+
+    #[test]
+    fn cjk_text_is_not_counted_as_one_whitespace_word() {
+        let cjk = estimate_text_tokens("这是一个没有空格的中文句子");
+        let ascii_word = estimate_text_tokens("thisisonewordwithoutspaces");
+
+        assert!(
+            cjk >= ascii_word,
+            "CJK text should not be undercounted: cjk={cjk}, ascii={ascii_word}"
+        );
+    }
+
+    #[test]
+    fn estimate_within_bounds_of_real_tokenizer() {
+        // Reference: cl100k_base token counts (verified offline).
+        // Lower bound 0.7x catches dangerous undercounting.
+        // Upper bound 2.0x is generous — we intentionally bias upward
+        // (via the 10% safety margin and per-punctuation counting)
+        // because underestimation causes context-overflow errors.
+        let cases = [
+            ("Hello, world!", 4),
+            ("fn main() {\n    println!(\"hello\");\n}", 14),
+            ("The quick brown fox jumps over the lazy dog.", 10),
+            ("{\"key\": \"value\", \"nested\": {\"a\": 1}}", 13),
+        ];
+        for (text, real_count) in cases {
+            let est = estimate_text_tokens(text);
+            let lower = (real_count as f64 * 0.7) as usize;
+            let upper = (real_count as f64 * 2.0) as usize;
+            assert!(
+                est >= lower && est <= upper,
+                "estimate for {text:?}: got {est}, real={real_count}, bounds=[{lower}, {upper}]"
+            );
+        }
+    }
 }
