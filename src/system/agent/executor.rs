@@ -404,7 +404,7 @@ impl TurnExecutor {
                         self.runtime.publish_event(
                             RuntimeEventKind::ItemUpdated,
                             Some(params.thread_id.clone()), Some(turn_id.clone()),
-                            json!({"itemId": format!("reasoning_{turn_id}"), "delta": delta, "mode": "append"}),
+                            json!({"itemId": format!("reasoning_{turn_id}"), "kind": ItemKind::ReasoningText, "delta": delta, "mode": "append"}),
                         ).await?;
                     }
                     ModelStreamEvent::ToolCalls(calls) => {
@@ -529,6 +529,22 @@ impl TurnExecutor {
                 && !command_attempted_after_last_file_change
                 && verification_nudges == 0;
 
+            // Persist reasoning/thinking text if the model produced any.
+            // ItemKind::ReasoningText is defined in the domain but was previously
+            // never written — this wires it up so the full turn is reconstructable.
+            if !reasoning_text.is_empty() {
+                let reasoning_item = ConversationItem {
+                    item_id: format!("reasoning_{turn_id}"),
+                    thread_id: params.thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    created_at: now_seconds(),
+                    kind: ItemKind::ReasoningText,
+                    payload: json!({ "text": reasoning_text }),
+                };
+                self.persist_turn_item(reasoning_item).await?;
+                reasoning_text = String::new();
+            }
+
             if let Some(item_id) = assistant_item_id {
                 if !will_nudge_intent && !will_nudge_verification {
                     let item = ConversationItem {
@@ -546,22 +562,6 @@ impl TurnExecutor {
                         "executor: suppressing narration persistence — corrective nudge will fire"
                     );
                 }
-            }
-
-            // Persist reasoning/thinking text if the model produced any.
-            // ItemKind::ReasoningText is defined in the domain but was previously
-            // never written — this wires it up so the full turn is reconstructable.
-            if !reasoning_text.is_empty() {
-                let reasoning_item = ConversationItem {
-                    item_id: format!("item_{}", Uuid::new_v4().simple()),
-                    thread_id: params.thread_id.clone(),
-                    turn_id: turn_id.clone(),
-                    created_at: now_seconds(),
-                    kind: ItemKind::ReasoningText,
-                    payload: json!({ "text": reasoning_text }),
-                };
-                self.persist_turn_item(reasoning_item).await?;
-                reasoning_text = String::new();
             }
 
             if tool_calls.is_empty() {

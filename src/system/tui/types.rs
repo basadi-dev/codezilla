@@ -136,6 +136,7 @@ pub struct SelectionPoint {
 #[derive(Debug, Clone)]
 pub struct TranscriptEntry {
     pub item_id: String,
+    pub turn_id: Option<String>,
     pub tool_call_id: Option<String>,
     pub kind: EntryKind,
     pub title: String,
@@ -658,6 +659,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
     match item.kind {
         ItemKind::UserMessage => TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::User,
             title: "You".into(),
@@ -674,6 +676,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::SystemMessage => TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::System,
             title: "System".into(),
@@ -690,6 +693,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::AgentMessage => TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::Assistant,
             title: "Codezilla".into(),
@@ -716,6 +720,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or(&serde_json::Value::Null);
             TranscriptEntry {
                 item_id: item.item_id.clone(),
+                turn_id: Some(item.turn_id.clone()),
                 tool_call_id,
                 kind: EntryKind::ToolCall,
                 title: format_tool_call_title(tool_name, arguments),
@@ -728,6 +733,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         }
         ItemKind::ToolResult => TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id,
             kind: EntryKind::ToolResult,
             title: "result".into(),
@@ -739,6 +745,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::ReasoningSummary => TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::Summary,
             title: "summary".into(),
@@ -756,6 +763,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::ReasoningText => TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::Reasoning,
             title: "thinking".into(),
@@ -772,6 +780,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         },
         ItemKind::UserAttachment => TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::Attachment,
             title: "attachment".into(),
@@ -804,6 +813,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .unwrap_or(fallback_body);
             TranscriptEntry {
                 item_id: item.item_id.clone(),
+                turn_id: Some(item.turn_id.clone()),
                 tool_call_id: None,
                 kind: EntryKind::Error,
                 title: kind_label,
@@ -848,6 +858,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
 
             TranscriptEntry {
                 item_id: item.item_id.clone(),
+                turn_id: Some(item.turn_id.clone()),
                 tool_call_id: None,
                 kind: EntryKind::FileChange,
                 title: path.rsplit('/').next().unwrap_or(path).to_string(),
@@ -892,6 +903,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
 
             TranscriptEntry {
                 item_id: item.item_id.clone(),
+                turn_id: Some(item.turn_id.clone()),
                 tool_call_id: None,
                 kind: EntryKind::Command,
                 title: cmd_str
@@ -934,6 +946,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
 
             TranscriptEntry {
                 item_id: item.item_id.clone(),
+                turn_id: Some(item.turn_id.clone()),
                 tool_call_id: None,
                 kind: EntryKind::Command,
                 title: "output".into(),
@@ -946,6 +959,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
         }
         _ => TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             collapsed: false,
             kind: EntryKind::Status,
@@ -2569,6 +2583,7 @@ mod tests {
         let entries = vec![
             TranscriptEntry {
                 item_id: "u1".into(),
+                turn_id: Some("turn_1".into()),
                 tool_call_id: None,
                 kind: EntryKind::User,
                 title: "You".into(),
@@ -2580,6 +2595,7 @@ mod tests {
             },
             TranscriptEntry {
                 item_id: "a1".into(),
+                turn_id: Some("turn_1".into()),
                 tool_call_id: None,
                 kind: EntryKind::Assistant,
                 title: "Codezilla".into(),

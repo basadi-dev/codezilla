@@ -523,12 +523,12 @@ impl InteractiveApp {
                     col: usize::MAX / 2,
                 },
             );
+            // Explicit line selection should detach from bottom-follow.
             self.transcript_view.set_auto_scroll(false);
             // Reset so triple-click doesn't extend.
             self.transcript_selection.forget_click();
         } else {
             self.transcript_selection.start(point);
-            self.transcript_view.set_auto_scroll(false);
             self.transcript_selection.record_click(now, col, row);
         }
     }
@@ -539,6 +539,11 @@ impl InteractiveApp {
         }
         if let Some(point) = self.mouse_to_selection_point(col, row, true) {
             self.transcript_selection.update_end(point);
+            // Detach from auto-follow only after actual movement (true drag),
+            // not on a plain click-to-focus in the transcript.
+            if self.transcript_selection.is_moved() {
+                self.transcript_view.set_auto_scroll(false);
+            }
         }
     }
 
@@ -1074,6 +1079,7 @@ impl InteractiveApp {
                 .as_secs() as i64;
             self.upsert_transcript_entry(TranscriptEntry {
                 item_id: USER_PENDING_PLACEHOLDER_ID.to_string(),
+                turn_id: self.active_turn_id.clone(),
                 tool_call_id: None,
                 kind: EntryKind::User,
                 title: "You".into(),
@@ -1913,6 +1919,7 @@ impl InteractiveApp {
         if entry_kind != EntryKind::User {
             self.upsert_transcript_entry(TranscriptEntry {
                 item_id: item_id.to_string(),
+                turn_id: event.turn_id.clone(),
                 tool_call_id: None,
                 kind: entry_kind,
                 title: title.into(),
@@ -2013,11 +2020,21 @@ impl InteractiveApp {
             self.transcript[index].body.push_str(delta);
             self.invalidate_transcript_cache();
         } else {
+            let kind = event
+                .payload
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("AGENT_MESSAGE");
+            let (entry_kind, title) = match kind {
+                "REASONING_TEXT" | "REASONING_SUMMARY" => (EntryKind::Reasoning, "thinking"),
+                _ => (EntryKind::Assistant, "Codezilla"),
+            };
             self.upsert_transcript_entry(TranscriptEntry {
                 item_id: item_id.to_string(),
+                turn_id: event.turn_id.clone(),
                 tool_call_id: None,
-                kind: EntryKind::Assistant,
-                title: "Codezilla".into(),
+                kind: entry_kind,
+                title: title.into(),
                 body: delta.to_string(),
                 timestamp: Some(event.emitted_at / 1000),
                 completed_at: None,
@@ -2209,9 +2226,9 @@ impl InteractiveApp {
             }
             self.transcript[index] = entry;
         } else {
-            let index = self.transcript.len();
-            self.transcript_index.insert(entry.item_id.clone(), index);
-            self.transcript.push(entry);
+            let index = self.transcript_insert_index(&entry);
+            self.transcript.insert(index, entry);
+            self.rebuild_transcript_index();
         }
         // Keep the active (pending) Working entry pinned to the bottom of the
         // transcript: when any other entry is added, slide the timer past it
@@ -2220,6 +2237,22 @@ impl InteractiveApp {
             self.bump_pending_working_entry_to_end();
         }
         self.invalidate_transcript_cache();
+    }
+
+    fn transcript_insert_index(&self, entry: &TranscriptEntry) -> usize {
+        if entry.kind != EntryKind::Reasoning {
+            return self.transcript.len();
+        }
+        let Some(turn_id) = entry.turn_id.as_deref() else {
+            return self.transcript.len();
+        };
+        self.transcript
+            .iter()
+            .position(|existing| {
+                existing.turn_id.as_deref() == Some(turn_id)
+                    && existing.kind == EntryKind::Assistant
+            })
+            .unwrap_or(self.transcript.len())
     }
 
     fn bump_pending_working_entry_to_end(&mut self) {
@@ -2248,6 +2281,7 @@ impl InteractiveApp {
     ) {
         self.upsert_transcript_entry(TranscriptEntry {
             item_id,
+            turn_id: None,
             tool_call_id: None,
             kind,
             title: title.into(),
@@ -2267,6 +2301,7 @@ impl InteractiveApp {
     fn start_working_entry(&mut self, turn_id: &str) {
         self.upsert_transcript_entry(TranscriptEntry {
             item_id: working_entry_id(turn_id),
+            turn_id: Some(turn_id.to_string()),
             tool_call_id: None,
             kind: EntryKind::Status,
             title: "Working".into(),
@@ -2725,6 +2760,7 @@ impl InteractiveApp {
 
         TranscriptEntry {
             item_id: item.item_id.clone(),
+            turn_id: Some(item.turn_id.clone()),
             tool_call_id: Some(result.tool_call_id.clone()),
             kind: EntryKind::Error,
             title: failed_tool_title(&tool_name, result),
