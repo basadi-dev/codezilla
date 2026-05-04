@@ -176,6 +176,10 @@ impl ModelGateway {
                                 .await;
                             }
                             StreamChunk::Thinking(thought) => {
+                                // Count internal reasoning toward output usage
+                                // when provider usage is unavailable/partial.
+                                estimated_usage.output_tokens +=
+                                    estimate_text_tokens(&thought) as i64;
                                 if !send_model_event(
                                     &tx,
                                     &cancel_token,
@@ -185,6 +189,12 @@ impl ModelGateway {
                                 {
                                     return;
                                 }
+                                let _ = send_model_event(
+                                    &tx,
+                                    &cancel_token,
+                                    ModelStreamEvent::StreamingUsage(estimated_usage.clone()),
+                                )
+                                .await;
                             }
                             StreamChunk::ToolCallDelta {
                                 index,
