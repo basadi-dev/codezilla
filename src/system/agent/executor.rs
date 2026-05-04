@@ -13,12 +13,36 @@ enum ConstrainedMode {
     FinalOrActionOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnPhase {
+    /// Initial context gathering. Read-only tools allowed within budget.
+    Orient,
+    /// Model should produce a structured plan before editing.
+    Plan,
+    /// Executing plan steps. Edit and command tools allowed.
+    Execute,
+    /// Post-change verification. Command tools preferred.
+    Verify,
+}
+
+impl TurnPhase {
+    fn label(&self) -> &'static str {
+        match self {
+            TurnPhase::Orient => "ORIENT",
+            TurnPhase::Plan => "PLAN",
+            TurnPhase::Execute => "EXECUTE",
+            TurnPhase::Verify => "VERIFY",
+        }
+    }
+}
+
 use self::context::TurnContext;
 use self::utils::{
-    already_read_directive, classify_turn_intent, derive_thread_title, find_repetition_start,
-    intent_directive, is_degenerate_repetition, is_read_only_tool, recently_read_paths,
+    already_read_directive, classify_turn_intent, derive_thread_title,
+    extract_plan_from_response, find_repetition_start, initial_read_budget, intent_directive,
+    is_degenerate_repetition, is_read_only_tool, progress_summary, recently_read_paths,
     should_retry_no_tool_completion, thinking_instruction, user_requested_verification,
-    wants_verbose_repo_map, ReadKey, TurnIntent,
+    wants_verbose_repo_map, ProgressState, ReadKey, TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
@@ -234,6 +258,17 @@ impl TurnExecutor {
         let mut verification_nudges: usize = 0;
         let mut command_attempted_after_last_file_change = false;
 
+        // ── Phase-aware anti-looping state ─────────────────────────────────
+        let needs_planning = matches!(
+            turn_intent,
+            TurnIntent::Edit | TurnIntent::Debug | TurnIntent::Unknown
+        );
+        let mut current_phase = TurnPhase::Orient;
+        let read_budget = initial_read_budget(turn_intent);
+        let mut total_read_only_rounds: usize = 0;
+        let mut plan_steps: Vec<String> = Vec::new();
+        let mut completed_actions: Vec<String> = Vec::new();
+
         loop {
             agent_iterations += 1;
             if agent_iterations > agent_cfg.max_iterations {
@@ -262,6 +297,7 @@ impl TurnExecutor {
                 no_tool_nudges,
                 completed_tool_rounds,
                 intent = ?turn_intent,
+                phase = current_phase.label(),
                 "executor: loop iteration"
             );
             if let Some(thread) = self.runtime.load_thread(&params.thread_id).await? {
@@ -298,7 +334,7 @@ impl TurnExecutor {
             // Use the pre-computed instructions on the first iteration to avoid
             // a redundant async call. Recompute on subsequent iterations so
             // reasoning_effort from turn_ctx is correctly applied.
-            let system_instructions = if let Some(cached) = cached_system_instructions.take() {
+            let mut system_instructions = if let Some(cached) = cached_system_instructions.take() {
                 cached
             } else {
                 let already_read = recently_read_paths(&turn_ctx.items, 8);
@@ -311,6 +347,25 @@ impl TurnExecutor {
                 )
                 .await?
             };
+
+            // ── Inject structured progress summary from iteration 2+ ──────
+            // Gives the model compact structured state so it doesn't have to
+            // infer progress from scattered transcript. Reduces looping.
+            if agent_iterations > 1 {
+                let changed_paths: Vec<String> =
+                    file_changes.iter().map(|f| f.path.clone()).collect();
+                system_instructions.push(progress_summary(&ProgressState {
+                    phase: current_phase.label(),
+                    iteration: agent_iterations,
+                    reads_used: total_read_only_rounds,
+                    reads_budget: read_budget,
+                    plan: &plan_steps,
+                    completed_actions: &completed_actions,
+                    changed_files: &changed_paths,
+                    verified: command_attempted_after_last_file_change,
+                }));
+            }
+
             let tools = self
                 .runtime
                 .inner
@@ -648,8 +703,36 @@ impl TurnExecutor {
                         completed_tool_rounds,
                     )
                 {
+                    // ── Plan extraction: if the model narrated a plan,
+                    // capture it even though we're nudging for a tool call.
+                    if plan_steps.is_empty() {
+                        let extracted = extract_plan_from_response(&assistant_text);
+                        if !extracted.is_empty() {
+                            tracing::info!(
+                                turn_id = %turn_id,
+                                steps = extracted.len(),
+                                "executor: extracted plan from narration"
+                            );
+                            plan_steps = extracted;
+                            if current_phase == TurnPhase::Orient
+                                || current_phase == TurnPhase::Plan
+                            {
+                                current_phase = TurnPhase::Execute;
+                            }
+                        }
+                    }
                     no_tool_nudges += 1;
                     total_nudges += 1;
+                    // Escalate to constrained mode on the 2nd nudge to make
+                    // looping structurally harder, not just recoverable.
+                    if no_tool_nudges >= 2 && constrained_mode.is_none() {
+                        constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
+                        tracing::warn!(
+                            turn_id = %turn_id,
+                            no_tool_nudges,
+                            "executor: escalating to constrained mode after repeated narration"
+                        );
+                    }
                     if total_nudges >= agent_cfg.max_total_nudges {
                         tracing::error!(
                             turn_id = %turn_id,
@@ -811,11 +894,41 @@ impl TurnExecutor {
             total_tool_calls += round_call_count;
             if !round_file_changes.is_empty() {
                 command_attempted_after_last_file_change = false;
+                // Track completed actions for progress summary
+                for fc in &round_file_changes {
+                    completed_actions.push(format!("edited {}", fc.path));
+                }
             }
             if round_has_command {
                 command_attempted_after_last_file_change = true;
+                completed_actions.push("ran command".into());
             }
             file_changes.extend(round_file_changes);
+
+            // ── Phase transitions after tool execution ────────────────────
+            if current_phase == TurnPhase::Orient && !round_is_read_only {
+                // First action tool → transition to Execute (skip Plan)
+                current_phase = TurnPhase::Execute;
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    "executor: phase Orient → Execute (first action tool)"
+                );
+            } else if current_phase == TurnPhase::Plan && !round_is_read_only {
+                current_phase = TurnPhase::Execute;
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    "executor: phase Plan → Execute"
+                );
+            } else if current_phase == TurnPhase::Execute
+                && !file_changes.is_empty()
+                && command_attempted_after_last_file_change
+            {
+                current_phase = TurnPhase::Verify;
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    "executor: phase Execute → Verify (files changed + command ran)"
+                );
+            }
             total_invalid_tool_calls += invalid_tool_calls;
 
             if invalid_tool_calls > 0 {
@@ -904,9 +1017,11 @@ impl TurnExecutor {
             // reset so a follow-up nudge fires again if the model ignores it.
             if constrained_mode.is_none() && round_is_read_only {
                 consecutive_read_only_rounds += 1;
-                // Effective threshold shrinks with each nudge.
+                total_read_only_rounds += 1;
+                // Use intent-aware budget instead of flat config value.
+                // Effective threshold still shrinks with each nudge.
                 let effective_read_only_limit =
-                    (agent_cfg.max_consecutive_read_only_rounds >> total_nudges).max(1);
+                    (read_budget >> total_nudges).max(1);
                 tracing::debug!(
                     turn_id = %turn_id,
                     consecutive_read_only_rounds,
@@ -917,6 +1032,14 @@ impl TurnExecutor {
                     consecutive_read_only_rounds = 0;
                     total_nudges += 1;
                     constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
+                    // Phase transition: Orient → Plan for edit/debug tasks
+                    if needs_planning && current_phase == TurnPhase::Orient {
+                        current_phase = TurnPhase::Plan;
+                        tracing::info!(
+                            turn_id = %turn_id,
+                            "executor: phase Orient → Plan (read budget exhausted)"
+                        );
+                    }
                     let recent_files = recently_read_paths(&turn_ctx.items, 3);
                     let file_hint = if recent_files.is_empty() {
                         String::new()

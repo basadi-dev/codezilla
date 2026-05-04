@@ -1608,6 +1608,14 @@ pub fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
             .collect()
     }
 
+    // Helper: append a trailing padding span so the background colour fills
+    // the full line width in the terminal (ratatui only colours cells that
+    // have content; a trailing space forces the bg to extend to the right
+    // margin).
+    fn pad_full_width(spans: &mut Vec<Span<'static>>, bg: Color) {
+        spans.push(Span::styled(" ".to_string(), Style::default().bg(bg)));
+    }
+
     if lang.is_empty() {
         let color = diff_line_color(chunk);
         let bg = if !chunk.starts_with("+++") && !chunk.starts_with("---") {
@@ -1621,10 +1629,14 @@ pub fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
         } else {
             Color::Reset
         };
-        return vec![Span::styled(
+        let mut spans = vec![Span::styled(
             chunk.to_string(),
             Style::default().fg(color).bg(bg),
         )];
+        if bg != Color::Reset {
+            pad_full_width(&mut spans, bg);
+        }
+        return spans;
     }
 
     // File headers (--- / +++) — render muted with no background.
@@ -1643,6 +1655,7 @@ pub fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
                 .bg(BG_DIFF_ADD),
         )];
         spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_ADD));
+        pad_full_width(&mut spans, BG_DIFF_ADD);
         return spans;
     }
 
@@ -1654,16 +1667,19 @@ pub fn render_diff_chunk(chunk: &str, lang: &str) -> Vec<Span<'static>> {
                 .bg(BG_DIFF_REMOVE),
         )];
         spans.extend(with_bg(highlight_code_line(rest, lang), BG_DIFF_REMOVE));
+        pad_full_width(&mut spans, BG_DIFF_REMOVE);
         return spans;
     }
 
     if let Some(rest) = chunk.strip_prefix(' ') {
-        return highlight_code_line(rest, lang);
+        // Context line: prepend a space span so the code aligns with +/- lines.
+        let mut spans = vec![Span::raw(" ".to_string())];
+        spans.extend(highlight_code_line(rest, lang));
+        return spans;
     }
 
     highlight_code_line(chunk, lang)
 }
-
 /// Split spans at column boundaries so that [col_from, col_to] (inclusive)
 /// gets `Modifier::REVERSED` while the rest keeps its original style.
 fn apply_char_selection(line: Line<'static>, col_from: usize, col_to: usize) -> Line<'static> {
@@ -1999,15 +2015,15 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let content_lines: Vec<&str> = content.lines().collect();
-            let new_count = content_lines.len().max(1);
+            let old_count = end_line.saturating_sub(start_line) + 1;
+            let new_count = content_lines.len();
             let mut lines = Vec::new();
             lines.push(format!("{path}  ·  editing lines {start_line}–{end_line}"));
             lines.push(String::new());
             lines.push(format!("--- a/{path}"));
             lines.push(format!("+++ b/{path}"));
             lines.push(format!(
-                "@@ -{start_line},{} +{start_line},{new_count} @@",
-                end_line.saturating_sub(start_line) + 1
+                "@@ -{start_line},{old_count} +{start_line},{new_count} @@",
             ));
             for line in &content_lines {
                 lines.push(format!("+{line}"));

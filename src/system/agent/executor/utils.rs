@@ -1016,6 +1016,106 @@ pub(crate) fn find_repetition_start(text: &str) -> Option<usize> {
     None
 }
 
+// ─── Phase-aware anti-looping utilities ───────────────────────────────────────
+
+/// Returns the initial read-only round budget based on the turn intent.
+/// Edit and answer tasks get fewer reads since the repo map already provides
+/// structural context; review/inventory tasks need more exploration.
+pub(crate) fn initial_read_budget(intent: TurnIntent) -> usize {
+    match intent {
+        TurnIntent::Edit => 2,
+        TurnIntent::Debug => 3,
+        TurnIntent::Review | TurnIntent::Inventory => 5,
+        TurnIntent::Answer => 2,
+        TurnIntent::Unknown => 3,
+    }
+}
+
+/// Attempt to extract a structured plan from the model's response text.
+/// Looks for a `## Plan` or `**Plan**` header followed by bullet points.
+/// Returns the extracted steps, or empty vec if no plan is found.
+pub(crate) fn extract_plan_from_response(text: &str) -> Vec<String> {
+    let mut in_plan = false;
+    let mut steps = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("## plan")
+            || lower.starts_with("**plan")
+            || lower == "plan:"
+        {
+            in_plan = true;
+            continue;
+        }
+        if in_plan {
+            // Stop at next heading
+            if trimmed.starts_with("##") {
+                break;
+            }
+            if let Some(step) = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+            {
+                let step = step.trim();
+                if !step.is_empty() {
+                    steps.push(step.to_string());
+                }
+            } else if trimmed.is_empty() && !steps.is_empty() {
+                break;
+            }
+        }
+    }
+    steps
+}
+
+/// Input for the progress summary builder.
+pub(crate) struct ProgressState<'a> {
+    pub phase: &'a str,
+    pub iteration: usize,
+    pub reads_used: usize,
+    pub reads_budget: usize,
+    pub plan: &'a [String],
+    pub completed_actions: &'a [String],
+    pub changed_files: &'a [String],
+    pub verified: bool,
+}
+
+/// Build a compact structured progress summary for injection into the system
+/// prompt each iteration. Gives the model awareness of its current state so
+/// it doesn't have to infer progress from scattered transcript.
+pub(crate) fn progress_summary(state: &ProgressState<'_>) -> String {
+    let mut parts = vec![
+        format!("## Turn Progress (iteration {})", state.iteration),
+        format!("Phase: {}", state.phase),
+        format!("Reads: {}/{} used", state.reads_used, state.reads_budget),
+    ];
+    if !state.plan.is_empty() {
+        parts.push(format!("Plan: {}", state.plan.join(" → ")));
+    }
+    if !state.completed_actions.is_empty() {
+        let recent: Vec<&str> = state
+            .completed_actions
+            .iter()
+            .rev()
+            .take(5)
+            .map(|s| s.as_str())
+            .collect();
+        parts.push(format!("Recent actions: {}", recent.join(", ")));
+    }
+    if !state.changed_files.is_empty() {
+        parts.push(format!(
+            "Files changed: {}",
+            state.changed_files.join(", ")
+        ));
+    }
+    parts.push(format!(
+        "Verified: {}",
+        if state.verified { "yes" } else { "no" }
+    ));
+    parts.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
