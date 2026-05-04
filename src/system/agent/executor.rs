@@ -326,6 +326,7 @@ impl TurnExecutor {
                 .await?;
 
             let mut assistant_item_id: Option<String> = None;
+            let mut reasoning_item_id: Option<String> = None;
             let mut assistant_text = String::new();
             let mut reasoning_text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -400,11 +401,19 @@ impl TurnExecutor {
                     ModelStreamEvent::ReasoningDelta(delta) => {
                         // Accumulate for persistence (same pattern as assistant_text).
                         reasoning_text.push_str(&delta);
+                        if reasoning_item_id.is_none() {
+                            reasoning_item_id =
+                                Some(format!("reasoning_{}", Uuid::new_v4().simple()));
+                        }
+                        let reasoning_id = reasoning_item_id
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or_else(|| format!("reasoning_{}", Uuid::new_v4().simple()));
                         // Also publish to the event bus so the TUI live-renders it.
                         self.runtime.publish_event(
                             RuntimeEventKind::ItemUpdated,
                             Some(params.thread_id.clone()), Some(turn_id.clone()),
-                            json!({"itemId": format!("reasoning_{turn_id}"), "kind": ItemKind::ReasoningText, "delta": delta, "mode": "append"}),
+                            json!({"itemId": reasoning_id, "kind": ItemKind::ReasoningText, "delta": delta, "mode": "append"}),
                         ).await?;
                     }
                     ModelStreamEvent::ToolCalls(calls) => {
@@ -533,8 +542,11 @@ impl TurnExecutor {
             // ItemKind::ReasoningText is defined in the domain but was previously
             // never written — this wires it up so the full turn is reconstructable.
             if !reasoning_text.is_empty() {
+                let item_id = reasoning_item_id
+                    .take()
+                    .unwrap_or_else(|| format!("reasoning_{}", Uuid::new_v4().simple()));
                 let reasoning_item = ConversationItem {
-                    item_id: format!("reasoning_{turn_id}"),
+                    item_id,
                     thread_id: params.thread_id.clone(),
                     turn_id: turn_id.clone(),
                     created_at: now_seconds(),
