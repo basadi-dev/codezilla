@@ -38,11 +38,11 @@ impl TurnPhase {
 
 use self::context::TurnContext;
 use self::utils::{
-    already_read_directive, classify_turn_intent, derive_thread_title,
-    extract_plan_from_response, find_repetition_start, initial_read_budget, intent_directive,
-    is_degenerate_repetition, is_read_only_tool, progress_summary, recently_read_paths,
-    should_retry_no_tool_completion, thinking_instruction, user_requested_verification,
-    wants_verbose_repo_map, ProgressState, ReadKey, TurnIntent,
+    already_read_directive, classify_turn_intent, derive_thread_title, extract_plan_from_response,
+    find_repetition_start, initial_read_budget, intent_directive, is_degenerate_repetition,
+    is_read_only_tool, progress_summary, recently_read_paths, should_retry_no_tool_completion,
+    thinking_instruction, user_requested_verification, wants_verbose_repo_map, ProgressState,
+    ReadKey, TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
@@ -1020,8 +1020,7 @@ impl TurnExecutor {
                 total_read_only_rounds += 1;
                 // Use intent-aware budget instead of flat config value.
                 // Effective threshold still shrinks with each nudge.
-                let effective_read_only_limit =
-                    (read_budget >> total_nudges).max(1);
+                let effective_read_only_limit = (read_budget >> total_nudges).max(1);
                 tracing::debug!(
                     turn_id = %turn_id,
                     consecutive_read_only_rounds,

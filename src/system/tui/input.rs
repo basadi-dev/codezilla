@@ -244,6 +244,11 @@ async fn handle_composer_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<
         }
         (KeyCode::Enter, _) => {
             app.jump_transcript_to_bottom();
+            if app.autocomplete.is_active() {
+                if let Some(item) = app.autocomplete.selected_item().cloned() {
+                    app.composer.set_text(item.value);
+                }
+            }
             app.autocomplete.clear();
             app.submit_composer().await?
         }

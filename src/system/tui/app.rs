@@ -1541,13 +1541,18 @@ impl InteractiveApp {
             all.push(AutocompleteItem::simple(*cmd));
         }
 
-        // ── /model: current entry + presets from config ───────────────────────
         all.push(AutocompleteItem::simple("/model"));
         for preset in &cfg_models {
             let key = format!("{}/{}", preset.provider_id, preset.model_id);
             let value = format!("/model {key}");
             let marker = if key == cur_model_key { "  ←" } else { "" };
-            let label = format!("{value}{marker}");
+            let mods_str = preset
+                .modalities
+                .iter()
+                .map(|m| format!("{m:?}").to_lowercase())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let label = format!("{value}  [{mods_str}]{marker}");
             all.push(AutocompleteItem::labeled(value, label));
         }
 

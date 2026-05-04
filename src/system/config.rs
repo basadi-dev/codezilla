@@ -791,7 +791,7 @@ fn default_spec_config_json() -> Value {
             { "model_id": "deepseek-v4-flash:cloud", "provider_id": "ollama", "context_window": 1000000, "modalities": ["text"] },
             { "model_id": "deepseek-v4-pro:cloud", "provider_id": "ollama", "context_window": 1000000, "modalities": ["text"] },
             { "model_id": "claude-opus-4-5", "provider_id": "anthropic", "reasoning_effort": "medium", "modalities": ["text", "vision"] },
-            { "model_id": "gemma4:cloud", "provider_id": "ollama", "context_window": 256000, "modalities": ["text", "vision"] }
+            { "model_id": "gemma4:31b-cloud", "provider_id": "ollama", "context_window": 256000, "modalities": ["text", "vision"] }
         ],
         "features": {},
         "trusted_projects": []

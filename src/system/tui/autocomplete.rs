@@ -145,7 +145,6 @@ impl AutocompleteState {
     }
 
     /// The currently-selected item, if any.
-    #[allow(dead_code)] // public API surface; covered by tests, no live consumer yet
     pub fn selected_item(&self) -> Option<&AutocompleteItem> {
         self.suggestions.get(self.selected)
     }

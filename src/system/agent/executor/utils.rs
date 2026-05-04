@@ -1041,10 +1041,7 @@ pub(crate) fn extract_plan_from_response(text: &str) -> Vec<String> {
     for line in text.lines() {
         let trimmed = line.trim();
         let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("## plan")
-            || lower.starts_with("**plan")
-            || lower == "plan:"
-        {
+        if lower.starts_with("## plan") || lower.starts_with("**plan") || lower == "plan:" {
             in_plan = true;
             continue;
         }
@@ -1104,10 +1101,7 @@ pub(crate) fn progress_summary(state: &ProgressState<'_>) -> String {
         parts.push(format!("Recent actions: {}", recent.join(", ")));
     }
     if !state.changed_files.is_empty() {
-        parts.push(format!(
-            "Files changed: {}",
-            state.changed_files.join(", ")
-        ));
+        parts.push(format!("Files changed: {}", state.changed_files.join(", ")));
     }
     parts.push(format!(
         "Verified: {}",

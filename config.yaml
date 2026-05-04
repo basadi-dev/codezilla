@@ -36,7 +36,7 @@ models:
     provider_id: "anthropic"
     reasoning_effort: "medium"
     modalities: ["text", "vision"]
-  - model_id: "gemma4:cloud"
+  - model_id: "gemma4:31b-cloud"
     provider_id: "ollama"
     context_window: 256000
     modalities: ["text", "vision"]
