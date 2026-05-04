@@ -785,12 +785,13 @@ fn default_spec_config_json() -> Value {
             }
         },
         "models": [
-            { "model_id": "glm-5.1:cloud", "provider_id": "ollama", "context_window": 198000 },
-            { "model_id": "qwen3-coder-next:cloud", "provider_id": "ollama", "context_window": 256000 },
-            { "model_id": "kimi-k2.6:cloud", "provider_id": "ollama", "context_window": 256000 },
-            { "model_id": "deepseek-v4-flash:cloud", "provider_id": "ollama", "context_window": 1000000 },
-            { "model_id": "deepseek-v4-pro:cloud", "provider_id": "ollama", "context_window": 1000000 },
-            { "model_id": "claude-opus-4-5", "provider_id": "anthropic", "reasoning_effort": "medium" }
+            { "model_id": "glm-5.1:cloud", "provider_id": "ollama", "context_window": 198000, "modalities": ["text"] },
+            { "model_id": "qwen3-coder-next:cloud", "provider_id": "ollama", "context_window": 256000, "modalities": ["text"] },
+            { "model_id": "kimi-k2.6:cloud", "provider_id": "ollama", "context_window": 256000, "modalities": ["text", "vision"] },
+            { "model_id": "deepseek-v4-flash:cloud", "provider_id": "ollama", "context_window": 1000000, "modalities": ["text"] },
+            { "model_id": "deepseek-v4-pro:cloud", "provider_id": "ollama", "context_window": 1000000, "modalities": ["text"] },
+            { "model_id": "claude-opus-4-5", "provider_id": "anthropic", "reasoning_effort": "medium", "modalities": ["text", "vision"] },
+            { "model_id": "gemma4:cloud", "provider_id": "ollama", "context_window": 256000, "modalities": ["text", "vision"] }
         ],
         "features": {},
         "trusted_projects": []
@@ -819,7 +820,7 @@ fn default_log_file() -> String {
     "logs/codezilla.log".into()
 }
 
-// ── Environment variable overrides ────────────────────────────────────────────
+// ── Environment variable overrides ────────────────────────────────��───────────
 
 fn apply_env_overrides(llm: &mut LlmConfig) {
     let _ = dotenvy::dotenv();

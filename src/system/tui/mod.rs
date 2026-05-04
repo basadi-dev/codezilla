@@ -232,15 +232,23 @@ pub async fn run_interactive_tui(
 
                         // Priority 1: dragged file path (quoted / escaped / file://).
                         if let Some((path, mime)) = detect_dragged_image_path(text) {
-                            let fname = std::path::Path::new(&path)
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string();
-                            tracing::info!(path = %path, mime = %mime, "tui: attaching dragged image");
-                            app.composer.add_attachment(path, mime.to_string());
-                            app.status_message = format!("Attached image: {}", fname);
-                            app.error_message = None;
+                            if !app.current_model_supports_vision() {
+                                let ms = app.effective_model_settings();
+                                app.error_message = Some(format!(
+                                    "This model ({}) does not support vision (image) input",
+                                    ms.model_id
+                                ));
+                            } else {
+                                let fname = std::path::Path::new(&path)
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
+                                tracing::info!(path = %path, mime = %mime, "tui: attaching dragged image");
+                                app.composer.add_attachment(path, mime.to_string());
+                                app.status_message = format!("Attached image: {}", fname);
+                                app.error_message = None;
+                            }
                         // Priority 2: empty/whitespace bracketed paste — likely Cmd+V on
                         // macOS with image content in the clipboard. The terminal can't
                         // serialize image bytes into a paste event, so it sends nothing
@@ -266,7 +274,6 @@ pub async fn run_interactive_tui(
             }
         }
     }
-
     runtime.event_bus().unsubscribe(&subscriber_id);
     Ok(0)
 }
@@ -274,8 +281,15 @@ pub async fn run_interactive_tui(
 /// Try to attach an image from the system clipboard via `arboard`. Returns
 /// `true` on success. Used as a fallback when `Event::Paste` arrives empty
 /// (typical for Cmd+V on macOS terminals when the clipboard holds image data
-/// that can't be serialized into a bracketed-paste sequence).
 fn try_attach_clipboard_image(app: &mut InteractiveApp) -> bool {
+    if !app.current_model_supports_vision() {
+        let ms = app.effective_model_settings();
+        app.error_message = Some(format!(
+            "This model ({}) does not support vision (image) input",
+            ms.model_id
+        ));
+        return false;
+    }
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(c) => c,
         Err(e) => {
@@ -339,9 +353,6 @@ fn try_attach_clipboard_image(app: &mut InteractiveApp) -> bool {
 }
 
 /// Try to interpret pasted text as a draggable image file path.
-/// Returns `(absolute_path, mime_type)` only if the cleaned path actually
-/// points to a readable image file on disk. Handles quoting, backslash
-/// escapes, `file://` URLs, percent-encoding, and `~` expansion.
 pub(super) fn detect_dragged_image_path(raw: &str) -> Option<(String, &'static str)> {
     let candidate = clean_pasted_path(raw);
     if candidate.is_empty() || candidate.contains('\n') {

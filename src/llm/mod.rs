@@ -55,8 +55,8 @@ pub enum ContentPart {
     Text { text: String },
     Image { mime_type: String, data: String }, // base64-encoded
 }
-
 impl ContentPart {
+    #[allow(dead_code)]
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
@@ -67,7 +67,6 @@ impl ContentPart {
         }
     }
 }
-
 /// A single message in the conversation. Models the Go `agent.Message` type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {

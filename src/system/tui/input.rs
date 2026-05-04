@@ -395,8 +395,32 @@ fn composer_cursor_on_first_visual_row(app: &InteractiveApp) -> bool {
 }
 
 /// Paste from the system clipboard. Prefers image content (attaches as an
-/// image); otherwise falls back to text content (inserted into the composer).
 fn paste_from_clipboard(app: &mut InteractiveApp) {
+    // Check if the current model supports images before attempting any image attachment.
+    if !app.current_model_supports_vision() {
+        // Fall back to text paste only — skip image handling entirely.
+        let mut clipboard = match arboard::Clipboard::new() {
+            Ok(c) => c,
+            Err(e) => {
+                app.error_message = Some(format!("Clipboard error: {e}"));
+                return;
+            }
+        };
+        match clipboard.get_text() {
+            Ok(text) if !text.is_empty() => {
+                let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                let trimmed = normalized.trim_end_matches('\n');
+                app.composer.insert_str(trimmed);
+            }
+            _ => {
+                app.error_message = Some(format!(
+                    "This model ({}) does not support vision (image) input",
+                    app.effective_model_settings().model_id
+                ));
+            }
+        }
+        return;
+    }
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(c) => c,
         Err(e) => {

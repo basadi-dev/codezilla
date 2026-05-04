@@ -1115,15 +1115,26 @@ impl InteractiveApp {
         }
 
         self.error_message = None;
-
         // Detect inline image file paths in the text and promote them to attachments.
         // Lines that are bare image paths (or the only content) are extracted;
         // the remaining text becomes the textual part of the message.
         let (text_part, extra_attachments) = extract_image_paths(&raw);
         let all_attachments: Vec<&ComposerAttachment> =
             attachments.iter().chain(extra_attachments.iter()).collect();
+
+        // If images are attached but the model doesn't support them, reject the submission.
+        if !all_attachments.is_empty() && !self.current_model_supports_vision() {
+            let ms = self.effective_model_settings();
+            self.error_message = Some(format!(
+                "This model ({}) does not support vision (image) input",
+                ms.model_id
+            ));
+            // Put the text back in the composer so the user doesn't lose it.
+            self.composer.set_text(raw);
+            return Ok(());
+        }
+
         // Bundle all images with the text into a single UserInput so the
-        // model receives them as one multimodal message.
         let images: Vec<super::super::domain::UserInputImage> = all_attachments
             .iter()
             .map(|a| super::super::domain::UserInputImage {
@@ -1483,6 +1494,16 @@ impl InteractiveApp {
         }
     }
 
+    /// Returns true if the current model supports image input.
+    pub fn current_model_supports_vision(&self) -> bool {
+        let ms = self.effective_model_settings();
+        let cfg = self.runtime.effective_config();
+        cfg.models
+            .iter()
+            .find(|m| m.model_id == ms.model_id)
+            .map(|m| m.supports_vision())
+            .unwrap_or(false)
+    }
     pub fn update_autocomplete(&mut self) {
         let text = self.composer.trimmed_text();
         if !text.starts_with('/') {

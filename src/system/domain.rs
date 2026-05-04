@@ -292,7 +292,6 @@ impl ReasoningEffort {
         !matches!(self, ReasoningEffort::Auto | ReasoningEffort::Off)
     }
 }
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningCapability {
@@ -300,6 +299,21 @@ pub enum ReasoningCapability {
     Boolean,
     None,
     Levels,
+}
+
+/// Input modalities a model supports.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelModality {
+    Text,
+    Vision,
+}
+
+/// Default modalities: text-only, since most models support text.
+impl Default for ModelModality {
+    fn default() -> Self {
+        Self::Text
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,6 +327,20 @@ pub struct ModelPreset {
     pub reasoning_capability: Option<ReasoningCapability>,
     #[serde(default)]
     pub context_window: Option<usize>,
+    /// Input modalities this model supports (e.g. text, vision).
+    #[serde(default = "default_model_modalities")]
+    pub modalities: Vec<ModelModality>,
+}
+
+fn default_model_modalities() -> Vec<ModelModality> {
+    vec![ModelModality::Text]
+}
+
+impl ModelPreset {
+    /// Returns true if this model supports vision (image) input.
+    pub fn supports_vision(&self) -> bool {
+        self.modalities.contains(&ModelModality::Vision)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
