@@ -23,6 +23,7 @@ use super::super::domain::{
     STATUS_NOT_SPAWNED, STATUS_TIMED_OUT, STATUS_TIMEOUT, ThreadMetadata, TokenUsage, ToolResult,
     TurnStatus, UserInput,
 };
+use super::super::agent::model_gateway::estimate_items_tokens;
 use super::super::error as cod_error;
 use super::super::runtime::{
     ConversationRuntime, ThreadCompactParams, ThreadCompactResult, ThreadForkParams,
@@ -478,13 +479,12 @@ impl InteractiveApp {
         match rx.try_recv() {
             Ok(result) => {
                 self.pending_compact = None;
-                // Preserve token usage before reloading thread (which resets it)
-                let preserved_usage = self.token_usage.clone();
                 match result {
                     Ok(r) => {
                         self.load_thread(&self.current_thread_id.clone()).await?;
-                        // Restore token usage to show total since last compaction
-                        self.token_usage = preserved_usage;
+                        // After compaction, re-estimate context usage from the
+                        // compacted items so ctx% reflects the reduced context.
+                        self.recalculate_context_from_items().await;
                         let done_msg = format!(
                             "✓ Compacted — {} item(s) replaced with summary",
                             r.items_removed
@@ -502,7 +502,6 @@ impl InteractiveApp {
                     }
                     Err(e) => {
                         self.load_thread(&self.current_thread_id.clone()).await?;
-                        self.token_usage = preserved_usage;
                         let msg = format!("Compact failed: {e}");
                         self.error_message = Some(msg.clone());
                         let failed_at = super::super::domain::now_millis();
@@ -524,6 +523,24 @@ impl InteractiveApp {
                 Ok(true)
             }
         }
+    }
+
+    /// Recalculate `latest_prompt_input_tokens` from the current persisted items.
+    /// Called after compaction to ensure the status bar ctx% reflects the
+    /// reduced context window usage.
+    async fn recalculate_context_from_items(&mut self) {
+        let Ok(persisted) = self
+            .runtime
+            .read_thread(ThreadReadParams {
+                thread_id: self.current_thread_id.clone(),
+            })
+            .await
+        else {
+            return;
+        };
+        let estimated = estimate_items_tokens(&persisted.thread.items) as i64;
+        self.latest_prompt_input_tokens = estimated;
+        self.streaming_turn_usage = TokenUsage::default();
     }
 
     // ── Drag-to-select helpers ────────────────────────────────────────────────
@@ -1866,26 +1883,27 @@ impl InteractiveApp {
                     .unwrap_or("Compacting…");
 
                 if !is_background_compaction_status_event(&event, &self.current_thread_id) {
-                    if status != "started" {
-                        self.status_message = msg.to_string();
-                    }
+                    // Always update the status message (including "started")
+                    // so the user sees "Compacting…" similar to "Thinking…".
+                    self.status_message = msg.to_string();
                     return Ok(());
                 }
 
                 // Auto-compaction runs out-of-band and mutates persisted
                 // thread items. Reload the current thread on completion so the
                 // transcript and caches reflect the compacted state
-                // immediately.
+                // immediately, with fresh token counts and ctx%.
                 if status == "completed"
                     && event.thread_id.as_deref() == Some(&self.current_thread_id)
                 {
-                    let preserved_usage = self.token_usage.clone();
                     self.load_thread(&self.current_thread_id.clone()).await?;
-                    self.token_usage = preserved_usage;
+                    // Re-estimate context usage from the compacted items
+                    // so ctx% reflects the reduced context.
+                    self.recalculate_context_from_items().await;
                 }
-                if status != "started" {
-                    self.status_message = msg.to_string();
-                }
+                // Always show status (including "started") so
+                // "Compacting…" is visible like "Thinking…".
+                self.status_message = msg.to_string();
                 let kind = if status == "failed" {
                     EntryKind::Error
                 } else {

@@ -626,6 +626,12 @@ fn is_expected_llm_item_kind(kind: ItemKind) -> bool {
     )
 }
 
+/// Estimated total token count across a slice of conversation items.
+/// Used by the TUI to recalculate `latest_prompt_input_tokens` after compaction.
+pub fn estimate_items_tokens(items: &[ConversationItem]) -> usize {
+    items.iter().map(item_token_estimate).sum()
+}
+
 /// Returns estimated context usage as a percentage of the given `prompt_budget`.
 /// Used by auto-compaction to decide when to compact.
 pub fn estimate_items_token_pct(items: &[ConversationItem], prompt_budget: usize) -> f64 {
