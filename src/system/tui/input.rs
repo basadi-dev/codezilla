@@ -109,7 +109,17 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
         (KeyCode::Char('u'), KeyModifiers::CONTROL) if app.focus == FocusPane::Composer => {
             handle_composer_key(app, key).await?;
         }
-
+        // Ctrl+V / Cmd+V — paste from system clipboard. Image content is attached
+        // as an image; text content is inserted into the composer. Most macOS
+        // terminals intercept Cmd+V themselves and emit a bracketed-paste event
+        // instead of forwarding the keypress; the SUPER branch only fires in
+        // terminals configured to forward Cmd combos (iTerm2, Kitty, etc.).
+        (KeyCode::Char('v'), m)
+            if app.focus == FocusPane::Composer
+                && (m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER)) =>
+        {
+            paste_from_clipboard(app);
+        }
         // ── Global scroll — works in ANY focus pane ───────────────────────
         // Ctrl+U / Ctrl+D  →  half-page scroll (12 lines)
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
@@ -164,7 +174,28 @@ pub async fn handle_key(app: &mut InteractiveApp, key: KeyEvent) -> Result<()> {
         }
 
         _ => match app.focus {
-            FocusPane::Transcript => handle_transcript_key(app, key),
+            FocusPane::Transcript => {
+                // If the user types a printable character while focus is on
+                // the transcript pane (typically because they hit Tab/Ctrl+I
+                // by accident), auto-switch focus to the composer and process
+                // the keystroke there. Without this the keystroke is silently
+                // dropped and it looks like the composer is "frozen".
+                let is_printable = matches!(key.code, KeyCode::Char(_))
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::SUPER);
+                if is_printable
+                    || matches!(
+                        key.code,
+                        KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter
+                    )
+                {
+                    app.focus = FocusPane::Composer;
+                    handle_composer_key(app, key).await?;
+                } else {
+                    handle_transcript_key(app, key);
+                }
+            }
             FocusPane::Composer => handle_composer_key(app, key).await?,
         },
     }
@@ -361,4 +392,83 @@ fn composer_cursor_on_first_visual_row(app: &InteractiveApp) -> bool {
         .composer
         .visual_cursor_row_col(first_width.max(1), continuation_width.max(1));
     row == 0
+}
+
+/// Paste from the system clipboard. Prefers image content (attaches as an
+/// image); otherwise falls back to text content (inserted into the composer).
+fn paste_from_clipboard(app: &mut InteractiveApp) {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            app.error_message = Some(format!("Clipboard error: {e}"));
+            return;
+        }
+    };
+
+    // 1) Try image first.
+    if let Ok(img_data) = clipboard.get_image() {
+        let dir = std::env::temp_dir().join("codezilla_pasted_images");
+        let _ = std::fs::create_dir_all(&dir);
+        let filename = format!("paste_{}.png", uuid::Uuid::new_v4().simple());
+        let path = dir.join(&filename);
+
+        let img = image::RgbaImage::from_raw(
+            img_data.width as u32,
+            img_data.height as u32,
+            img_data.bytes.as_ref().to_vec(),
+        );
+        match img {
+            Some(img) => match img.save(&path) {
+                Ok(()) => {
+                    let path_str = path.to_string_lossy().to_string();
+                    tracing::info!(path = %path_str, "tui: attaching pasted clipboard image");
+                    app.composer
+                        .add_attachment(path_str, "image/png".to_string());
+                    app.status_message = format!("Attached image: {}", filename);
+                    app.error_message = None;
+                    return;
+                }
+                Err(e) => {
+                    app.error_message = Some(format!("Failed to save pasted image: {e}"));
+                    return;
+                }
+            },
+            None => {
+                app.error_message = Some("Failed to decode clipboard image data".into());
+                return;
+            }
+        }
+    }
+
+    // 2) Fall back to text. If the text looks like an image file path on disk,
+    //    treat it as a drag-and-drop attachment; otherwise insert as text.
+    match clipboard.get_text() {
+        Ok(text) if !text.is_empty() => {
+            if let Some((path, mime)) = super::detect_dragged_image_path(&text) {
+                let fname = std::path::Path::new(&path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                tracing::info!(path = %path, mime = %mime, "tui: attaching pasted image path");
+                app.composer.add_attachment(path, mime.to_string());
+                app.status_message = format!("Attached image: {}", fname);
+                app.error_message = None;
+            } else {
+                let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                let trimmed = normalized.trim_end_matches('\n');
+                app.composer.insert_str(trimmed);
+                app.status_message = "Pasted text from clipboard".into();
+                app.error_message = None;
+            }
+        }
+        Ok(_) => {
+            app.status_message = "Clipboard is empty".into();
+            app.error_message = None;
+        }
+        Err(_) => {
+            app.status_message = "Clipboard contains no text or image".into();
+            app.error_message = None;
+        }
+    }
 }

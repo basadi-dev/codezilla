@@ -31,10 +31,36 @@ fn build_gemini_messages(messages: &[Message]) -> (Option<String>, Vec<Value>) {
                 system = Some(msg.content.clone());
             }
             Role::User => {
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{ "text": msg.content }]
-                }));
+                // Gemini vision: when images are present, serialize as parts with inline_data.
+                if msg.has_images() {
+                    let mut parts: Vec<Value> = vec![];
+                    if !msg.content.is_empty() {
+                        parts.push(json!({ "text": msg.content }));
+                    }
+                    for part in &msg.content_parts {
+                        match part {
+                            crate::llm::ContentPart::Text { text } => {
+                                if !text.is_empty() {
+                                    parts.push(json!({ "text": text }));
+                                }
+                            }
+                            crate::llm::ContentPart::Image { mime_type, data } => {
+                                parts.push(json!({
+                                    "inline_data": {
+                                        "mime_type": mime_type,
+                                        "data": data,
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                    contents.push(json!({ "role": "user", "parts": parts }));
+                } else {
+                    contents.push(json!({
+                        "role": "user",
+                        "parts": [{ "text": msg.content }]
+                    }));
+                }
             }
             Role::Assistant => {
                 if !msg.tool_calls.is_empty() {

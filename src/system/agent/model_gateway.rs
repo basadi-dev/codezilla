@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -13,7 +14,6 @@ use crate::system::domain::{
     ToolProviderKind,
 };
 use crate::system::error as cod_error;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDescription {
@@ -745,21 +745,111 @@ pub fn build_llm_messages(
     messages
 }
 
+/// Infer MIME type from file extension.
+fn infer_mime_type_from_path(path: &str) -> String {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        _ => "image/png", // sensible default
+    }
+    .to_string()
+}
+
+/// Pull image paths out of a ConversationItem payload. Reads both the new
+/// `imagePaths` array form and the legacy single-path forms (`imagePath` for
+/// UserMessage, `path` for UserAttachment) so old persisted threads still work.
+fn collect_image_paths(payload: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(arr) = payload.get("imagePaths").and_then(Value::as_array) {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                out.push(s.to_string());
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Some(s) = payload.get("imagePath").and_then(Value::as_str) {
+            out.push(s.to_string());
+        }
+    }
+    if out.is_empty() {
+        if let Some(s) = payload.get("path").and_then(Value::as_str) {
+            out.push(s.to_string());
+        }
+    }
+    out
+}
+
+/// Read each image file from disk and base64-encode it as an `llm::ContentPart`.
+/// Files that fail to read are silently skipped; a warning is logged so the
+/// failure is visible without poisoning the LLM message.
+fn load_image_parts(paths: &[String]) -> Vec<llm::ContentPart> {
+    let mut parts = Vec::with_capacity(paths.len());
+    for path in paths {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let mime_type = infer_mime_type_from_path(path);
+                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                tracing::info!(
+                    path = %path,
+                    bytes = bytes.len(),
+                    mime = %mime_type,
+                    "item_to_llm_message: image loaded for vision"
+                );
+                parts.push(llm::ContentPart::image(mime_type, data));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %e,
+                    "item_to_llm_message: failed to read image file, skipping"
+                );
+            }
+        }
+    }
+    parts
+}
+
 /// Convert a single `ConversationItem` to an `llm::Message`, returning `None`
 /// for item kinds that have no LLM representation (Status, Error, etc.).
 fn item_to_llm_message(item: &ConversationItem) -> Option<llm::Message> {
     match item.kind {
         ItemKind::UserMessage => {
             let text = item.payload.get("text").and_then(Value::as_str)?;
-            Some(llm::Message::user(text.to_string()))
+            let image_paths = collect_image_paths(&item.payload);
+            if image_paths.is_empty() {
+                Some(llm::Message::user(text.to_string()))
+            } else {
+                let parts = load_image_parts(&image_paths);
+                Some(llm::Message::user_with_images(text.to_string(), parts))
+            }
         }
         ItemKind::SystemMessage => {
             let text = item.payload.get("text").and_then(Value::as_str)?;
             Some(llm::Message::user(format!("[SYSTEM] {text}")))
         }
         ItemKind::UserAttachment => {
-            let path = item.payload.get("path").and_then(Value::as_str)?;
-            Some(llm::Message::user(format!("[image:{}]", path)))
+            let image_paths = collect_image_paths(&item.payload);
+            if image_paths.is_empty() {
+                return None;
+            }
+            let parts = load_image_parts(&image_paths);
+            let label = if image_paths.len() == 1 {
+                format!("[image: {}]", image_paths[0])
+            } else {
+                format!("[{} images attached]", image_paths.len())
+            };
+            Some(llm::Message::user_with_images(label, parts))
         }
         ItemKind::AgentMessage | ItemKind::ReasoningSummary => {
             let text = item.payload.get("text").and_then(Value::as_str)?;
@@ -770,6 +860,7 @@ fn item_to_llm_message(item: &ConversationItem) -> Option<llm::Message> {
             Some(llm::Message {
                 role: llm::Role::Assistant,
                 content: String::new(),
+                content_parts: vec![],
                 tool_calls: vec![llm::ToolCall {
                     id: tc.tool_call_id,
                     function: llm::FunctionCall {
@@ -789,6 +880,7 @@ fn item_to_llm_message(item: &ConversationItem) -> Option<llm::Message> {
             Some(llm::Message {
                 role: llm::Role::Tool,
                 content: String::new(),
+                content_parts: vec![],
                 tool_calls: Vec::new(),
                 tool_result: Some(llm::ToolResult {
                     tool_call_id: tr.tool_call_id,

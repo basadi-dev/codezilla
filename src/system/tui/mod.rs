@@ -229,7 +229,33 @@ pub async fn run_interactive_tui(
                         // Strip trailing newlines to prevent accidental submission
                         // when copying from code blocks or terminal output.
                         let text = text.trim_end_matches('\n');
-                        app.composer.insert_str(text);
+
+                        // Priority 1: dragged file path (quoted / escaped / file://).
+                        if let Some((path, mime)) = detect_dragged_image_path(text) {
+                            let fname = std::path::Path::new(&path)
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
+                            tracing::info!(path = %path, mime = %mime, "tui: attaching dragged image");
+                            app.composer.add_attachment(path, mime.to_string());
+                            app.status_message = format!("Attached image: {}", fname);
+                            app.error_message = None;
+                        // Priority 2: empty/whitespace bracketed paste — likely Cmd+V on
+                        // macOS with image content in the clipboard. The terminal can't
+                        // serialize image bytes into a paste event, so it sends nothing
+                        // useful. Pull the image out of arboard ourselves.
+                        } else if text.trim().is_empty() {
+                            tracing::info!(
+                                len = text.len(),
+                                "tui: empty Event::Paste received — falling back to arboard image read"
+                            );
+                            // try_attach_clipboard_image always sets a status message,
+                            // success or failure, so the user sees what happened.
+                            try_attach_clipboard_image(&mut app);
+                        } else {
+                            app.composer.insert_str(text);
+                        }
                         dirty = true;
                     }
                 }
@@ -243,4 +269,186 @@ pub async fn run_interactive_tui(
 
     runtime.event_bus().unsubscribe(&subscriber_id);
     Ok(0)
+}
+
+/// Try to attach an image from the system clipboard via `arboard`. Returns
+/// `true` on success. Used as a fallback when `Event::Paste` arrives empty
+/// (typical for Cmd+V on macOS terminals when the clipboard holds image data
+/// that can't be serialized into a bracketed-paste sequence).
+fn try_attach_clipboard_image(app: &mut InteractiveApp) -> bool {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "clipboard: failed to open system clipboard");
+            app.status_message = format!("Clipboard open failed: {e}");
+            return false;
+        }
+    };
+    let img_data = match clipboard.get_image() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "clipboard: get_image returned no image (clipboard may hold text-only or an unsupported format)"
+            );
+            app.status_message = format!("No image in clipboard ({e})");
+            return false;
+        }
+    };
+    tracing::info!(
+        width = img_data.width,
+        height = img_data.height,
+        bytes = img_data.bytes.len(),
+        "clipboard: read image data"
+    );
+
+    let dir = std::env::temp_dir().join("codezilla_pasted_images");
+    let _ = std::fs::create_dir_all(&dir);
+    let filename = format!("paste_{}.png", uuid::Uuid::new_v4().simple());
+    let path = dir.join(&filename);
+
+    let img = match image::RgbaImage::from_raw(
+        img_data.width as u32,
+        img_data.height as u32,
+        img_data.bytes.as_ref().to_vec(),
+    ) {
+        Some(i) => i,
+        None => {
+            tracing::warn!(
+                width = img_data.width,
+                height = img_data.height,
+                bytes = img_data.bytes.len(),
+                "clipboard: RgbaImage::from_raw rejected the buffer (size mismatch?)"
+            );
+            app.status_message = "Failed to decode clipboard image (buffer size mismatch)".into();
+            return false;
+        }
+    };
+    if let Err(e) = img.save(&path) {
+        tracing::warn!(error = %e, "clipboard: failed to write temp PNG");
+        app.status_message = format!("Failed to save pasted image: {e}");
+        return false;
+    }
+    let path_str = path.to_string_lossy().to_string();
+    tracing::info!(path = %path_str, "tui: attaching pasted clipboard image");
+    app.composer
+        .add_attachment(path_str, "image/png".to_string());
+    app.status_message = format!("Attached image: {}", filename);
+    app.error_message = None;
+    true
+}
+
+/// Try to interpret pasted text as a draggable image file path.
+/// Returns `(absolute_path, mime_type)` only if the cleaned path actually
+/// points to a readable image file on disk. Handles quoting, backslash
+/// escapes, `file://` URLs, percent-encoding, and `~` expansion.
+pub(super) fn detect_dragged_image_path(raw: &str) -> Option<(String, &'static str)> {
+    let candidate = clean_pasted_path(raw);
+    if candidate.is_empty() || candidate.contains('\n') {
+        return None;
+    }
+    let lower = candidate.to_lowercase();
+    let mime = if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".bmp") {
+        "image/bmp"
+    } else if lower.ends_with(".tiff") || lower.ends_with(".tif") {
+        "image/tiff"
+    } else if lower.ends_with(".ico") {
+        "image/x-icon"
+    } else {
+        return None;
+    };
+    // Require the file to actually exist — otherwise we'd silently attach a
+    // bogus path and the LLM would receive text-only with no image.
+    if !std::path::Path::new(&candidate).is_file() {
+        tracing::warn!(
+            path = %candidate,
+            "tui: dragged image path does not exist on disk; pasting as text instead"
+        );
+        return None;
+    }
+    Some((candidate, mime))
+}
+
+/// Normalize a pasted file path: strip surrounding quotes, decode `file://`
+/// URIs, percent-decode, unescape backslash-escaped characters, and expand
+/// a leading `~`. Returns the cleaned path string.
+fn clean_pasted_path(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+
+    // Strip matching surrounding quotes (single or double).
+    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
+    {
+        s = s[1..s.len() - 1].to_string();
+    }
+
+    // Strip file:// URI prefix. RFC 8089 allows "file:" or "file:///"
+    // (third slash is the absolute-path separator).
+    if let Some(rest) = s.strip_prefix("file://") {
+        s = rest.to_string();
+    } else if let Some(rest) = s.strip_prefix("file:") {
+        s = rest.to_string();
+    }
+
+    // Percent-decode (e.g. %20 → space). Keep it simple — only decode
+    // valid two-hex-digit escapes; leave malformed ones as-is.
+    s = percent_decode(&s);
+
+    // Unescape backslash-escaped characters. macOS terminals escape spaces
+    // and shell metacharacters when dragging files: `/foo\ bar.png`.
+    s = unescape_backslashes(&s);
+
+    // Expand leading `~` to $HOME.
+    if let Some(rest) = s.strip_prefix('~') {
+        if rest.is_empty() || rest.starts_with('/') {
+            if let Ok(home) = std::env::var("HOME") {
+                s = format!("{home}{rest}");
+            }
+        }
+    }
+
+    s
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+fn unescape_backslashes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }

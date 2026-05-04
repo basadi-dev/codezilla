@@ -21,8 +21,7 @@ use crate::system::agent::EventFilter;
 use crate::system::domain::{
     ApprovalPolicy, ConversationItem, ItemKind, PermissionProfile, RuntimeEventKind, SurfaceKind,
     ThreadId, ToolCall, ToolDefinition, ToolExecutionContext, ToolListingContext, ToolProviderKind,
-    ToolResult, TurnId, TurnStatus, UserInput,
-    STATUS_INTERRUPTED, STATUS_TIMEOUT,
+    ToolResult, TurnId, TurnStatus, UserInput, STATUS_INTERRUPTED, STATUS_TIMEOUT,
 };
 use crate::system::runtime::{
     ConversationRuntime, ThreadStartParams, TurnInterruptParams, TurnStartParams,

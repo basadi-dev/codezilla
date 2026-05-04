@@ -23,7 +23,35 @@ fn build_anthropic_messages(messages: &[Message]) -> (Option<String>, Vec<Value>
                 system_prompt = Some(msg.content.clone());
             }
             Role::User => {
-                msgs.push(json!({ "role": "user", "content": msg.content }));
+                // Anthropic vision: when images are present, serialize as content array.
+                if msg.has_images() {
+                    let mut parts: Vec<Value> = vec![];
+                    if !msg.content.is_empty() {
+                        parts.push(json!({ "type": "text", "text": msg.content }));
+                    }
+                    for part in &msg.content_parts {
+                        match part {
+                            crate::llm::ContentPart::Text { text } => {
+                                if !text.is_empty() {
+                                    parts.push(json!({ "type": "text", "text": text }));
+                                }
+                            }
+                            crate::llm::ContentPart::Image { mime_type, data } => {
+                                parts.push(json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": mime_type,
+                                        "data": data,
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                    msgs.push(json!({ "role": "user", "content": parts }));
+                } else {
+                    msgs.push(json!({ "role": "user", "content": msg.content }));
+                }
             }
             Role::Assistant => {
                 let mut entry = json!({ "role": "assistant", "content": msg.content });

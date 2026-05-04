@@ -17,8 +17,8 @@ use super::{
 };
 use crate::system::agent::TurnExecutor;
 use crate::system::domain::{
-    now_seconds, ApprovalDecision, ApprovalResolution, KEY_TOOL_CALL_ID, PrefixRule,
-    RuntimeEventKind, SurfaceKind, ThreadStatus, TokenUsage, TurnMetadata, TurnStatus,
+    now_seconds, ApprovalDecision, ApprovalResolution, PrefixRule, RuntimeEventKind, SurfaceKind,
+    ThreadStatus, TokenUsage, TurnMetadata, TurnStatus, KEY_TOOL_CALL_ID,
 };
 
 impl ConversationRuntime {

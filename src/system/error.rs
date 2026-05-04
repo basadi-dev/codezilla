@@ -268,7 +268,10 @@ pub fn humanize(raw: &str, kind: ErrorKind) -> String {
 /// The payload is a JSON `Value`.  We look for a `"message"` string field;
 /// if absent we pretty-print the whole value.
 pub fn humanize_warning(payload: &serde_json::Value) -> String {
-    if let Some(msg) = payload.get(super::domain::KEY_MESSAGE).and_then(|v| v.as_str()) {
+    if let Some(msg) = payload
+        .get(super::domain::KEY_MESSAGE)
+        .and_then(|v| v.as_str())
+    {
         return msg.to_string();
     }
     // Flatten a simple string value

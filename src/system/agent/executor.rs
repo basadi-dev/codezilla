@@ -21,8 +21,8 @@ use self::utils::{
     wants_verbose_repo_map, ReadKey, TurnIntent,
 };
 use crate::system::domain::{
-    now_seconds, ConversationItem, FileChangeSummary, ItemKind, KEY_TEXT, RuntimeEventKind,
-    ThreadStatus, TokenUsage, ToolCall, ToolResult, TurnMetrics, TurnStatus, UserInput,
+    now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
+    TokenUsage, ToolCall, ToolResult, TurnMetrics, TurnStatus, UserInput, KEY_TEXT,
 };
 use crate::system::error as cod_error;
 use crate::system::runtime::RepoMapVerbosity;
@@ -1026,43 +1026,58 @@ impl TurnExecutor {
         turn_id: &str,
         input: &UserInput,
     ) -> Result<()> {
-        if let Some(text) = &input.text {
-            self.persist_turn_item(ConversationItem {
-                item_id: format!("item_{}", Uuid::new_v4().simple()),
-                thread_id: thread_id.into(),
-                turn_id: turn_id.into(),
-                created_at: now_seconds(),
-                kind: ItemKind::UserMessage,
-                payload: json!({ "text": text.text }),
-            })
-            .await?;
+        let text = input.text.as_ref().map(|t| t.text.clone());
+        let image_paths: Vec<String> = input.images.iter().map(|i| i.path.clone()).collect();
 
-            // ── Auto-title: set thread title from first user message ──────────
-            // Only fires once — when the thread still has no title.
-            if let Some(thread) = self.runtime.load_thread(thread_id).await? {
-                let mut guard = thread.lock().await;
-                if guard.metadata.title.is_none() {
-                    let title = derive_thread_title(&text.text);
-                    guard.metadata.title = Some(title);
-                    guard.metadata.updated_at = now_seconds();
-                    let _ = self
-                        .runtime
-                        .inner
-                        .persistence_manager
-                        .update_thread(&guard.metadata);
-                }
-            }
+        if text.is_none() && image_paths.is_empty() {
+            return Ok(());
         }
-        if let Some(image) = &input.image {
-            self.persist_turn_item(ConversationItem {
+
+        // Persist text + (zero or more) images as a single UserMessage so they
+        // become one multimodal LLM message. If there is no text, persist as a
+        // UserAttachment for back-compat with surfaces that filter on item kind.
+        let item = if text.is_none() && !image_paths.is_empty() {
+            ConversationItem {
                 item_id: format!("item_{}", Uuid::new_v4().simple()),
                 thread_id: thread_id.into(),
                 turn_id: turn_id.into(),
                 created_at: now_seconds(),
                 kind: ItemKind::UserAttachment,
-                payload: json!({ "path": image.path }),
-            })
-            .await?;
+                payload: json!({ "imagePaths": image_paths }),
+            }
+        } else {
+            let mut payload = json!({ "text": text.clone().unwrap_or_default() });
+            if !image_paths.is_empty() {
+                payload["imagePaths"] = json!(image_paths);
+            }
+            ConversationItem {
+                item_id: format!("item_{}", Uuid::new_v4().simple()),
+                thread_id: thread_id.into(),
+                turn_id: turn_id.into(),
+                created_at: now_seconds(),
+                kind: ItemKind::UserMessage,
+                payload,
+            }
+        };
+        self.persist_turn_item(item).await?;
+
+        // ── Auto-title: set thread title from first user message ──────────
+        if let Some(text_str) = text.as_deref() {
+            if !text_str.is_empty() {
+                if let Some(thread) = self.runtime.load_thread(thread_id).await? {
+                    let mut guard = thread.lock().await;
+                    if guard.metadata.title.is_none() {
+                        let title = derive_thread_title(text_str);
+                        guard.metadata.title = Some(title);
+                        guard.metadata.updated_at = now_seconds();
+                        let _ = self
+                            .runtime
+                            .inner
+                            .persistence_manager
+                            .update_thread(&guard.metadata);
+                    }
+                }
+            }
         }
         Ok(())
     }

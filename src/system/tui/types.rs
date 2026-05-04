@@ -10,10 +10,9 @@ use super::markdown::{highlight_code_line, lang_for_path, md_to_lines};
 
 use crate::system::domain::PendingApproval;
 use crate::system::domain::{
-    ConversationItem, ItemKind, ThreadMetadata,
-    KEY_ARGUMENTS, KEY_ERROR, KEY_ERROR_MESSAGE, KEY_KIND, KEY_MESSAGE, KEY_OUTPUT, KEY_REASON,
-    KEY_RESULT, KEY_STATUS, KEY_TEXT, KEY_THREAD_ID, KEY_THREAD_ID_SNAKE, KEY_TOOL_CALL_ID,
-    KEY_TOOL_NAME, KEY_TURN_ID, KEY_TURN_ID_SNAKE,
+    ConversationItem, ItemKind, ThreadMetadata, KEY_ARGUMENTS, KEY_ERROR, KEY_ERROR_MESSAGE,
+    KEY_KIND, KEY_MESSAGE, KEY_OUTPUT, KEY_REASON, KEY_RESULT, KEY_STATUS, KEY_TEXT, KEY_THREAD_ID,
+    KEY_THREAD_ID_SNAKE, KEY_TOOL_CALL_ID, KEY_TOOL_NAME, KEY_TURN_ID, KEY_TURN_ID_SNAKE,
     LABEL_ASSISTANT, LABEL_ERROR, LABEL_SYSTEM, LABEL_THINKING, LABEL_TOOL_FALLBACK, LABEL_USER,
     STATUS_COMPLETED, STATUS_FAILED, STATUS_INTERRUPTED, STATUS_NOT_SPAWNED, STATUS_TIMED_OUT,
     STATUS_TIMEOUT,
@@ -175,6 +174,14 @@ fn paste_placeholder(char_count: usize) -> String {
     format!("[pasted {char_count} chars]")
 }
 
+/// An image attachment in the composer, stored as a file path.
+/// When submitted, the file is read and base64-encoded for the LLM.
+#[derive(Debug, Clone)]
+pub struct ComposerAttachment {
+    pub path: String,
+    #[allow(dead_code)]
+    pub mime_type: String,
+}
 #[derive(Debug, Default, Clone)]
 pub struct ComposerState {
     pub chars: Vec<char>,
@@ -182,6 +189,8 @@ pub struct ComposerState {
     /// Holds the full text of a large paste that was replaced by a placeholder.
     /// `take_text()` splices it back before returning the final string.
     pasted_text: Option<String>,
+    /// Image attachments to send alongside the text.
+    pub attachments: Vec<ComposerAttachment>,
 }
 
 impl ComposerState {
@@ -189,10 +198,11 @@ impl ComposerState {
         self.chars = text.chars().collect();
         self.cursor = self.chars.len();
         self.pasted_text = None;
+        self.attachments.clear();
     }
 
     pub fn is_empty(&self) -> bool {
-        self.chars.is_empty()
+        self.chars.is_empty() && self.attachments.is_empty()
     }
 
     pub fn trimmed_text(&self) -> String {
@@ -205,10 +215,12 @@ impl ComposerState {
 
     /// Clears the composer and returns the final text, expanding any paste
     /// placeholder back to the original full content before returning.
+    /// Also clears attachments (call `take_attachments` first if you need them).
     pub fn take_text(&mut self) -> String {
         let displayed = self.text();
         self.chars.clear();
         self.cursor = 0;
+        self.attachments.clear();
 
         let text = if let Some(real) = self.pasted_text.take() {
             // Replace the placeholder token with the stored real text.
@@ -219,6 +231,25 @@ impl ComposerState {
         };
 
         text
+    }
+
+    /// Take all attachments, clearing them from the composer.
+    pub fn take_attachments(&mut self) -> Vec<ComposerAttachment> {
+        std::mem::take(&mut self.attachments)
+    }
+
+    /// Add an image attachment and insert a numbered marker at the cursor.
+    pub fn add_attachment(&mut self, path: String, mime_type: String) {
+        let marker_num = self.attachments.len() + 1;
+        let placeholder: Vec<char> = format!("[#image {marker_num}]").chars().collect();
+        let len = placeholder.len();
+        if self.cursor > self.chars.len() {
+            self.cursor = self.chars.len();
+        }
+        self.chars.splice(self.cursor..self.cursor, placeholder);
+        self.cursor += len;
+        self.attachments
+            .push(ComposerAttachment { path, mime_type });
     }
 
     /// Returns true when a large paste placeholder is currently active.
@@ -745,7 +776,10 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             tool_call_id,
             kind: EntryKind::ToolResult,
             title: "result".into(),
-            body: format_tool_result(item.payload.get(KEY_OUTPUT), item.payload.get(KEY_ERROR_MESSAGE)),
+            body: format_tool_result(
+                item.payload.get(KEY_OUTPUT),
+                item.payload.get(KEY_ERROR_MESSAGE),
+            ),
             timestamp: Some(item.created_at),
             completed_at: None,
             pending: false,

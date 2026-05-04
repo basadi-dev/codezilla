@@ -12,18 +12,18 @@ use ratatui::{
 
 use super::markdown::md_to_lines;
 
+use super::super::agent::model_gateway::estimate_items_tokens;
 use super::super::domain::{
     ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalResolution, ConversationItem,
-    EVENT_KIND_AGENT_MESSAGE, EVENT_KIND_REASONING_SUMMARY, EVENT_KIND_REASONING_TEXT, ItemKind,
-    KEY_ARGUMENTS, KEY_ERROR, KEY_ERROR_MESSAGE, KEY_KIND, KEY_MESSAGE, KEY_OUTPUT, KEY_REASON,
-    KEY_STATUS, KEY_TEXT, KEY_THREAD_ID, KEY_THREAD_ID_SNAKE, KEY_TOOL_CALL_ID, KEY_TOOL_NAME,
-    KEY_TURN_ID, KEY_TURN_ID_SNAKE, LABEL_ASSISTANT, LABEL_REASONING, LABEL_RUNTIME,
-    LABEL_THINKING, LABEL_TOOL_FALLBACK, LABEL_USER, PendingApproval, ReasoningEffort,
-    RuntimeEvent, RuntimeEventKind, STATUS_DONE, STATUS_FAILED, STATUS_INTERRUPTED,
-    STATUS_NOT_SPAWNED, STATUS_TIMED_OUT, STATUS_TIMEOUT, ThreadMetadata, TokenUsage, ToolResult,
-    TurnStatus, UserInput,
+    ItemKind, PendingApproval, ReasoningEffort, RuntimeEvent, RuntimeEventKind, ThreadMetadata,
+    TokenUsage, ToolResult, TurnStatus, UserInput, EVENT_KIND_AGENT_MESSAGE,
+    EVENT_KIND_REASONING_SUMMARY, EVENT_KIND_REASONING_TEXT, KEY_ARGUMENTS, KEY_ERROR,
+    KEY_ERROR_MESSAGE, KEY_KIND, KEY_MESSAGE, KEY_OUTPUT, KEY_REASON, KEY_STATUS, KEY_TEXT,
+    KEY_THREAD_ID, KEY_THREAD_ID_SNAKE, KEY_TOOL_CALL_ID, KEY_TOOL_NAME, KEY_TURN_ID,
+    KEY_TURN_ID_SNAKE, LABEL_ASSISTANT, LABEL_REASONING, LABEL_RUNTIME, LABEL_THINKING,
+    LABEL_TOOL_FALLBACK, LABEL_USER, STATUS_DONE, STATUS_FAILED, STATUS_INTERRUPTED,
+    STATUS_NOT_SPAWNED, STATUS_TIMED_OUT, STATUS_TIMEOUT,
 };
-use super::super::agent::model_gateway::estimate_items_tokens;
 use super::super::error as cod_error;
 use super::super::runtime::{
     ConversationRuntime, ThreadCompactParams, ThreadCompactResult, ThreadForkParams,
@@ -32,13 +32,14 @@ use super::super::runtime::{
 };
 use super::activity::ChildAgentStatus;
 use super::types::{
-    AutocompleteItem, COLOR_ACCENT, COLOR_MUTED, ComposerState, EntryKind, FocusPane,
-    PendingApprovalView, SelectionPoint, SelectionRange, THREAD_LIMIT, TranscriptEntry, basename,
-    current_state_label, entry_elapsed_secs, entry_from_item, entry_style, format_timestamp,
-    format_tool_result, is_diff_body, is_read_file_body, relative_time_ago, render_diff_chunk,
-    render_read_file_body_lines, short_turn_id, spinner_frame, split_at_width, thread_label,
-    transcript_lines,
+    basename, current_state_label, entry_elapsed_secs, entry_from_item, entry_style,
+    format_timestamp, format_tool_result, is_diff_body, is_read_file_body, relative_time_ago,
+    render_diff_chunk, render_read_file_body_lines, short_turn_id, spinner_frame, split_at_width,
+    thread_label, transcript_lines, AutocompleteItem, ComposerAttachment, ComposerState, EntryKind,
+    FocusPane, PendingApprovalView, SelectionPoint, SelectionRange, TranscriptEntry, COLOR_ACCENT,
+    COLOR_MUTED, THREAD_LIMIT,
 };
+
 /// Sentinel item-id for the "thinking" placeholder injected immediately after
 /// the user submits a message.  Removed when the first real agent content arrives.
 const THINKING_PLACEHOLDER_ID: &str = "__codezilla_thinking__";
@@ -1094,9 +1095,10 @@ impl InteractiveApp {
 
     pub async fn submit_composer(&mut self) -> Result<()> {
         let trimmed = self.composer.trimmed_text();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && self.composer.attachments.is_empty() {
             return Ok(());
         }
+        let attachments = self.composer.take_attachments();
         let raw = self.composer.take_text();
         self.reset_composer_history_navigation();
         if self.try_handle_slash_command(raw.trim()).await? {
@@ -1106,7 +1108,6 @@ impl InteractiveApp {
             self.run_shell_command(cmd.trim()).await?;
             return Ok(());
         }
-
         if self.approval.has_pending() {
             self.error_message =
                 Some("Resolve the approval request before sending more input".into());
@@ -1114,6 +1115,37 @@ impl InteractiveApp {
         }
 
         self.error_message = None;
+
+        // Detect inline image file paths in the text and promote them to attachments.
+        // Lines that are bare image paths (or the only content) are extracted;
+        // the remaining text becomes the textual part of the message.
+        let (text_part, extra_attachments) = extract_image_paths(&raw);
+        let all_attachments: Vec<&ComposerAttachment> =
+            attachments.iter().chain(extra_attachments.iter()).collect();
+        // Bundle all images with the text into a single UserInput so the
+        // model receives them as one multimodal message.
+        let images: Vec<super::super::domain::UserInputImage> = all_attachments
+            .iter()
+            .map(|a| super::super::domain::UserInputImage {
+                path: a.path.clone(),
+            })
+            .collect();
+        let mut input: Vec<UserInput> = Vec::new();
+        if !text_part.is_empty() || !images.is_empty() {
+            input.push(UserInput {
+                text: if text_part.is_empty() {
+                    None
+                } else {
+                    Some(super::super::domain::UserInputText {
+                        text: text_part.clone(),
+                    })
+                },
+                images,
+            });
+        }
+        if input.is_empty() {
+            return Ok(());
+        }
 
         // ── Immediate visual feedback ─────────────────────────────────────────
         // Push the user's message into the transcript right away so "You" is
@@ -1126,13 +1158,23 @@ impl InteractiveApp {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
+            let display_body = if all_attachments.is_empty() {
+                raw.clone()
+            } else {
+                let names: Vec<String> = all_attachments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("[#image {}]", i + 1))
+                    .collect();
+                format!("{}\n{}", raw, names.join("\n"))
+            };
             self.upsert_transcript_entry(TranscriptEntry {
                 item_id: USER_PENDING_PLACEHOLDER_ID.to_string(),
                 turn_id: self.active_turn_id.clone(),
                 tool_call_id: None,
                 kind: EntryKind::User,
                 title: LABEL_USER.into(),
-                body: raw.clone(),
+                body: display_body,
                 timestamp: Some(ts),
                 completed_at: None,
                 pending: true,
@@ -1146,7 +1188,7 @@ impl InteractiveApp {
                 .steer_turn(TurnSteerParams {
                     thread_id: self.current_thread_id.clone(),
                     expected_turn_id: turn_id.clone(),
-                    input: vec![UserInput::from_text(&raw)],
+                    input,
                 })
                 .await?;
             self.status_message = format!("Queued input for {}", short_turn_id(&turn_id));
@@ -1156,7 +1198,7 @@ impl InteractiveApp {
                 .start_turn(
                     TurnStartParams {
                         thread_id: self.current_thread_id.clone(),
-                        input: vec![UserInput::from_text(&raw)],
+                        input,
                         cwd: None,
                         model_settings: self.model_settings_override.clone(),
                         approval_policy: self.current_approval_policy_override(),
@@ -3729,8 +3771,156 @@ fn is_background_compaction_status_event(event: &RuntimeEvent, current_thread_id
         && event.thread_id.as_deref() == Some(current_thread_id)
         // This event kind is also used for turn-local status such as codebase
         // indexing. Only turn-less events are actual background compaction
-        // lifecycle updates.
         && event.turn_id.is_none()
+}
+
+/// Scan user input text for image file paths and extract them as attachments.
+///
+/// Detects paths in two forms:
+/// 1. A line that is entirely a file path (possibly with leading/trailing whitespace).
+/// 2. A path embedded in text that starts with `/`, `~/`, `./`, or `C:\` and ends
+///    with an image extension. This handles macOS screenshot paths with spaces.
+///
+/// Extracted paths are replaced with `[#image N]` placeholders in the text
+/// so the LLM knows an image was attached. The remaining text becomes the text
+/// portion of the message.
+fn extract_image_paths(text: &str) -> (String, Vec<ComposerAttachment>) {
+    let image_exts = [
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "ico",
+    ];
+    let mut text_lines = Vec::new();
+    let mut attachments = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // Case 1: the entire line is a path — replace with placeholder
+        if is_bare_image_path(trimmed, &image_exts) {
+            let path = expand_home(trimmed);
+            let mime = mime_from_ext(&path);
+            attachments.push(ComposerAttachment {
+                path: path.clone(),
+                mime_type: mime.to_string(),
+            });
+            text_lines.push(format!("[#image {}]", attachments.len()));
+            continue;
+        }
+
+        // Case 2: extract embedded paths (e.g. "what's in this image? /Users/me/photo.png")
+        let mut remaining = line.to_string();
+        let mut found = true;
+        while found {
+            found = false;
+            if let Some(start) = find_path_start(&remaining) {
+                let candidate = &remaining[start..];
+                if let Some(end) = find_image_path_end(candidate, &image_exts) {
+                    let path_str = &candidate[..end];
+                    let path = expand_home(path_str);
+                    let mime = mime_from_ext(&path);
+                    attachments.push(ComposerAttachment {
+                        path: path.clone(),
+                        mime_type: mime.to_string(),
+                    });
+                    // Replace the path with a placeholder so the LLM knows an image was attached
+                    remaining = format!(
+                        "{}[#image {}]{}",
+                        &remaining[..start],
+                        attachments.len(),
+                        &remaining[start + end..]
+                    );
+                    found = true;
+                }
+            }
+        }
+
+        let trimmed_remaining = remaining.trim();
+        if !trimmed_remaining.is_empty() {
+            text_lines.push(trimmed_remaining.to_string());
+        }
+    }
+
+    (text_lines.join("\n"), attachments)
+}
+
+/// Check if a string is entirely a bare image file path.
+fn is_bare_image_path(s: &str, exts: &[&str]) -> bool {
+    if s.is_empty() || s.contains('\n') {
+        return false;
+    }
+    let lower = s.to_lowercase();
+    exts.iter().any(|ext| lower.ends_with(&format!(".{ext}")))
+        && (s.starts_with('/') || s.starts_with('~') || s.starts_with("./") || s.starts_with(".."))
+}
+
+/// Find the start index of a path-like substring (starts with /, ~/, ./, or C:\).
+fn find_path_start(s: &str) -> Option<usize> {
+    // Look for ~/ first (highest priority, explicit home)
+    if let Some(i) = s.find("~/") {
+        return Some(i);
+    }
+    // Look for absolute paths /
+    for (i, c) in s.char_indices() {
+        if c == '/' && (i == 0 || !s[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_')) {
+            return Some(i);
+        }
+    }
+    // Look for ./
+    if let Some(i) = s.find("./") {
+        return Some(i);
+    }
+    None
+}
+
+/// Given a string starting at a path, find the end index (exclusive) where the
+/// image extension ends. Returns None if no image extension is found.
+fn find_image_path_end(s: &str, exts: &[&str]) -> Option<usize> {
+    let lower = s.to_lowercase();
+    for ext in exts {
+        let suffix = format!(".{ext}");
+        if let Some(pos) = lower.find(&suffix) {
+            let end = pos + suffix.len();
+            // Make sure the character after the extension isn't alphanumeric
+            // (avoid matching "photo.pngx" as "photo.png")
+            if end >= lower.len() || !lower.as_bytes()[end].is_ascii_alphanumeric() {
+                return Some(end);
+            }
+        }
+    }
+    None
+}
+
+/// Expand `~` at the start of a path to the home directory.
+fn expand_home(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix('~') {
+        if rest.is_empty() || rest.starts_with('/') {
+            if let Ok(home) = std::env::var("HOME") {
+                return format!("{}{}", home, rest);
+            }
+        }
+    }
+    s.to_string()
+}
+
+/// Return a MIME type string based on the file extension.
+fn mime_from_ext(path: &str) -> &'static str {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".bmp") {
+        "image/bmp"
+    } else if lower.ends_with(".tiff") || lower.ends_with(".tif") {
+        "image/tiff"
+    } else if lower.ends_with(".ico") {
+        "image/x-icon"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 #[cfg(test)]

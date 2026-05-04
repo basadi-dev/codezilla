@@ -32,7 +32,9 @@
 //! covered by tests.
 #![allow(dead_code)]
 
-use crate::system::domain::{STATUS_DONE, STATUS_FAILED, STATUS_QUEUED, STATUS_RUNNING, STATUS_STARTING, STATUS_TIMED_OUT};
+use crate::system::domain::{
+    STATUS_DONE, STATUS_FAILED, STATUS_QUEUED, STATUS_RUNNING, STATUS_STARTING, STATUS_TIMED_OUT,
+};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 /// What's currently holding up the agent. Set when the runtime emits an

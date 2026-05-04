@@ -48,11 +48,38 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
+/// A single content part within a message — supports multi-modal messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    Image { mime_type: String, data: String }, // base64-encoded
+}
+
+impl ContentPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+    pub fn image(mime_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::Image {
+            mime_type: mime_type.into(),
+            data: data.into(),
+        }
+    }
+}
+
 /// A single message in the conversation. Models the Go `agent.Message` type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
+    /// Primary text content. For backward compatibility this is always populated;
+    /// multi-modal content (images) is carried in `content_parts`.
     pub content: String,
+    /// Multi-modal content parts. When empty, providers serialize `content` as a
+    /// plain string. When non-empty, providers serialize as a content array and
+    /// `content` is treated as the first text part (if present).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_parts: Vec<ContentPart>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,15 +101,35 @@ impl Message {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new(Role::Assistant, content)
     }
-    fn new(role: Role, content: impl Into<String>) -> Self {
+    /// Create a user message with both text and image attachments.
+    pub fn user_with_images(text: impl Into<String>, images: Vec<ContentPart>) -> Self {
+        let text_str = text.into();
         Self {
-            role,
-            content: content.into(),
+            role: Role::User,
+            content: text_str,
+            content_parts: images, // text lives in `content`; providers add it separately
             tool_calls: vec![],
             tool_result: None,
             think_content: String::new(),
             timestamp: chrono::Utc::now(),
         }
+    }
+    fn new(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            content_parts: vec![],
+            tool_calls: vec![],
+            tool_result: None,
+            think_content: String::new(),
+            timestamp: chrono::Utc::now(),
+        }
+    }
+    /// Returns true when this message carries image content parts.
+    pub fn has_images(&self) -> bool {
+        self.content_parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::Image { .. }))
     }
 }
 
@@ -102,7 +149,7 @@ pub struct FunctionDefinition {
     pub parameters: serde_json::Value,
 }
 
-// ── LLM response types ────────────────────────────────────────────────────────
+// ── LLM response types ───���────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
 pub struct LlmResponse {

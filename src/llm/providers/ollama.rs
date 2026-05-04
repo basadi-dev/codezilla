@@ -71,6 +71,16 @@ fn build_chat_body(
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
+    // Extract top-level images from the first message and add to request body
+    if let Some(msgs_arr) = body["messages"].as_array() {
+        if let Some(first_msg) = msgs_arr.first() {
+            if let Some(images) = first_msg.get("__codezilla_images") {
+                if !images.is_null() && images.as_array().is_some_and(|a| !a.is_empty()) {
+                    body["images"] = images.clone();
+                }
+            }
+        }
+    }
     body
 }
 
@@ -125,6 +135,23 @@ fn build_chat_messages(messages: &[Message]) -> Vec<Value> {
                     "role": role,
                     "content": msg.content,
                 });
+                // Ollama vision: when images are present, serialize as a
+                // per-message `images` array of base64 strings. This is the
+                // native Ollama /api/chat format (distinct from OpenAI's
+                // content-array approach used by Anthropic/Gemini providers).
+                if msg.has_images() {
+                    let images: Vec<Value> = msg
+                        .content_parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            crate::llm::ContentPart::Image { data, .. } => Some(json!(data)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !images.is_empty() {
+                        entry["images"] = json!(images);
+                    }
+                }
                 if !msg.tool_calls.is_empty() {
                     entry["tool_calls"] = json!(msg
                         .tool_calls

@@ -456,15 +456,15 @@ pub struct UserInputImage {
 pub struct UserInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<UserInputText>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image: Option<UserInputImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<UserInputImage>,
 }
 
 impl UserInput {
     pub fn from_text(text: impl Into<String>) -> Self {
         Self {
             text: Some(UserInputText { text: text.into() }),
-            image: None,
+            images: Vec::new(),
         }
     }
 
@@ -472,7 +472,7 @@ impl UserInput {
     pub fn from_image(path: impl Into<String>) -> Self {
         Self {
             text: None,
-            image: Some(UserInputImage { path: path.into() }),
+            images: vec![UserInputImage { path: path.into() }],
         }
     }
 }

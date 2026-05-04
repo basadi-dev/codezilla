@@ -465,9 +465,8 @@ mod fake_model_tests {
     use crate::system::config::{AgentConfig, AutoCompactionConfig, EffectiveConfig, LlmConfig};
     use crate::system::domain::{
         ApprovalDecision, ApprovalPolicy, ApprovalsReviewerKind, ItemKind, ModelSettings,
-        PermissionProfile, ReasoningEffort, SandboxMode, SurfaceKind, UserInput,
-        KEY_ERROR_MESSAGE, KEY_KIND, KEY_OUTPUT, KEY_REASON, KEY_STATUS, KEY_TEXT,
-        KEY_THREAD_ID_SNAKE, KEY_TOOL_NAME,
+        PermissionProfile, ReasoningEffort, SandboxMode, SurfaceKind, UserInput, KEY_ERROR_MESSAGE,
+        KEY_KIND, KEY_OUTPUT, KEY_REASON, KEY_STATUS, KEY_TEXT, KEY_THREAD_ID_SNAKE, KEY_TOOL_NAME,
     };
     use crate::system::intel::CodebaseIntelConfig;
     use std::path::PathBuf;
