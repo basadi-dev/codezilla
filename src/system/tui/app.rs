@@ -15,7 +15,8 @@ use super::markdown::md_to_lines;
 use super::super::domain::{
     ActionDescriptor, ApprovalDecision, ApprovalPolicy, ApprovalResolution, ConversationItem,
     ItemKind, PendingApproval, ReasoningEffort, RuntimeEvent, RuntimeEventKind, ThreadMetadata,
-    TokenUsage, ToolResult, TurnStatus, UserInput,
+    TokenUsage, ToolResult, TurnStatus, UserInput, KEY_ERROR, LABEL_ASSISTANT, LABEL_USER,
+    STATUS_FAILED, STATUS_INTERRUPTED, STATUS_TIMED_OUT, STATUS_TIMEOUT,
 };
 use super::super::error as cod_error;
 use super::super::runtime::{
@@ -1082,7 +1083,7 @@ impl InteractiveApp {
                 turn_id: self.active_turn_id.clone(),
                 tool_call_id: None,
                 kind: EntryKind::User,
-                title: "You".into(),
+                title: LABEL_USER.into(),
                 body: raw.clone(),
                 timestamp: Some(ts),
                 completed_at: None,
@@ -1905,8 +1906,8 @@ impl InteractiveApp {
             _ => EntryKind::Status,
         };
         let title = match entry_kind {
-            EntryKind::User => "You",
-            EntryKind::Assistant => "Codezilla",
+            EntryKind::User => LABEL_USER,
+            EntryKind::Assistant => LABEL_ASSISTANT,
             EntryKind::Reasoning => "Reasoning",
             _ => "Runtime",
         };
@@ -2027,7 +2028,7 @@ impl InteractiveApp {
                 .unwrap_or("AGENT_MESSAGE");
             let (entry_kind, title) = match kind {
                 "REASONING_TEXT" | "REASONING_SUMMARY" => (EntryKind::Reasoning, "thinking"),
-                _ => (EntryKind::Assistant, "Codezilla"),
+                _ => (EntryKind::Assistant, LABEL_ASSISTANT),
             };
             self.upsert_transcript_entry(TranscriptEntry {
                 item_id: item_id.to_string(),
@@ -2220,11 +2221,16 @@ impl InteractiveApp {
         let is_working = entry.item_id.starts_with(WORKING_ENTRY_ID_PREFIX);
         if let Some(index) = self.transcript_index.get(&entry.item_id).copied() {
             let previous = &self.transcript[index];
+            let should_reposition_completed_reasoning =
+                previous.pending && !entry.pending && entry.kind == EntryKind::Reasoning;
             if previous.pending && !entry.pending {
                 entry.completed_at = entry.completed_at.or(entry.timestamp);
                 entry.timestamp = previous.timestamp.or(entry.timestamp);
             }
             self.transcript[index] = entry;
+            if should_reposition_completed_reasoning {
+                self.reposition_reasoning_before_same_turn_assistant(index);
+            }
         } else {
             let index = self.transcript_insert_index(&entry);
             self.transcript.insert(index, entry);
@@ -2240,7 +2246,7 @@ impl InteractiveApp {
     }
 
     fn transcript_insert_index(&self, entry: &TranscriptEntry) -> usize {
-        if entry.kind != EntryKind::Reasoning {
+        if entry.pending || entry.kind != EntryKind::Reasoning {
             return self.transcript.len();
         }
         let Some(turn_id) = entry.turn_id.as_deref() else {
@@ -2253,6 +2259,30 @@ impl InteractiveApp {
                     && existing.kind == EntryKind::Assistant
             })
             .unwrap_or(self.transcript.len())
+    }
+
+    fn reposition_reasoning_before_same_turn_assistant(&mut self, index: usize) {
+        if index >= self.transcript.len()
+            || self.transcript[index].kind != EntryKind::Reasoning
+            || self.transcript[index].pending
+        {
+            return;
+        }
+        let Some(turn_id) = self.transcript[index].turn_id.clone() else {
+            return;
+        };
+
+        let entry = self.transcript.remove(index);
+        let insert_at = self
+            .transcript
+            .iter()
+            .position(|existing| {
+                existing.turn_id.as_deref() == Some(turn_id.as_str())
+                    && existing.kind == EntryKind::Assistant
+            })
+            .unwrap_or(self.transcript.len());
+        self.transcript.insert(insert_at, entry);
+        self.rebuild_transcript_index();
     }
 
     fn bump_pending_working_entry_to_end(&mut self) {
@@ -2802,15 +2832,15 @@ impl InteractiveApp {
 
         let error = result
             .output
-            .get("error")
+            .get(KEY_ERROR)
             .and_then(Value::as_str)
             .or(result.error_message.as_deref());
         let status = if result.ok {
             ChildAgentStatus::Completed
         } else {
             match error {
-                Some("timeout") => ChildAgentStatus::TimedOut,
-                Some("interrupted") => ChildAgentStatus::Interrupted,
+                Some(STATUS_TIMEOUT) => ChildAgentStatus::TimedOut,
+                Some(STATUS_INTERRUPTED) => ChildAgentStatus::Interrupted,
                 _ => ChildAgentStatus::Failed,
             }
         };
@@ -2895,9 +2925,9 @@ impl InteractiveApp {
                     continue;
                 }
                 ChildAgentStatus::Completed => "done",
-                ChildAgentStatus::Failed => "failed",
-                ChildAgentStatus::Interrupted => "interrupted",
-                ChildAgentStatus::TimedOut => "timed out",
+                ChildAgentStatus::Failed => STATUS_FAILED,
+                ChildAgentStatus::Interrupted => STATUS_INTERRUPTED,
+                ChildAgentStatus::TimedOut => STATUS_TIMED_OUT,
             };
             let status_icon = match child.status {
                 ChildAgentStatus::Running => "⠋",
@@ -3021,18 +3051,18 @@ fn failed_tool_title(tool_name: &str, result: &ToolResult) -> String {
         .split_once(" → ")
         .map(|(base, _)| base)
         .unwrap_or(tool_name);
-    match result.output.get("error").and_then(Value::as_str) {
-        Some("timeout") => format!("{tool_name} timed out"),
-        Some("interrupted") => format!("{tool_name} interrupted"),
+    match result.output.get(KEY_ERROR).and_then(Value::as_str) {
+        Some(STATUS_TIMEOUT) => format!("{tool_name} timed out"),
+        Some(STATUS_INTERRUPTED) => format!("{tool_name} interrupted"),
         _ => format!("{tool_name} failed"),
     }
 }
 
 fn tool_result_status_suffix(result: &ToolResult) -> &'static str {
-    match result.output.get("error").and_then(Value::as_str) {
-        Some("timeout") => "timed out",
-        Some("interrupted") => "interrupted",
-        _ => "failed",
+    match result.output.get(KEY_ERROR).and_then(Value::as_str) {
+        Some(STATUS_TIMEOUT) => STATUS_TIMED_OUT,
+        Some(STATUS_INTERRUPTED) => STATUS_INTERRUPTED,
+        _ => STATUS_FAILED,
     }
 }
 
@@ -3586,7 +3616,11 @@ fn tool_result_failed(result: &ToolResult) -> bool {
             .error_message
             .as_ref()
             .is_some_and(|message| !message.trim().is_empty())
-        || result.output.get("error").and_then(Value::as_str).is_some()
+        || result
+            .output
+            .get(KEY_ERROR)
+            .and_then(Value::as_str)
+            .is_some()
 }
 
 fn tool_result_not_spawned(result: &ToolResult) -> bool {

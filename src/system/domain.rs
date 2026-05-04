@@ -22,6 +22,23 @@ pub type SkillId = String;
 pub type McpServerName = String;
 pub type ConnectorId = String;
 
+// ── Display labels ──────────────────────────────────────────────────────────
+pub const LABEL_ASSISTANT: &str = "Codezilla";
+pub const LABEL_USER: &str = "You";
+pub const LABEL_SYSTEM: &str = "System";
+pub const LABEL_ERROR: &str = "Error";
+
+// ── Status strings (used in JSON output matching & display) ─────────────────
+pub const STATUS_INTERRUPTED: &str = "interrupted";
+pub const STATUS_TIMEOUT: &str = "timeout";
+pub const STATUS_FAILED: &str = "failed";
+pub const STATUS_COMPLETED: &str = "completed";
+pub const STATUS_TIMED_OUT: &str = "timed out";
+pub const STATUS_RUNNING: &str = "running";
+
+// ── JSON keys ───────────────────────────────────────────────────────────────
+pub const KEY_ERROR: &str = "error";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SurfaceKind {

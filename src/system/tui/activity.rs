@@ -32,9 +32,9 @@
 //! covered by tests.
 #![allow(dead_code)]
 
+use crate::system::domain::{STATUS_FAILED, STATUS_RUNNING, STATUS_TIMED_OUT};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
-
 /// What's currently holding up the agent. Set when the runtime emits an
 /// event that puts the loop in a wait state; cleared when the wait resolves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,12 +445,11 @@ impl ActivityState {
             + counts.interrupted
             + counts.timed_out;
         let mut parts = Vec::new();
-        push_count(&mut parts, counts.running, "running");
+        push_count(&mut parts, counts.running, STATUS_RUNNING);
         push_count(&mut parts, counts.queued, "queued");
         push_count(&mut parts, counts.completed, "done");
-        push_count(&mut parts, counts.failed, "failed");
-        push_count(&mut parts, counts.timed_out, "timed out");
-        push_count(&mut parts, counts.interrupted, "stopped");
+        push_count(&mut parts, counts.failed, STATUS_FAILED);
+        push_count(&mut parts, counts.timed_out, STATUS_TIMED_OUT);
         if parts.is_empty() {
             parts.push("starting".to_string());
         }

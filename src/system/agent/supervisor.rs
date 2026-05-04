@@ -22,6 +22,7 @@ use crate::system::domain::{
     ApprovalPolicy, ConversationItem, ItemKind, PermissionProfile, RuntimeEventKind, SurfaceKind,
     ThreadId, ToolCall, ToolDefinition, ToolExecutionContext, ToolListingContext, ToolProviderKind,
     ToolResult, TurnId, TurnStatus, UserInput,
+    STATUS_INTERRUPTED, STATUS_TIMEOUT,
 };
 use crate::system::runtime::{
     ConversationRuntime, ThreadStartParams, TurnInterruptParams, TurnStartParams,
@@ -594,7 +595,7 @@ impl ToolProvider for SpawnAgentToolProviderReal {
                     "thread_id": run.child_thread_id,
                     "turn_id": run.child_turn_id,
                     "result": run.result_text,
-                    "error": "interrupted",
+                    "error": STATUS_INTERRUPTED,
                 }),
                 error_message: Some("sub-agent interrupted".into()),
             }),
@@ -605,7 +606,7 @@ impl ToolProvider for SpawnAgentToolProviderReal {
                     "thread_id": run.child_thread_id,
                     "turn_id": run.child_turn_id,
                     "result": run.result_text,
-                    "error": "timeout",
+                    "error": STATUS_TIMEOUT,
                 }),
                 error_message: Some(format!("sub-agent timed out after {timeout_secs}s")),
             }),

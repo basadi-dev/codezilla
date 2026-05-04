@@ -9,7 +9,11 @@ use ratatui::{
 use super::markdown::{highlight_code_line, lang_for_path, md_to_lines};
 
 use crate::system::domain::PendingApproval;
-use crate::system::domain::{ConversationItem, ItemKind, ThreadMetadata};
+use crate::system::domain::{
+    ConversationItem, ItemKind, ThreadMetadata, KEY_ERROR, LABEL_ASSISTANT, LABEL_ERROR,
+    LABEL_SYSTEM, LABEL_USER, STATUS_COMPLETED, STATUS_FAILED, STATUS_INTERRUPTED,
+    STATUS_TIMED_OUT, STATUS_TIMEOUT,
+};
 
 // ─── Colour palette ── (Claude Code / Codex CLI inspired) ────────────────────
 
@@ -662,7 +666,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::User,
-            title: "You".into(),
+            title: LABEL_USER.into(),
             body: item
                 .payload
                 .get("text")
@@ -679,7 +683,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::System,
-            title: "System".into(),
+            title: LABEL_SYSTEM.into(),
             body: item
                 .payload
                 .get("text")
@@ -696,7 +700,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
             turn_id: Some(item.turn_id.clone()),
             tool_call_id: None,
             kind: EntryKind::Assistant,
-            title: "Codezilla".into(),
+            title: LABEL_ASSISTANT.into(),
             body: item
                 .payload
                 .get("text")
@@ -801,7 +805,7 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 .payload
                 .get("kind")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Error")
+                .unwrap_or(LABEL_ERROR)
                 .to_string();
             let fallback_body = pretty_json_or_text(Some(&item.payload), None);
             let message = item
@@ -2114,12 +2118,12 @@ fn format_spawn_agent_result(output: &Value, error_message: Option<&Value>) -> O
         .or_else(|| output.get("turnId"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let error = output.get("error").and_then(Value::as_str);
+    let error = output.get(KEY_ERROR).and_then(Value::as_str);
     let status = match error {
-        Some("timeout") => "timed out",
-        Some("interrupted") => "interrupted",
-        Some(_) => "failed",
-        None => "completed",
+        Some(STATUS_TIMEOUT) => STATUS_TIMED_OUT,
+        Some(STATUS_INTERRUPTED) => STATUS_INTERRUPTED,
+        Some(_) => STATUS_FAILED,
+        None => STATUS_COMPLETED,
     };
 
     let mut lines = vec![
@@ -2127,7 +2131,7 @@ fn format_spawn_agent_result(output: &Value, error_message: Option<&Value>) -> O
         format!(
             "thread: {}  turn: {}",
             short_thread_id(thread_id),
-            short_turn_id(turn_id)
+            short_turn_id(turn_id),
         ),
     ];
 
@@ -2144,7 +2148,7 @@ fn format_spawn_agent_result(output: &Value, error_message: Option<&Value>) -> O
         .trim();
     if !result.is_empty() {
         lines.push(String::new());
-        if error == Some("timeout") {
+        if error == Some(STATUS_TIMEOUT) {
             lines.push("partial output before timeout:".to_string());
         }
         lines.push(summarise_long_output(
