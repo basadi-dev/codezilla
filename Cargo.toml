@@ -3,7 +3,8 @@ name = "codezilla"
 version = "2.0.0"
 edition = "2021"
 description = "Codezilla — AI-powered coding assistant (Rust)"
-default-run = "codezilla"
+license = "MIT"
+repository = "https://github.com/basadi-dev/codezilla"
 
 [[bin]]
 name = "codezilla"
@@ -91,11 +92,4 @@ inherits = "dev"
 debug = 0
 # cargo-release configuration
 # Usage: cargo release patch  (or minor / major)
-# This bumps the version, commits, tags with v{{version}}, and pushes.
-[package.metadata.release]
-tag-name = "v{{version}}"
-tag-prefix = ""
-post-release-commit-message = "chore: start next development iteration"
-dev-version = true
-dev-version-ext = "dev"
-consolidate-commits = true
+

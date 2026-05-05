@@ -1,0 +1,7 @@
+# cargo-release configuration
+# Usage: cargo release patch  (or minor / major)
+# This bumps the version, commits, tags with v{{version}}, and pushes.
+
+tag-name = "v{{version}}"
+tag-prefix = ""
+consolidate-commits = true

@@ -950,6 +950,79 @@ mod fake_model_tests {
     }
 
     #[tokio::test]
+    async fn non_retryable_bash_failure_skips_remaining_same_round_calls() {
+        let app_home = unique_app_home();
+        let app_home_str = app_home.to_string_lossy().into_owned();
+        let sentinel = app_home.join("should-not-run");
+        let sentinel_str = sentinel.to_string_lossy().into_owned();
+
+        let mut cfg = test_config(&app_home);
+        cfg.approval_policy = ApprovalPolicy {
+            kind: crate::system::domain::ApprovalPolicyKind::Never,
+            granular: None,
+        };
+
+        let client = Arc::new(FakeLlmClient::new(vec![ScriptedResponse::ToolCalls(vec![
+            (
+                "bash_exec".into(),
+                serde_json::json!({
+                    "command": "printf 'error: Failed to parse `/tmp/Cargo.toml`\\n' >&2; exit 101",
+                    "cwd": app_home_str,
+                }),
+            ),
+            (
+                "bash_exec".into(),
+                serde_json::json!({
+                    "command": format!("touch {sentinel_str}"),
+                    "cwd": app_home.to_string_lossy(),
+                }),
+            ),
+        ])]));
+        let runtime =
+            ConversationRuntime::new_with_llm_client(cfg, AccountSession::default(), client)
+                .await
+                .expect("runtime build");
+
+        let (thread_id, evt) = run_turn_and_wait(&runtime, "run release").await;
+
+        assert_eq!(evt.kind, RuntimeEventKind::TurnFailed, "got {:?}", evt);
+
+        let read = runtime
+            .read_thread(ThreadReadParams { thread_id })
+            .await
+            .unwrap();
+        let tool_results: Vec<_> = read
+            .thread
+            .items
+            .iter()
+            .filter(|i| i.kind == ItemKind::ToolResult)
+            .collect();
+        assert_eq!(
+            tool_results.len(),
+            2,
+            "expected failed result plus skipped result, got {tool_results:?}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "second bash_exec should have been skipped after non-retryable failure; results={tool_results:?}"
+        );
+        let skipped = tool_results
+            .iter()
+            .find(|i| {
+                i.payload
+                    .get(KEY_OUTPUT)
+                    .and_then(|o| o.get("error"))
+                    .and_then(|v| v.as_str())
+                    == Some("skipped_after_non_retryable_failure")
+            })
+            .expect("expected skipped result for second bash_exec");
+        assert_eq!(
+            skipped.payload.get("ok").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
     async fn parallel_safe_tool_calls_in_one_round_all_dispatch() {
         // Both list_dir calls are parallel-safe; the executor groups them into
         // one batch and runs them via join_all. End-to-end we just verify both

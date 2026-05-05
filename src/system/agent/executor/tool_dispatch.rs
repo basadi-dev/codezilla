@@ -33,7 +33,14 @@ impl TurnExecutor {
         seen_read_signatures: &mut HashSet<ReadKey>,
         cross_round_counts: &mut HashMap<String, usize>,
         block_read_only_tools: bool,
-    ) -> Result<(bool, Vec<FileChangeSummary>, usize, usize, usize)> {
+    ) -> Result<(
+        bool,
+        Vec<FileChangeSummary>,
+        usize,
+        usize,
+        usize,
+        Option<String>,
+    )> {
         // 1. Normalise: rewrite shell_exec with shell operators → bash_exec.
         let calls: Vec<ToolCall> = tool_calls
             .into_iter()
@@ -146,6 +153,10 @@ impl TurnExecutor {
                 format!("{}({})", c.tool_name, args_preview)
             })
             .collect();
+        let tool_name_by_call_id: HashMap<String, String> = valid_calls
+            .iter()
+            .map(|c| (c.tool_call_id.clone(), c.tool_name.clone()))
+            .collect();
         tracing::debug!(
             turn_id = %ctx.turn_id,
             total_calls = valid_calls.len(),
@@ -157,6 +168,7 @@ impl TurnExecutor {
         // 4. Dispatch each batch, collecting results in original-call order.
         let mut had_any_success = false;
         let mut file_changes: Vec<FileChangeSummary> = Vec::new();
+        let mut executed_tool_call_ids: HashSet<String> = HashSet::new();
         for batch in batches {
             if batch.len() > 1 {
                 tracing::debug!("tool_round: parallel batch of {}", batch.len());
@@ -165,6 +177,8 @@ impl TurnExecutor {
             let results = self.dispatch_batch(ctx, batch).await?;
             tracing::debug!(turn_id = %ctx.turn_id, n = results.len(), "tool_round: dispatch_batch returned");
             for mut result in results {
+                executed_tool_call_ids.insert(result.tool_call_id.clone());
+                let mut non_retryable_stop_reason = None;
                 if result.ok {
                     had_any_success = true;
                     tracing::debug!(
@@ -213,11 +227,35 @@ impl TurnExecutor {
                             result.output
                         ),
                     );
+
+                    if let Some(tool_name) = tool_name_by_call_id.get(&result.tool_call_id) {
+                        if let Some(reason) = classify_non_retryable_failure(tool_name, &result) {
+                            non_retryable_stop_reason = Some(reason);
+                        }
+                    }
                 }
                 tracing::debug!(turn_id = %ctx.turn_id, "tool_round: calling persist_tool_result");
                 self.persist_tool_result(&ctx.params.thread_id, &ctx.turn_id, &result)
                     .await?;
                 tracing::debug!(turn_id = %ctx.turn_id, "tool_round: persist_tool_result done");
+
+                if let Some(stop_reason) = non_retryable_stop_reason {
+                    self.persist_skipped_tool_results(
+                        ctx,
+                        &valid_calls,
+                        &executed_tool_call_ids,
+                        &stop_reason,
+                    )
+                    .await?;
+                    return Ok((
+                        had_any_success,
+                        file_changes,
+                        invalid_tool_calls,
+                        blocked_read_only_calls,
+                        max_repeat_count,
+                        Some(stop_reason),
+                    ));
+                }
             }
         }
 
@@ -227,7 +265,40 @@ impl TurnExecutor {
             invalid_tool_calls,
             blocked_read_only_calls,
             max_repeat_count,
+            None,
         ))
+    }
+
+    async fn persist_skipped_tool_results(
+        &self,
+        ctx: &TurnContext,
+        valid_calls: &[ToolCall],
+        executed_tool_call_ids: &HashSet<String>,
+        stop_reason: &str,
+    ) -> Result<()> {
+        for call in valid_calls {
+            if executed_tool_call_ids.contains(&call.tool_call_id) {
+                continue;
+            }
+
+            let result = ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({
+                    "error": "skipped_after_non_retryable_failure",
+                    "tool": call.tool_name,
+                    "details": "not executed because an earlier tool call failed with a non-retryable error",
+                    "reason": stop_reason,
+                }),
+                error_message: Some(format!(
+                    "skipped_after_non_retryable_failure: {stop_reason}"
+                )),
+            };
+            self.persist_tool_result(&ctx.params.thread_id, &ctx.turn_id, &result)
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Execute a single batch of tool calls.
@@ -410,6 +481,39 @@ impl TurnExecutor {
     }
 }
 
+fn classify_non_retryable_failure(tool_name: &str, result: &ToolResult) -> Option<String> {
+    if tool_name != "bash_exec" {
+        return None;
+    }
+
+    let stderr = result
+        .output
+        .get("stderr")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stdout = result
+        .output
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let err = result.error_message.as_deref().unwrap_or_default();
+    let combined = format!("{stderr}\n{stdout}\n{err}").to_ascii_lowercase();
+
+    // Deterministic Cargo config/manifest parse failures should not be retried
+    // by re-asking the model to run near-identical commands.
+    if combined.contains("failed to parse")
+        && combined.contains("cargo.toml")
+        && combined.contains("error:")
+    {
+        return Some(
+            "Command failed due to Cargo.toml parse error. Fix the manifest before retrying command execution."
+                .into(),
+        );
+    }
+
+    None
+}
+
 /// Extract a `FileChangeSummary` from a successful tool result for write_file
 /// or patch_file operations. Returns `None` for non-file-change tools.
 fn extract_file_change(result: &ToolResult) -> Option<FileChangeSummary> {
@@ -445,4 +549,52 @@ fn extract_file_change(result: &ToolResult) -> Option<FileChangeSummary> {
         lines_removed,
         diff,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn failed_result(stderr: &str) -> ToolResult {
+        ToolResult {
+            tool_call_id: "call_test".into(),
+            ok: false,
+            output: json!({
+                "exitCode": 101,
+                "stdout": "",
+                "stderr": stderr,
+            }),
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn cargo_manifest_parse_failure_is_non_retryable() {
+        let result = failed_result(
+            "error: Failed to parse `/repo/Cargo.toml`\n\nCaused by:\n  missing field `package`",
+        );
+
+        let reason = classify_non_retryable_failure("bash_exec", &result);
+
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn ordinary_command_failure_is_retryable() {
+        let result = failed_result("error: could not compile `app` due to 1 previous error");
+
+        let reason = classify_non_retryable_failure("bash_exec", &result);
+
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn non_bash_failure_is_not_classified() {
+        let result = failed_result("error: Failed to parse `/repo/Cargo.toml`");
+
+        let reason = classify_non_retryable_failure("shell_exec", &result);
+
+        assert!(reason.is_none());
+    }
 }

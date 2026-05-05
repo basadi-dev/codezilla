@@ -878,6 +878,7 @@ impl TurnExecutor {
                 invalid_tool_calls,
                 blocked_read_only_calls,
                 max_repeat_count,
+                non_retryable_stop_reason,
             ) = tokio::select! {
                 _ = turn_ctx.cancel_token.cancelled() => {
                     return self.complete_interrupted(&params.thread_id, &turn_id).await;
@@ -904,6 +905,22 @@ impl TurnExecutor {
                 completed_actions.push("ran command".into());
             }
             file_changes.extend(round_file_changes);
+
+            if let Some(stop_reason) = non_retryable_stop_reason {
+                tracing::warn!(
+                    turn_id = %turn_id,
+                    reason = %stop_reason,
+                    "executor: non-retryable tool failure detected — terminating turn"
+                );
+                return self
+                    .fail_turn(
+                        &params.thread_id,
+                        &turn_id,
+                        "non_retryable_tool_failure",
+                        &stop_reason,
+                    )
+                    .await;
+            }
 
             // ── Phase transitions after tool execution ────────────────────
             if current_phase == TurnPhase::Orient && !round_is_read_only {

@@ -634,7 +634,6 @@ impl InteractiveApp {
                 line: 0,
                 col: c.saturating_sub(self.header_area.x) as usize,
             });
-
         }
 
         // ── Transcript area ──────────────────────────────────────────────────
