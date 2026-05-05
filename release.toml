@@ -1,7 +1,11 @@
 # cargo-release configuration
 # Usage: cargo release patch  (or minor / major)
 # This bumps the version, commits, tags with v{{version}}, and pushes.
+# Publishing to crates.io is disabled — we only ship GitHub Release binaries.
 
 tag-name = "v{{version}}"
 tag-prefix = ""
 consolidate-commits = true
+
+# Do NOT publish to crates.io
+publish = false
