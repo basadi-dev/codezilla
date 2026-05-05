@@ -634,31 +634,7 @@ impl InteractiveApp {
                 line: 0,
                 col: c.saturating_sub(self.header_area.x) as usize,
             });
-        }
 
-        // ── Status bar area (last row) ───────────────────────────────────────
-        if self.status_bar_area.width > 0
-            && row >= self.status_bar_area.y
-            && row < self.status_bar_area.y + self.status_bar_area.height
-        {
-            let right = self
-                .status_bar_area
-                .x
-                .saturating_add(self.status_bar_area.width.saturating_sub(1));
-            let c = if clamp_to_viewport {
-                col.clamp(self.status_bar_area.x, right)
-            } else if col < self.status_bar_area.x || col > right {
-                return None;
-            } else {
-                col
-            };
-            // Map to a virtual line after all transcript lines
-            let total = self.transcript_total_lines(self.transcript_area.width);
-            let virtual_line = total.saturating_sub(1).max(1);
-            return Some(SelectionPoint {
-                line: virtual_line,
-                col: c.saturating_sub(self.status_bar_area.x) as usize,
-            });
         }
 
         // ── Transcript area ──────────────────────────────────────────────────

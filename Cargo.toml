@@ -89,4 +89,13 @@ split-debuginfo = "unpacked"  # avoids slow dsymutil on macOS
 [profile.dev-fast]
 inherits = "dev"
 debug = 0
-strip = "debuginfo"
+# cargo-release configuration
+# Usage: cargo release patch  (or minor / major)
+# This bumps the version, commits, tags with v{{version}}, and pushes.
+[package.metadata.release]
+tag-name = "v{{version}}"
+tag-prefix = ""
+post-release-commit-message = "chore: start next development iteration"
+dev-version = true
+dev-version-ext = "dev"
+consolidate-commits = true

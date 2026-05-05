@@ -173,6 +173,36 @@ pub async fn run_interactive_tui(
                             && mouse.column < a.x + a.width
                             && mouse.row < a.y + a.height
                     };
+                    // Helper: is the mouse inside the status bar area?
+                    let in_status_bar = {
+                        let a = app.status_bar_area;
+                        a.width > 0
+                            && a.height > 0
+                            && mouse.column >= a.x
+                            && mouse.row >= a.y
+                            && mouse.column < a.x + a.width
+                            && mouse.row < a.y + a.height
+                    };
+
+                    // When the user clicks in the status bar, temporarily
+                    // disable mouse capture so the terminal's native
+                    // drag-to-select can work on the status bar text.
+                    // Re-enable on mouse-up.
+                    if in_status_bar {
+                        match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.mouse_capture_enabled = false;
+                                dirty = true;
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                app.mouse_capture_enabled = true;
+                                dirty = true;
+                            }
+                            _ => {}
+                        }
+                        // Don't process status bar clicks as transcript drags.
+                        continue;
+                    }
 
                     match mouse.kind {
                         // ── Wheel scroll ─────────────────────────────────────
