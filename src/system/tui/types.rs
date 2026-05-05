@@ -1438,10 +1438,12 @@ fn append_transcript_entry_lines(
 ///
 /// Note: deliberately excludes the `  ·  ` table-separator that tool-result tables use,
 /// since that pattern is NOT a diff header and caused false-positive diff rendering.
+///
+/// Scans up to 20 non-empty lines so that diffs preceded by a call body
+/// and `─── result ───` separator (as in merged write_file/patch_file entries)
+/// are still detected.
 pub fn is_diff_body(body: &str) -> bool {
-    // Require at least one actual diff marker in the first few non-empty lines
-    // to distinguish a real unified diff from, e.g., a search-result table.
-    for line in body.lines().filter(|l| !l.trim().is_empty()).take(5) {
+    for line in body.lines().filter(|l| !l.trim().is_empty()).take(20) {
         if line.starts_with("--- ") || line.starts_with("+++ ") || line.starts_with("@@ ") {
             return true;
         }
