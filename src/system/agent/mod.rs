@@ -6,6 +6,7 @@ pub mod extensions;
 pub mod model_gateway;
 pub mod permission;
 pub mod sandbox;
+pub mod speculative;
 pub mod supervisor;
 pub mod tools;
 

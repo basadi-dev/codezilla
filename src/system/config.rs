@@ -50,6 +50,17 @@ pub struct AgentConfig {
     /// Upper bound accepted from a `spawn_agent` tool call.
     #[serde(default = "default_agent_max_child_timeout_secs")]
     pub max_child_timeout_secs: u64,
+    /// Number of parallel candidate solutions to explore in speculative mode.
+    /// Set to 0 or 1 to disable speculative execution entirely.
+    #[serde(default = "default_speculative_candidates")]
+    pub speculative_candidates: usize,
+    /// Timeout for each candidate agent in speculative mode (seconds).
+    #[serde(default = "default_speculative_candidate_timeout_secs")]
+    pub speculative_candidate_timeout_secs: u64,
+    /// Whether speculative mode is enabled by default for edit/debug intents.
+    /// When false, speculative mode must be explicitly triggered via `/speculate`.
+    #[serde(default)]
+    pub speculative_auto: bool,
 }
 
 impl Default for AgentConfig {
@@ -67,6 +78,9 @@ impl Default for AgentConfig {
             max_spawn_depth: default_agent_max_spawn_depth(),
             child_timeout_secs: default_agent_child_timeout_secs(),
             max_child_timeout_secs: default_agent_max_child_timeout_secs(),
+            speculative_candidates: default_speculative_candidates(),
+            speculative_candidate_timeout_secs: default_speculative_candidate_timeout_secs(),
+            speculative_auto: false,
         }
     }
 }
@@ -83,6 +97,7 @@ impl AgentConfig {
         self.max_child_agents = self.max_child_agents.max(1);
         self.child_timeout_secs = self.child_timeout_secs.max(1);
         self.max_child_timeout_secs = self.max_child_timeout_secs.max(self.child_timeout_secs);
+        self.speculative_candidate_timeout_secs = self.speculative_candidate_timeout_secs.max(30);
         self
     }
 
@@ -140,6 +155,14 @@ fn default_agent_child_timeout_secs() -> u64 {
 
 fn default_agent_max_child_timeout_secs() -> u64 {
     600
+}
+
+fn default_speculative_candidates() -> usize {
+    3
+}
+
+fn default_speculative_candidate_timeout_secs() -> u64 {
+    90
 }
 
 // ── Auto-compaction config ────────────────────────────────────────────────────
@@ -766,7 +789,10 @@ fn default_spec_config_json() -> Value {
             "max_child_agents": 4,
             "max_spawn_depth": 3,
             "child_timeout_secs": 120,
-            "max_child_timeout_secs": 600
+            "max_child_timeout_secs": 600,
+            "speculative_candidates": 3,
+            "speculative_candidate_timeout_secs": 90,
+            "speculative_auto": false
         },
         "auto_compaction": {
             "enabled": true,

@@ -2015,6 +2015,80 @@ impl InteractiveApp {
                 // Live streaming updates are handled in the first match above;
                 // this arm exists only to keep the match exhaustive.
             }
+            RuntimeEventKind::SpeculativeCandidateStarted => {
+                let total = event
+                    .payload
+                    .get("totalCandidates")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let idx = event
+                    .payload
+                    .get("candidateIndex")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.status_message = format!(
+                    "🔮 Exploring approach {}/{}…",
+                    idx + 1,
+                    total
+                );
+            }
+            RuntimeEventKind::SpeculativeCandidateCompleted => {
+                let label = event
+                    .payload
+                    .get("approachLabel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("approach");
+                let elapsed = event
+                    .payload
+                    .get("elapsedMs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.push_status_entry(
+                    event.event_id.clone(),
+                    EntryKind::Status,
+                    "Speculative",
+                    &format!("✅ \"{}\" completed ({}ms)", label, elapsed),
+                    Some(event.emitted_at / 1000),
+                );
+            }
+            RuntimeEventKind::SpeculativeJudgeStarted => {
+                let status = event
+                    .payload
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("judging");
+                if status == "judging" {
+                    let n = event
+                        .payload
+                        .get("candidateCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    self.status_message =
+                        format!("🏛️  Judging {} candidate approaches…", n);
+                } else {
+                    self.status_message = "🔮 Spawning candidate explorers…".into();
+                }
+            }
+            RuntimeEventKind::SpeculativeJudgeCompleted => {
+                let selected = event
+                    .payload
+                    .get("selectedCandidateId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let rationale = event
+                    .payload
+                    .get("rationale")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                self.status_message = format!("✨ Selected: {}", selected);
+                self.push_status_entry(
+                    event.event_id.clone(),
+                    EntryKind::Status,
+                    "Judge",
+                    &format!("Selected {} — {}", selected, rationale),
+                    Some(event.emitted_at / 1000),
+                );
+            }
         }
 
         Ok(())

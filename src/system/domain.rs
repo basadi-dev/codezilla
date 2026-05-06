@@ -579,6 +579,14 @@ pub enum RuntimeEventKind {
     ChildAgentSpawned,
     /// Live token usage update during streaming (partial/estimated).
     TokenUsageUpdate,
+    /// Speculative execution: a candidate exploration agent was spawned.
+    SpeculativeCandidateStarted,
+    /// Speculative execution: a candidate exploration agent completed.
+    SpeculativeCandidateCompleted,
+    /// Speculative execution: the judge evaluation pass has started.
+    SpeculativeJudgeStarted,
+    /// Speculative execution: the judge selected the winning approach.
+    SpeculativeJudgeCompleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -846,6 +854,56 @@ pub struct FileChangeSummary {
     /// Unified diff text (may be empty for deletes).
     #[serde(default)]
     pub diff: String,
+}
+
+// ── Speculative execution types ───────────────────────────────────────────────
+
+/// A candidate solution produced by a speculative read-only sub-agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateSolution {
+    pub candidate_id: String,
+    pub agent_thread_id: ThreadId,
+    /// Short human-readable label, e.g. "Caching approach"
+    pub approach_label: String,
+    /// The full plan/approach description produced by the candidate.
+    pub plan_text: String,
+    /// Files the candidate examined during exploration.
+    pub files_examined: Vec<String>,
+    /// Self-assessed complexity: "low", "medium", or "high"
+    pub estimated_complexity: String,
+    /// Wall-clock time the candidate took (milliseconds).
+    pub elapsed_ms: u64,
+}
+
+/// Result of the judge evaluating all candidate solutions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JudgeVerdict {
+    /// 0-indexed candidate_id of the selected solution.
+    pub selected_candidate_id: String,
+    /// Free-text rationale from the judge.
+    pub rationale: String,
+    /// Per-candidate scoring.
+    pub ranking: Vec<JudgeRanking>,
+}
+
+/// Per-candidate score emitted by the judge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JudgeRanking {
+    pub candidate_id: String,
+    pub score: f32,
+    pub strengths: String,
+    pub weaknesses: String,
+}
+
+/// Aggregate result of a speculative execution pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeculativeResult {
+    pub candidates: Vec<CandidateSolution>,
+    pub verdict: JudgeVerdict,
 }
 
 pub fn now_seconds() -> TimestampSeconds {

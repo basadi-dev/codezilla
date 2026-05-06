@@ -193,6 +193,101 @@ impl TurnExecutor {
         // subsequent iterations will recompute (reasoning_effort may differ).
         let mut cached_system_instructions: Option<Vec<String>> = Some(initial_system_instructions);
 
+        // ── Speculative execution (optional) ──────────────────────────────────
+        // If triggered, spawn N parallel read-only candidates, judge them, and
+        // inject the winning plan into the system instructions so the main loop
+        // skips exploration and executes directly.
+        if self.should_speculate(&params, turn_intent) {
+            let user_task_text = params
+                .input
+                .iter()
+                .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+                // Strip the /speculate prefix if present
+                .trim_start_matches("/speculate")
+                .trim()
+                .to_string();
+
+            if !user_task_text.is_empty() {
+                let orchestrator = super::speculative::SpeculativeOrchestrator::new(
+                    self.runtime.clone(),
+                    &agent_cfg,
+                );
+
+                match orchestrator
+                    .run(
+                        &user_task_text,
+                        &params.thread_id,
+                        &turn_id,
+                        cwd_for_persist,
+                        params.agent_depth,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        let plan_instruction =
+                            super::speculative::build_speculative_plan_instruction(&result);
+
+                        // Persist speculative result for observability.
+                        self.persist_turn_item(ConversationItem {
+                            item_id: format!("spec_{}", Uuid::new_v4().simple()),
+                            thread_id: params.thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            created_at: now_seconds(),
+                            kind: ItemKind::SystemMessage,
+                            payload: json!({
+                                "text": format!(
+                                    "[Speculative execution: {} candidates explored, \
+                                     \"{}\" selected (score {:.0}%)]\n\n{}",
+                                    result.candidates.len(),
+                                    result.verdict.selected_candidate_id,
+                                    result.verdict.ranking.iter()
+                                        .find(|r| r.candidate_id == result.verdict.selected_candidate_id)
+                                        .map(|r| r.score * 100.0)
+                                        .unwrap_or(90.0),
+                                    result.verdict.rationale,
+                                ),
+                            }),
+                        })
+                        .await?;
+
+                        // Inject the plan into cached system instructions for the first iteration.
+                        if let Some(instructions) = cached_system_instructions.as_mut() {
+                            instructions.push(plan_instruction);
+                        }
+
+                        tracing::info!(
+                            turn_id = %turn_id,
+                            candidates = result.candidates.len(),
+                            selected = %result.verdict.selected_candidate_id,
+                            "executor: speculative plan injected into context"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            turn_id = %turn_id,
+                            error = %e,
+                            "executor: speculative execution failed, falling back to normal execution"
+                        );
+                        // Notify the user but continue normally.
+                        self.runtime
+                            .publish_event(
+                                RuntimeEventKind::Warning,
+                                Some(params.thread_id.clone()),
+                                Some(turn_id.clone()),
+                                json!({
+                                    "message": format!(
+                                        "Speculative execution failed: {e}. Falling back to normal execution."
+                                    )
+                                }),
+                            )
+                            .await?;
+                    }
+                }
+            }
+        }
+
         // Tracks whether we have already done one automatic context-overflow
         // trim this turn. We only retry once to avoid an infinite loop.
         let mut auto_trim_attempted = false;
@@ -1667,5 +1762,48 @@ impl TurnExecutor {
         }
 
         Ok(instructions)
+    }
+
+    /// Decide whether this turn should use speculative execution.
+    ///
+    /// Criteria:
+    /// - `speculative_candidates >= 2` (otherwise no point)
+    /// - Not inside a child agent (prevents recursive speculation)
+    /// - Either `speculative_auto` is true for edit/debug intents,
+    ///   or the user explicitly prefixed with `/speculate`
+    fn should_speculate(
+        &self,
+        params: &crate::system::runtime::TurnStartParams,
+        intent: TurnIntent,
+    ) -> bool {
+        let cfg = &self.runtime.inner.effective_config.agent;
+
+        // Disabled if fewer than 2 candidates configured
+        if cfg.speculative_candidates < 2 {
+            return false;
+        }
+
+        // Don't speculate inside child agents (avoid recursive speculation storms)
+        if params.agent_depth > 0 {
+            return false;
+        }
+
+        // Explicit trigger: /speculate prefix in user input
+        let explicit = params.input.iter().any(|i| {
+            i.text
+                .as_ref()
+                .map(|t| t.text.trim_start().starts_with("/speculate"))
+                .unwrap_or(false)
+        });
+        if explicit {
+            return true;
+        }
+
+        // Auto-mode: only for complex intents
+        if cfg.speculative_auto {
+            return matches!(intent, TurnIntent::Edit | TurnIntent::Debug);
+        }
+
+        false
     }
 }

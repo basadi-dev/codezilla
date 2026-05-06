@@ -47,6 +47,10 @@ pub enum RuntimeEventPayload {
     CompactionStatus(CompactionStatusPayload),
     ChildAgentSpawned(ChildAgentSpawnedPayload),
     TokenUsageUpdate(TokenUsageUpdatePayload),
+    SpeculativeCandidateStarted(SpeculativePayload),
+    SpeculativeCandidateCompleted(SpeculativePayload),
+    SpeculativeJudgeStarted(SpeculativePayload),
+    SpeculativeJudgeCompleted(SpeculativePayload),
 }
 
 /// Payload of `ItemStarted` and `ItemCompleted` events.
@@ -153,6 +157,26 @@ pub struct TokenUsageUpdatePayload {
     pub cached_tokens: i64,
 }
 
+/// Generic payload for speculative execution lifecycle events.
+/// The TUI reads these via raw JSON access, so a loosely-typed
+/// wrapper suffices.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeculativePayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approach_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+}
+
 impl RuntimeEventPayload {
     /// Decode `event.payload` according to `event.kind`.
     pub fn from_event(event: &RuntimeEvent) -> Result<Self> {
@@ -210,6 +234,18 @@ impl RuntimeEventPayload {
                 "TokenUsageUpdate",
                 &event.payload,
             )?)),
+            RuntimeEventKind::SpeculativeCandidateStarted => Ok(Self::SpeculativeCandidateStarted(
+                decode("SpeculativeCandidateStarted", &event.payload).unwrap_or_default(),
+            )),
+            RuntimeEventKind::SpeculativeCandidateCompleted => Ok(Self::SpeculativeCandidateCompleted(
+                decode("SpeculativeCandidateCompleted", &event.payload).unwrap_or_default(),
+            )),
+            RuntimeEventKind::SpeculativeJudgeStarted => Ok(Self::SpeculativeJudgeStarted(
+                decode("SpeculativeJudgeStarted", &event.payload).unwrap_or_default(),
+            )),
+            RuntimeEventKind::SpeculativeJudgeCompleted => Ok(Self::SpeculativeJudgeCompleted(
+                decode("SpeculativeJudgeCompleted", &event.payload).unwrap_or_default(),
+            )),
         }
     }
 }
