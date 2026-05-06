@@ -59,7 +59,7 @@ pub struct AgentConfig {
     pub speculative_candidate_timeout_secs: u64,
     /// Whether speculative mode is enabled by default for edit/debug intents.
     /// When false, speculative mode must be explicitly triggered via `/speculate`.
-    #[serde(default)]
+    #[serde(default = "default_speculative_auto")]
     pub speculative_auto: bool,
 }
 
@@ -80,7 +80,7 @@ impl Default for AgentConfig {
             max_child_timeout_secs: default_agent_max_child_timeout_secs(),
             speculative_candidates: default_speculative_candidates(),
             speculative_candidate_timeout_secs: default_speculative_candidate_timeout_secs(),
-            speculative_auto: false,
+            speculative_auto: default_speculative_auto(),
         }
     }
 }
@@ -163,6 +163,10 @@ fn default_speculative_candidates() -> usize {
 
 fn default_speculative_candidate_timeout_secs() -> u64 {
     90
+}
+
+fn default_speculative_auto() -> bool {
+    true
 }
 
 // ── Auto-compaction config ────────────────────────────────────────────────────
@@ -792,7 +796,7 @@ fn default_spec_config_json() -> Value {
             "max_child_timeout_secs": 600,
             "speculative_candidates": 3,
             "speculative_candidate_timeout_secs": 90,
-            "speculative_auto": false
+            "speculative_auto": true
         },
         "auto_compaction": {
             "enabled": true,

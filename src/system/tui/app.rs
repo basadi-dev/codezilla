@@ -1254,6 +1254,13 @@ impl InteractiveApp {
             return Ok(false);
         }
 
+        // /speculate is a pass-through: recognised by the TUI (so it doesn't
+        // show "Unknown command") but forwarded to the agent as plain text so
+        // the executor's should_speculate() can detect the prefix.
+        if command.starts_with("/speculate") {
+            return Ok(false);
+        }
+
         let handled = if matches!(command, "/quit" | "/exit") {
             self.should_quit = true;
             true
@@ -1362,7 +1369,8 @@ impl InteractiveApp {
                  Ctrl+C interrupt (double-tap clears composer), Ctrl+Q quit  ·  \
                  Approval: Y approve  U approve+auto  D deny  ·  \
                  Commands: /model [provider/model]  /reasoning [auto|off|low|medium|high]  \
-                 /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads (autocomplete)  ·  \
+                 /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads  \
+                 /speculate <task> (autocomplete)  ·  \
                  CLI: codezilla -r (resume last thread)".into();
             self.error_message = None;
             true
@@ -1511,6 +1519,7 @@ impl InteractiveApp {
             "/quit",
             "/reload",
             "/resume ",
+            "/speculate ",
             "/threads",
         ] {
             all.push(AutocompleteItem::simple(*cmd));
