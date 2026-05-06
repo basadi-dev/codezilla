@@ -138,6 +138,11 @@ pub struct ActivityState {
     /// (approval, future: input request). The header shows this in place of
     /// the tool list so the user sees *what they need to act on*.
     blocked: Option<BlockedReason>,
+    /// When the current blocked period started. `None` while not blocked.
+    paused_at: Option<Instant>,
+    /// Cumulative time spent paused during this turn. Subtracted from
+    /// `turn_elapsed` so the timer freezes while waiting for approval.
+    paused_duration: Duration,
     /// Sub-agents spawned via `spawn_agent`, in start order. Stays after a
     /// child finishes so the user can still see its final outcome until the
     /// parent turn ends; cleared by `end_turn`.
@@ -170,9 +175,16 @@ impl ActivityState {
         self.turn_started_at
     }
 
+    /// Effective elapsed time for the current turn, **excluding** time spent
+    /// blocked on user approval. While blocked the timer appears frozen; once
+    /// the user resolves the approval the timer resumes from where it left
+    /// off.
     pub fn turn_elapsed(&self, now: Instant) -> Option<Duration> {
         self.turn_started_at
-            .map(|t| now.saturating_duration_since(t))
+            .map(|t| {
+                now.saturating_duration_since(t)
+                    .saturating_sub(self.effective_paused_duration(now))
+            })
     }
 
     /// True when nothing is in flight — no tools, no turn, not streaming.
@@ -196,6 +208,8 @@ impl ActivityState {
         self.tools.clear();
         self.streaming = false;
         self.turn_started_at = Some(now);
+        self.paused_at = None;
+        self.paused_duration = Duration::ZERO;
     }
 
     /// Clear everything that's tied to the active turn. Spinner tick keeps
@@ -205,6 +219,8 @@ impl ActivityState {
         self.streaming = false;
         self.turn_started_at = None;
         self.blocked = None;
+        self.paused_at = None;
+        self.paused_duration = Duration::ZERO;
         self.child_agents.clear();
     }
 
@@ -285,12 +301,46 @@ impl ActivityState {
         self.blocked.as_ref()
     }
 
+    /// Mark the turn as blocked (e.g. waiting for user approval) and start
+    /// the pause timer so `turn_elapsed` freezes.
     pub fn set_blocked(&mut self, reason: BlockedReason) {
         self.blocked = Some(reason);
+        self.paused_at = Some(Instant::now());
     }
 
+    /// Test-friendly variant that accepts an explicit `Instant`.
+    #[cfg(test)]
+    fn set_blocked_at(&mut self, reason: BlockedReason, now: Instant) {
+        self.blocked = Some(reason);
+        self.paused_at = Some(now);
+    }
+
+    /// Clear the blocked state and accumulate the paused duration so the
+    /// timer resumes from where it left off.
     pub fn clear_blocked(&mut self) {
+        if let Some(paused_at) = self.paused_at.take() {
+            self.paused_duration += Instant::now().saturating_duration_since(paused_at);
+        }
         self.blocked = None;
+    }
+
+    /// Test-friendly variant that accepts an explicit `Instant`.
+    #[cfg(test)]
+    fn clear_blocked_at(&mut self, now: Instant) {
+        if let Some(paused_at) = self.paused_at.take() {
+            self.paused_duration += now.saturating_duration_since(paused_at);
+        }
+        self.blocked = None;
+    }
+
+    /// Effective paused duration: if currently paused, add the time since
+    /// pause started; otherwise return the accumulated paused_duration.
+    fn effective_paused_duration(&self, now: Instant) -> Duration {
+        let mut total = self.paused_duration;
+        if let Some(paused_at) = self.paused_at {
+            total += now.saturating_duration_since(paused_at);
+        }
+        total
     }
 
     pub fn start_tool(
@@ -524,6 +574,45 @@ mod tests {
         s.start_turn(t0);
         let elapsed = s.turn_elapsed(t0 + Duration::from_secs(5)).unwrap();
         assert_eq!(elapsed.as_secs(), 5);
+    }
+
+    #[test]
+    fn turn_elapsed_freezes_while_blocked() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+        s.start_tool("c1", "bash_exec", None, t0);
+
+        // At t0+3s, elapsed should be 3s
+        assert_eq!(s.turn_elapsed(t0 + Duration::from_secs(3)).unwrap().as_secs(), 3);
+
+        // Block at t0+3s
+        s.set_blocked_at(BlockedReason::Approval, t0 + Duration::from_secs(3));
+
+        // At t0+10s (7s after block), elapsed should still be 3s
+        assert_eq!(s.turn_elapsed(t0 + Duration::from_secs(10)).unwrap().as_secs(), 3);
+
+        // Unblock at t0+10s
+        s.clear_blocked_at(t0 + Duration::from_secs(10));
+
+        // At t0+15s (5s after unblock), elapsed should be 3+5=8s
+        assert_eq!(s.turn_elapsed(t0 + Duration::from_secs(15)).unwrap().as_secs(), 8);
+    }
+
+    #[test]
+    fn turn_elapsed_handles_multiple_block_cycles() {
+        let mut s = ActivityState::new();
+        let t0 = Instant::now();
+        s.start_turn(t0);
+
+        // Work 2s, block 3s, work 2s, block 2s, then check at +12s total wall
+        s.set_blocked_at(BlockedReason::Approval, t0 + Duration::from_secs(2));
+        s.clear_blocked_at(t0 + Duration::from_secs(5));
+        s.set_blocked_at(BlockedReason::Approval, t0 + Duration::from_secs(7));
+        s.clear_blocked_at(t0 + Duration::from_secs(9));
+
+        // Wall time 12s, paused 5s total → effective 7s
+        assert_eq!(s.turn_elapsed(t0 + Duration::from_secs(12)).unwrap().as_secs(), 7);
     }
 
     #[test]
