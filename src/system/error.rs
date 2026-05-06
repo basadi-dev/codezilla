@@ -110,6 +110,95 @@ impl std::fmt::Display for CodError {
     }
 }
 
+// ─── Structured provider errors ───────────────────────────────────────────────
+
+/// Typed error that LLM providers can return instead of opaque `anyhow` strings.
+///
+/// Each variant maps to an [`ErrorKind`] deterministically, so the executor and
+/// TUI can branch on the variant rather than string-matching. Providers are
+/// incrementally migrated — those still returning `anyhow::Error` fall through
+/// to the existing `classify()` path.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum ProviderError {
+    /// The conversation exceeds the model's context window.
+    ContextOverflow {
+        tokens_used: Option<u64>,
+        limit: Option<u64>,
+    },
+    /// Rate-limited (HTTP 429). `retry_after_secs` is extracted from the
+    /// `Retry-After` header when available.
+    RateLimit {
+        retry_after_secs: Option<u64>,
+    },
+    /// Authentication failed (invalid API key, expired token, etc.).
+    AuthFailed {
+        detail: String,
+    },
+    /// The requested model was not found on the server.
+    ModelNotFound {
+        model: String,
+    },
+    /// Server error (5xx) from the provider.
+    ServerError {
+        status: u16,
+        body: String,
+    },
+    /// Network-level failure (DNS, TCP, TLS).
+    Network(String),
+}
+
+impl ProviderError {
+    /// Map this structured error to the existing [`ErrorKind`] taxonomy.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            ProviderError::ContextOverflow { .. } => ErrorKind::ContextOverflow,
+            ProviderError::RateLimit { .. } => ErrorKind::ApiError,
+            ProviderError::AuthFailed { .. } => ErrorKind::AuthError,
+            ProviderError::ModelNotFound { .. } => ErrorKind::ApiError,
+            ProviderError::ServerError { .. } => ErrorKind::ApiError,
+            ProviderError::Network(_) => ErrorKind::StreamFailure,
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderError::ContextOverflow { tokens_used, limit } => {
+                write!(f, "Context overflow")?;
+                if let (Some(used), Some(lim)) = (tokens_used, limit) {
+                    write!(f, " ({used} tokens used, limit {lim})")?;
+                }
+                Ok(())
+            }
+            ProviderError::RateLimit { retry_after_secs } => {
+                write!(f, "Rate limited")?;
+                if let Some(secs) = retry_after_secs {
+                    write!(f, " (retry after {secs}s)")?;
+                }
+                Ok(())
+            }
+            ProviderError::AuthFailed { detail } => write!(f, "Auth failed: {detail}"),
+            ProviderError::ModelNotFound { model } => write!(f, "Model not found: {model}"),
+            ProviderError::ServerError { status, body } => {
+                write!(f, "Server error {status}: {}", &body[..body.len().min(200)])
+            }
+            ProviderError::Network(msg) => write!(f, "Network error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
+impl From<ProviderError> for CodError {
+    fn from(pe: ProviderError) -> Self {
+        let kind = pe.kind();
+        let message = humanize(&pe.to_string(), kind);
+        CodError { kind, message }
+    }
+}
+
 // ─── Classification ───────────────────────────────────────────────────────────
 
 /// Classify a raw error string (typically from `anyhow`) into an [`ErrorKind`].

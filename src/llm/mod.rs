@@ -212,3 +212,51 @@ pub trait LlmClient: Send + Sync {
         max_tokens: usize,
     ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>>;
 }
+
+// ── Provider trait abstraction ────────────────────────────────────────────────
+
+/// Flattened request struct that replaces the 8-argument provider signatures.
+/// Every provider takes the same parameters — this makes the contract explicit.
+#[derive(Debug, Clone)]
+pub struct CompletionRequest<'a> {
+    pub messages: &'a [Message],
+    pub tools: &'a [ToolDefinition],
+    pub model: &'a str,
+    pub temperature: f32,
+    pub reasoning_effort: Option<&'a str>,
+    pub max_tokens: usize,
+}
+
+/// Capability flags for a provider. Used by the executor to avoid sending
+/// unsupported parameters (e.g. `reasoning_effort` to a provider that ignores it).
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct ProviderCaps {
+    /// Whether the provider supports streaming responses.
+    pub streaming: bool,
+    /// Whether the provider supports reasoning effort / thinking configuration.
+    pub reasoning_effort: bool,
+    /// Whether the provider supports vision (image inputs).
+    pub vision: bool,
+}
+
+/// Trait implemented by each LLM provider. New providers implement this trait
+/// and register with the `UnifiedClient` — no need to edit the dispatch match.
+#[async_trait::async_trait]
+#[allow(dead_code)]
+pub trait LlmProvider: Send + Sync {
+    /// Unique identifier for this provider (e.g. "ollama", "openai").
+    fn id(&self) -> &str;
+
+    /// Declare what this provider supports.
+    fn capabilities(&self) -> ProviderCaps;
+
+    /// Non-streaming completion.
+    async fn complete(&self, req: CompletionRequest<'_>) -> Result<LlmResponse>;
+
+    /// Streaming completion — returns a channel of `StreamChunk`s.
+    async fn stream(
+        &self,
+        req: CompletionRequest<'_>,
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>>;
+}

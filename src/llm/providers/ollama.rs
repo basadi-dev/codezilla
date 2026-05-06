@@ -3,12 +3,19 @@ use anyhow::{anyhow, Context as AnyhowContext, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::llm::{
     FunctionCall, LlmResponse, Message, Role, StreamChunk, TokenUsage, ToolCall, ToolDefinition,
 };
 use crate::system::config::LlmConfig as Config;
+use crate::system::error::ProviderError;
+
+/// Maximum number of retries for transient HTTP errors (429, 502, 503).
+const MAX_RETRIES: u32 = 3;
+/// Initial backoff delay before the first retry.
+const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 fn chat_url(cfg: &Config) -> String {
     let base = cfg.ollama.base_url.trim_end_matches('/');
@@ -117,7 +124,13 @@ fn ollama_think_value<'a>(model: &str, reasoning_effort: Option<&'a str>) -> Oll
 
 fn model_supports_think_levels(model: &str) -> bool {
     let normalized = model.trim().to_ascii_lowercase();
+    // Models known to support granular thinking levels ("low"/"medium"/"high")
+    // via the Ollama `think` parameter, as opposed to a simple boolean.
     normalized.contains("gpt-oss")
+        || normalized.contains("qwen3")
+        || normalized.contains("deepseek-v4")
+        || normalized.contains("glm-5")
+        || normalized.contains("gemma4")
 }
 
 fn build_chat_messages(messages: &[Message]) -> Vec<Value> {
@@ -254,26 +267,107 @@ pub async fn complete(
         false,
         reasoning_effort,
     );
+    let headers = auth_headers(cfg);
 
-    let mut req = http.post(&url).json(&body);
-    for (k, v) in auth_headers(cfg) {
-        req = req.header(&k, &v);
-    }
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 0..=MAX_RETRIES {
+        if attempt > 0 {
+            let delay = INITIAL_BACKOFF * 2u32.saturating_pow(attempt - 1);
+            tracing::warn!(
+                attempt,
+                delay_ms = delay.as_millis(),
+                "ollama: retrying after transient error"
+            );
+            tokio::time::sleep(delay).await;
+        }
 
-    let resp = req.send().await.context("sending Ollama request")?;
+        let mut req = http.post(&url).json(&body);
+        for (k, v) in &headers {
+            req = req.header(k, v);
+        }
 
-    if !resp.status().is_success() {
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = Some(e.into());
+                continue;
+            }
+        };
+
         let status = resp.status();
-        let body = resp
+        if status.is_success() {
+            let resp_val: Value = resp.json().await.context("parsing Ollama response")?;
+            return parse_chat_response(&resp_val);
+        }
+
+        let body_text = resp
             .text()
             .await
             .unwrap_or_else(|_| "could not read error body".to_string());
-        anyhow::bail!("Ollama API error {}: {}", status, body);
+
+        // Retry on transient server errors; fail immediately on 4xx (except 429).
+        if is_retryable_status(status) {
+            tracing::warn!(
+                status = %status,
+                attempt,
+                "ollama: transient error, will retry"
+            );
+            last_error = Some(anyhow!("Ollama API error {}: {}", status, body_text));
+            continue;
+        }
+
+        // Classify the error into a structured ProviderError at the source,
+        // eliminating downstream string matching for known error patterns.
+        return Err(classify_ollama_error(status.as_u16(), &body_text, model).into());
     }
 
-    let resp_val: Value = resp.json().await.context("parsing Ollama response")?;
+    Err(last_error.unwrap_or_else(|| anyhow!("Ollama request failed after {MAX_RETRIES} retries")))
+}
 
-    parse_chat_response(&resp_val)
+/// Classify an Ollama HTTP error response into a structured [`ProviderError`].
+fn classify_ollama_error(status: u16, body: &str, model: &str) -> ProviderError {
+    let lower = body.to_ascii_lowercase();
+
+    // Auth failures
+    if status == 401 || lower.contains("unauthori") || lower.contains("invalid api key") {
+        return ProviderError::AuthFailed {
+            detail: body.chars().take(200).collect(),
+        };
+    }
+
+    // Model not found (Ollama returns this as a 404 or in the error body)
+    if status == 404
+        || (lower.contains("model") && (lower.contains("not found") || lower.contains("does not exist")))
+    {
+        return ProviderError::ModelNotFound {
+            model: model.to_string(),
+        };
+    }
+
+    // Context overflow
+    if lower.contains("context exceeded")
+        || lower.contains("max context")
+        || lower.contains("too many tokens")
+        || lower.contains("context window")
+    {
+        return ProviderError::ContextOverflow {
+            tokens_used: None,
+            limit: None,
+        };
+    }
+
+    ProviderError::ServerError {
+        status,
+        body: body.to_string(),
+    }
+}
+
+/// Returns `true` for HTTP status codes that are transient and worth retrying.
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status.as_u16(),
+        429 | 502 | 503 | 504
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -333,6 +427,23 @@ pub async fn stream(
                     continue;
                 }
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    // Detect server-side errors surfaced mid-stream.
+                    // Ollama sends `{"error": "..."}` when the model crashes,
+                    // runs out of memory, or hits a context limit.
+                    if let Some(err_msg) = v.get("error").and_then(Value::as_str) {
+                        tracing::error!(
+                            error = err_msg,
+                            "ollama: server error during stream"
+                        );
+                        let _ = tx
+                            .send(StreamChunk::Text(format!(
+                                "\n[Ollama error: {err_msg}]"
+                            )))
+                            .await;
+                        let _ = tx.send(StreamChunk::Done).await;
+                        return;
+                    }
+
                     for chunk in parse_chat_chunk_streaming(&v, &mut inline_tool_buffer) {
                         let _ = tx.send(chunk).await;
                     }
@@ -351,8 +462,21 @@ pub async fn stream(
         }
         if !buf.trim().is_empty() {
             if let Ok(v) = serde_json::from_str::<Value>(buf.trim()) {
-                for chunk in parse_chat_chunk_streaming(&v, &mut inline_tool_buffer) {
-                    let _ = tx.send(chunk).await;
+                // Check for error in the final buffered chunk too.
+                if let Some(err_msg) = v.get("error").and_then(Value::as_str) {
+                    tracing::error!(
+                        error = err_msg,
+                        "ollama: server error in final stream chunk"
+                    );
+                    let _ = tx
+                        .send(StreamChunk::Text(format!(
+                            "\n[Ollama error: {err_msg}]"
+                        )))
+                        .await;
+                } else {
+                    for chunk in parse_chat_chunk_streaming(&v, &mut inline_tool_buffer) {
+                        let _ = tx.send(chunk).await;
+                    }
                 }
             }
         }
@@ -779,5 +903,65 @@ mod base64 {
     use ::base64::engine::Engine;
     pub fn encode(s: impl AsRef<[u8]>) -> String {
         ::base64::engine::general_purpose::STANDARD.encode(s.as_ref())
+    }
+}
+
+// ── LlmProvider trait implementation ──────────────────────────────────────────
+
+use crate::llm::{CompletionRequest, LlmProvider, ProviderCaps};
+
+/// Struct wrapper for the Ollama provider, implementing [`LlmProvider`].
+///
+/// Delegates to the existing free functions — this is a zero-cost abstraction
+/// that satisfies the trait contract for registry-based dispatch.
+#[allow(dead_code)]
+pub struct OllamaProvider {
+    pub http: Client,
+    pub cfg: Config,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for OllamaProvider {
+    fn id(&self) -> &str {
+        "ollama"
+    }
+
+    fn capabilities(&self) -> ProviderCaps {
+        ProviderCaps {
+            streaming: true,
+            reasoning_effort: true,
+            vision: true,
+        }
+    }
+
+    async fn complete(&self, req: CompletionRequest<'_>) -> anyhow::Result<LlmResponse> {
+        complete(
+            &self.http,
+            &self.cfg,
+            req.messages,
+            req.tools,
+            req.model,
+            req.temperature,
+            req.max_tokens,
+            req.reasoning_effort,
+        )
+        .await
+    }
+
+    async fn stream(
+        &self,
+        req: CompletionRequest<'_>,
+    ) -> anyhow::Result<mpsc::Receiver<StreamChunk>> {
+        stream(
+            &self.http,
+            &self.cfg,
+            req.messages,
+            req.tools,
+            req.model,
+            req.temperature,
+            req.max_tokens,
+            req.reasoning_effort,
+        )
+        .await
     }
 }

@@ -39,10 +39,10 @@ impl TurnPhase {
 use self::context::TurnContext;
 use self::utils::{
     already_read_directive, classify_turn_intent, derive_thread_title, extract_plan_from_response,
-    find_repetition_start, initial_read_budget, intent_directive, is_degenerate_repetition,
-    is_read_only_tool, progress_summary, recently_read_paths, should_retry_no_tool_completion,
-    thinking_instruction, user_requested_verification, wants_verbose_repo_map, ProgressState,
-    ReadKey, TurnIntent,
+    find_repetition_start, initial_read_budget, intent_directive, intent_to_reasoning_effort,
+    is_degenerate_repetition, is_read_only_tool, progress_summary, recently_read_paths,
+    should_retry_no_tool_completion, thinking_instruction, user_requested_verification,
+    wants_verbose_repo_map, ProgressState, ReadKey, TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
@@ -329,7 +329,25 @@ impl TurnExecutor {
                 self.persist_turn_item(nudge_item).await?;
             }
 
-            let turn_ctx = TurnContext::build(self, &params, &turn_id, thread.clone()).await?;
+            let mut turn_ctx = TurnContext::build(self, &params, &turn_id, thread.clone()).await?;
+
+            // ── Adaptive reasoning effort ──────────────────────────────────
+            // On every iteration, adjust reasoning_effort based on intent.
+            // The user's explicit setting takes priority (via Auto → override).
+            let adaptive_effort = intent_to_reasoning_effort(
+                turn_intent,
+                turn_ctx.effective_model_settings.reasoning_effort,
+            );
+            if adaptive_effort != turn_ctx.effective_model_settings.reasoning_effort {
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    intent = ?turn_intent,
+                    from = turn_ctx.effective_model_settings.reasoning_effort.as_str(),
+                    to = adaptive_effort.as_str(),
+                    "executor: adaptive reasoning effort override"
+                );
+                turn_ctx.effective_model_settings.reasoning_effort = adaptive_effort;
+            }
 
             // Use the pre-computed instructions on the first iteration to avoid
             // a redundant async call. Recompute on subsequent iterations so

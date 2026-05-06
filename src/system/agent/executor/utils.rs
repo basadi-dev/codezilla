@@ -3,7 +3,8 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::system::domain::{
-    ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ToolCall, UserInput,
+    ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ReasoningEffort, ToolCall,
+    UserInput,
 };
 
 // ─── is_read_only_tool ────────────────────────────────────────────────────────
@@ -114,8 +115,42 @@ pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
     };
     match call.tool_name.as_str() {
         "grep_search" => non_empty_string("pattern").map(|m| m.into_owned()),
-        "read_file" | "list_dir" | "view_file" => non_empty_string("path").map(|m| m.into_owned()),
-        "bash_exec" => non_empty_string("command").map(|m| m.into_owned()),
+        "read_file" | "list_dir" | "view_file" => {
+            if let Some(reason) = non_empty_string("path") {
+                return Some(reason.into_owned());
+            }
+            // Catch URL-as-path — a common model mistake.
+            if let Some(path) = call.arguments.get("path").and_then(Value::as_str) {
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    return Some(format!(
+                        "`path` must be a local filesystem path, not a URL. \
+                         Use `web_fetch` to read URLs. Got: {}",
+                        &path[..path.len().min(80)]
+                    ));
+                }
+            }
+            None
+        }
+        "bash_exec" => {
+            if let Some(reason) = non_empty_string("command") {
+                return Some(reason.into_owned());
+            }
+            // Detect JSON-as-command — models sometimes emit the entire tool-call
+            // JSON object as the bash command string instead of an actual command.
+            if let Some(cmd) = call.arguments.get("command").and_then(Value::as_str) {
+                let trimmed = cmd.trim();
+                if (trimmed.starts_with('{') && trimmed.contains("\"command\""))
+                    || (trimmed.starts_with('{') && trimmed.contains("\"name\""))
+                {
+                    return Some(
+                        "`command` contains a JSON object instead of a shell command string. \
+                         Provide the actual shell command, e.g. \"cargo build --release\""
+                            .into(),
+                    );
+                }
+            }
+            None
+        }
         "shell_exec" => {
             if call.arguments.get("argv").is_none() {
                 Some(missing("argv"))
@@ -146,25 +181,49 @@ pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
             }
             None
         }
+        "write_file" => {
+            if let Some(reason) = non_empty_string("path") {
+                return Some(reason.into_owned());
+            }
+            // `content` can be empty (creating an empty file is valid) but must exist.
+            if call.arguments.get("content").is_none() {
+                return Some(missing("content"));
+            }
+            None
+        }
         "patch_file" => {
             if call.arguments.get("path").and_then(Value::as_str).is_none() {
                 return Some(missing("path"));
             }
-            if call
-                .arguments
-                .get("start_line")
-                .and_then(Value::as_u64)
-                .is_none()
-            {
+            let start = call.arguments.get("start_line").and_then(Value::as_u64);
+            let end = call.arguments.get("end_line").and_then(Value::as_u64);
+            if start.is_none() {
                 return Some(missing("start_line"));
             }
-            if call
-                .arguments
-                .get("end_line")
-                .and_then(Value::as_u64)
-                .is_none()
-            {
+            if end.is_none() {
                 return Some(missing("end_line"));
+            }
+            // Line range sanity checks.
+            if let (Some(s), Some(e)) = (start, end) {
+                if s == 0 {
+                    return Some(
+                        "`start_line` must be ≥ 1 (lines are 1-indexed)".into(),
+                    );
+                }
+                if s > e {
+                    return Some(format!(
+                        "`start_line` ({s}) must be ≤ `end_line` ({e})"
+                    ));
+                }
+                // Guard against impossibly large ranges that suggest hallucinated
+                // line numbers (e.g. patching line 999999 of a 200-line file).
+                if e - s > 10_000 {
+                    return Some(format!(
+                        "line range {s}..{e} spans {} lines — this is unusually large \
+                         and likely incorrect. Verify the line numbers.",
+                        e - s
+                    ));
+                }
             }
             if call
                 .arguments
@@ -416,6 +475,28 @@ where
     }
 
     batches
+}
+
+/// Map turn intent to an adaptive reasoning effort level, reducing token waste
+/// for simple queries while boosting quality for complex tasks.
+///
+/// The user's explicit `reasoning_effort` setting always takes priority.
+/// When the user has it set to `Auto`, we derive the effort from the intent.
+pub(crate) fn intent_to_reasoning_effort(
+    intent: TurnIntent,
+    user_setting: ReasoningEffort,
+) -> ReasoningEffort {
+    // User's explicit setting always wins.
+    if user_setting != ReasoningEffort::Auto {
+        return user_setting;
+    }
+    match intent {
+        TurnIntent::Inventory => ReasoningEffort::Off,
+        TurnIntent::Answer => ReasoningEffort::Low,
+        TurnIntent::Edit => ReasoningEffort::Medium,
+        TurnIntent::Debug | TurnIntent::Review => ReasoningEffort::High,
+        TurnIntent::Unknown => ReasoningEffort::Auto,
+    }
 }
 
 pub(crate) fn thinking_instruction(reasoning_effort: Option<&str>) -> Option<String> {

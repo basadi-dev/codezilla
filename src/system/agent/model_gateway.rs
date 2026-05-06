@@ -1061,16 +1061,32 @@ pub fn build_compaction_messages(
                     .unwrap_or("");
 
                 if ok {
-                    // For successful reads/edits/writes, record just a one-liner; skip verbose output
-                    // unless it looks like test/build output worth preserving.
-                    let is_diagnostic = looks_like_diagnostic(&out, last_tool_name);
-                    if is_diagnostic {
-                        let snippet: String = out.chars().take(800).collect();
-                        transcript.push_str(&format!("[OK] {snippet}\n\n"));
+                    // ── Tiered compaction ──────────────────────────────────────
+                    // Priority 3 (drop-first): read-only tools — the model already
+                    // processed their output. Only record that they succeeded,
+                    // not their full content. This can save 20K+ tokens.
+                    let is_read_only = matches!(
+                        last_tool_name,
+                        "read_file" | "list_dir" | "view_file" | "grep_search"
+                            | "search_web" | "read_url" | "read_browser_page"
+                    );
+                    if is_read_only {
+                        transcript.push_str("[OK] (content already processed)\n\n");
                     } else {
-                        transcript.push_str("[OK]\n\n");
+                        // Priority 2 (summarize): action tools — preserve diagnostic
+                        // output (compiler errors, test results) but truncate verbose
+                        // success output.
+                        let is_diagnostic = looks_like_diagnostic(&out, last_tool_name);
+                        if is_diagnostic {
+                            let snippet: String = out.chars().take(800).collect();
+                            transcript.push_str(&format!("[OK] {snippet}\n\n"));
+                        } else {
+                            transcript.push_str("[OK]\n\n");
+                        }
                     }
                 } else {
+                    // Priority 1 (always keep): errors are critical context for
+                    // the next turn — preserve them with higher detail.
                     let combined = if err.is_empty() {
                         out.clone()
                     } else {
