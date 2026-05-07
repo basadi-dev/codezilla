@@ -73,6 +73,10 @@ pub struct AgentConfig {
     /// Prevents reviewing trivially small edits. Resets after each review.
     #[serde(default = "default_checkpoint_review_min_changes")]
     pub checkpoint_review_min_changes: usize,
+    /// Maximum checkpoint reviews per turn. Prevents the review→fix→review
+    /// feedback loop from running indefinitely. Default: 2.
+    #[serde(default = "default_checkpoint_review_max_per_turn")]
+    pub checkpoint_review_max_per_turn: usize,
 }
 
 impl Default for AgentConfig {
@@ -96,6 +100,7 @@ impl Default for AgentConfig {
             checkpoint_review_enabled: default_checkpoint_review_enabled(),
             checkpoint_review_max_diff_chars: default_checkpoint_review_max_diff_chars(),
             checkpoint_review_min_changes: default_checkpoint_review_min_changes(),
+            checkpoint_review_max_per_turn: default_checkpoint_review_max_per_turn(),
         }
     }
 }
@@ -115,6 +120,7 @@ impl AgentConfig {
         self.speculative_candidate_timeout_secs = self.speculative_candidate_timeout_secs.max(30);
         self.checkpoint_review_max_diff_chars = self.checkpoint_review_max_diff_chars.max(1000);
         self.checkpoint_review_min_changes = self.checkpoint_review_min_changes.max(1);
+        self.checkpoint_review_max_per_turn = self.checkpoint_review_max_per_turn.max(1);
         self
     }
 
@@ -196,6 +202,10 @@ fn default_checkpoint_review_max_diff_chars() -> usize {
 
 fn default_checkpoint_review_min_changes() -> usize {
     1
+}
+
+fn default_checkpoint_review_max_per_turn() -> usize {
+    2
 }
 
 // ── Auto-compaction config ────────────────────────────────────────────────────
@@ -828,7 +838,8 @@ fn default_spec_config_json() -> Value {
             "speculative_auto": true,
             "checkpoint_review_enabled": true,
             "checkpoint_review_max_diff_chars": 16000,
-            "checkpoint_review_min_changes": 1
+            "checkpoint_review_min_changes": 1,
+            "checkpoint_review_max_per_turn": 2
         },
         "auto_compaction": {
             "enabled": true,

@@ -368,6 +368,10 @@ impl TurnExecutor {
         // Tracks file changes since the last review to decide when to fire.
         let mut changes_since_last_review: Vec<FileChangeSummary> = Vec::new();
         let mut checkpoint_reviews_run: usize = 0;
+        // Cooldown flag: after injecting review feedback, skip one tool round
+        // before re-reviewing. This prevents the review→fix→review death spiral
+        // where the fix attempt immediately triggers another review.
+        let mut review_cooldown = false;
         // Extract the user task text once for the reviewer's context.
         let user_task_text_for_review: String = params
             .input
@@ -1037,10 +1041,14 @@ impl TurnExecutor {
             //   - checkpoint_review_enabled is true
             //   - not inside a child agent (prevents recursive review storms)
             //   - enough changes have accumulated since the last review
+            //   - we haven't exceeded the per-turn review cap
+            //   - not in cooldown from a previous review feedback injection
             if agent_cfg.checkpoint_review_enabled
                 && params.agent_depth == 0
                 && !changes_since_last_review.is_empty()
                 && changes_since_last_review.len() >= agent_cfg.checkpoint_review_min_changes
+                && checkpoint_reviews_run < agent_cfg.checkpoint_review_max_per_turn
+                && !review_cooldown
             {
                 let reviewer = super::review::CheckpointReviewer::new(
                     self.runtime.clone(),
@@ -1093,9 +1101,15 @@ impl TurnExecutor {
                             tracing::info!(
                                 turn_id = %turn_id,
                                 issues = verdict.issues.len(),
+                                review_index = checkpoint_reviews_run,
+                                remaining = agent_cfg.checkpoint_review_max_per_turn - checkpoint_reviews_run,
                                 "executor: checkpoint review found issues — injecting feedback"
                             );
                             no_tool_nudge_instruction = Some(feedback);
+                            // Enter cooldown: skip reviewing the immediate fix
+                            // attempt. The cooldown clears after the next tool
+                            // round, so a follow-up review can still validate.
+                            review_cooldown = true;
                         } else {
                             tracing::debug!(
                                 turn_id = %turn_id,
@@ -1113,6 +1127,27 @@ impl TurnExecutor {
                         changes_since_last_review.clear();
                     }
                 }
+            } else if review_cooldown && !changes_since_last_review.is_empty() {
+                // Clear cooldown after the fix attempt's tool round completes.
+                // The *next* tool round (if any) can be reviewed again, up to
+                // the per-turn cap.
+                review_cooldown = false;
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    checkpoint_reviews_run,
+                    max = agent_cfg.checkpoint_review_max_per_turn,
+                    "executor: review cooldown cleared after fix attempt"
+                );
+            } else if checkpoint_reviews_run >= agent_cfg.checkpoint_review_max_per_turn
+                && !changes_since_last_review.is_empty()
+            {
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    checkpoint_reviews_run,
+                    max = agent_cfg.checkpoint_review_max_per_turn,
+                    "executor: checkpoint review cap reached — skipping further reviews"
+                );
+                changes_since_last_review.clear();
             }
 
             if let Some(stop_reason) = non_retryable_stop_reason {
