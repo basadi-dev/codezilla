@@ -2098,6 +2098,58 @@ impl InteractiveApp {
                     Some(event.emitted_at / 1000),
                 );
             }
+            RuntimeEventKind::CheckpointReviewStarted => {
+                let files: Vec<String> = event
+                    .payload
+                    .get("filesReviewed")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let file_count = files.len();
+                self.status_message = format!(
+                    "🔍 Reviewing {} file change{}…",
+                    file_count,
+                    if file_count == 1 { "" } else { "s" }
+                );
+            }
+            RuntimeEventKind::CheckpointReviewCompleted => {
+                let approved = event
+                    .payload
+                    .get("approved")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let issue_count = event
+                    .payload
+                    .get("issueCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let (label, body) = if approved {
+                    ("✅ Review", "Changes approved".to_string())
+                } else {
+                    (
+                        "⚠️  Review",
+                        format!("{} issue{} found — feedback injected", issue_count, if issue_count == 1 { "" } else { "s" }),
+                    )
+                };
+                self.push_status_entry(
+                    event.event_id.clone(),
+                    EntryKind::Status,
+                    label,
+                    &body,
+                    Some(event.emitted_at / 1000),
+                );
+                self.status_message = if approved {
+                    "✅ Review passed".into()
+                } else {
+                    format!("⚠️  Review: {} issue{}", issue_count, if issue_count == 1 { "" } else { "s" })
+                };
+            }
         }
 
         Ok(())

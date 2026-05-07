@@ -61,6 +61,18 @@ pub struct AgentConfig {
     /// When false, speculative mode must be explicitly triggered via `/speculate`.
     #[serde(default = "default_speculative_auto")]
     pub speculative_auto: bool,
+    /// Enable automatic checkpoint reviews after file-changing tool rounds.
+    /// A lightweight model call validates changes against the task/plan.
+    #[serde(default = "default_checkpoint_review_enabled")]
+    pub checkpoint_review_enabled: bool,
+    /// Maximum combined diff characters to include in the review prompt.
+    /// Larger diffs are truncated to stay within a reasonable token budget.
+    #[serde(default = "default_checkpoint_review_max_diff_chars")]
+    pub checkpoint_review_max_diff_chars: usize,
+    /// Minimum cumulative file changes required before a review fires.
+    /// Prevents reviewing trivially small edits. Resets after each review.
+    #[serde(default = "default_checkpoint_review_min_changes")]
+    pub checkpoint_review_min_changes: usize,
 }
 
 impl Default for AgentConfig {
@@ -81,6 +93,9 @@ impl Default for AgentConfig {
             speculative_candidates: default_speculative_candidates(),
             speculative_candidate_timeout_secs: default_speculative_candidate_timeout_secs(),
             speculative_auto: default_speculative_auto(),
+            checkpoint_review_enabled: default_checkpoint_review_enabled(),
+            checkpoint_review_max_diff_chars: default_checkpoint_review_max_diff_chars(),
+            checkpoint_review_min_changes: default_checkpoint_review_min_changes(),
         }
     }
 }
@@ -98,6 +113,8 @@ impl AgentConfig {
         self.child_timeout_secs = self.child_timeout_secs.max(1);
         self.max_child_timeout_secs = self.max_child_timeout_secs.max(self.child_timeout_secs);
         self.speculative_candidate_timeout_secs = self.speculative_candidate_timeout_secs.max(30);
+        self.checkpoint_review_max_diff_chars = self.checkpoint_review_max_diff_chars.max(1000);
+        self.checkpoint_review_min_changes = self.checkpoint_review_min_changes.max(1);
         self
     }
 
@@ -167,6 +184,18 @@ fn default_speculative_candidate_timeout_secs() -> u64 {
 
 fn default_speculative_auto() -> bool {
     true
+}
+
+fn default_checkpoint_review_enabled() -> bool {
+    true
+}
+
+fn default_checkpoint_review_max_diff_chars() -> usize {
+    16_000
+}
+
+fn default_checkpoint_review_min_changes() -> usize {
+    1
 }
 
 // ── Auto-compaction config ────────────────────────────────────────────────────
@@ -796,7 +825,10 @@ fn default_spec_config_json() -> Value {
             "max_child_timeout_secs": 600,
             "speculative_candidates": 3,
             "speculative_candidate_timeout_secs": 90,
-            "speculative_auto": true
+            "speculative_auto": true,
+            "checkpoint_review_enabled": true,
+            "checkpoint_review_max_diff_chars": 16000,
+            "checkpoint_review_min_changes": 1
         },
         "auto_compaction": {
             "enabled": true,

@@ -51,6 +51,8 @@ pub enum RuntimeEventPayload {
     SpeculativeCandidateCompleted(SpeculativePayload),
     SpeculativeJudgeStarted(SpeculativePayload),
     SpeculativeJudgeCompleted(SpeculativePayload),
+    CheckpointReviewStarted(CheckpointReviewPayload),
+    CheckpointReviewCompleted(CheckpointReviewPayload),
 }
 
 /// Payload of `ItemStarted` and `ItemCompleted` events.
@@ -177,6 +179,20 @@ pub struct SpeculativePayload {
     pub rationale: Option<String>,
 }
 
+/// Payload for checkpoint review lifecycle events.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointReviewPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_reviewed: Option<Vec<String>>,
+}
+
 impl RuntimeEventPayload {
     /// Decode `event.payload` according to `event.kind`.
     pub fn from_event(event: &RuntimeEvent) -> Result<Self> {
@@ -245,6 +261,12 @@ impl RuntimeEventPayload {
             )),
             RuntimeEventKind::SpeculativeJudgeCompleted => Ok(Self::SpeculativeJudgeCompleted(
                 decode("SpeculativeJudgeCompleted", &event.payload).unwrap_or_default(),
+            )),
+            RuntimeEventKind::CheckpointReviewStarted => Ok(Self::CheckpointReviewStarted(
+                decode("CheckpointReviewStarted", &event.payload).unwrap_or_default(),
+            )),
+            RuntimeEventKind::CheckpointReviewCompleted => Ok(Self::CheckpointReviewCompleted(
+                decode("CheckpointReviewCompleted", &event.payload).unwrap_or_default(),
             )),
         }
     }

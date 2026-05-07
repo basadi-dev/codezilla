@@ -5,6 +5,7 @@ pub mod executor;
 pub mod extensions;
 pub mod model_gateway;
 pub mod permission;
+pub mod review;
 pub mod sandbox;
 pub mod speculative;
 pub mod supervisor;

@@ -364,6 +364,18 @@ impl TurnExecutor {
         let mut plan_steps: Vec<String> = Vec::new();
         let mut completed_actions: Vec<String> = Vec::new();
 
+        // ── Checkpoint review state ────────────────────────────────────────
+        // Tracks file changes since the last review to decide when to fire.
+        let mut changes_since_last_review: Vec<FileChangeSummary> = Vec::new();
+        let mut checkpoint_reviews_run: usize = 0;
+        // Extract the user task text once for the reviewer's context.
+        let user_task_text_for_review: String = params
+            .input
+            .iter()
+            .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         loop {
             agent_iterations += 1;
             if agent_iterations > agent_cfg.max_iterations {
@@ -1017,7 +1029,91 @@ impl TurnExecutor {
                 command_attempted_after_last_file_change = true;
                 completed_actions.push("ran command".into());
             }
-            file_changes.extend(round_file_changes);
+            file_changes.extend(round_file_changes.iter().cloned());
+            changes_since_last_review.extend(round_file_changes);
+
+            // ── Checkpoint review ──────────────────────────────────────────
+            // Fire a lightweight review after file-changing tool rounds when:
+            //   - checkpoint_review_enabled is true
+            //   - not inside a child agent (prevents recursive review storms)
+            //   - enough changes have accumulated since the last review
+            if agent_cfg.checkpoint_review_enabled
+                && params.agent_depth == 0
+                && !changes_since_last_review.is_empty()
+                && changes_since_last_review.len() >= agent_cfg.checkpoint_review_min_changes
+            {
+                let reviewer = super::review::CheckpointReviewer::new(
+                    self.runtime.clone(),
+                    &agent_cfg,
+                );
+
+                match reviewer
+                    .review(
+                        &user_task_text_for_review,
+                        &plan_steps,
+                        &completed_actions,
+                        &changes_since_last_review,
+                        &params.thread_id,
+                        &turn_id,
+                    )
+                    .await
+                {
+                    Ok(verdict) => {
+                        checkpoint_reviews_run += 1;
+
+                        // Persist the review verdict for observability.
+                        self.persist_turn_item(ConversationItem {
+                            item_id: format!("review_{}", Uuid::new_v4().simple()),
+                            thread_id: params.thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            created_at: now_seconds(),
+                            kind: ItemKind::ReviewMarker,
+                            payload: json!({
+                                "approved": verdict.approved,
+                                "issues": verdict.issues,
+                                "suggestions": verdict.suggestions,
+                                "filesReviewed": changes_since_last_review
+                                    .iter()
+                                    .map(|f| &f.path)
+                                    .collect::<Vec<_>>(),
+                                "reviewIndex": checkpoint_reviews_run,
+                            }),
+                        })
+                        .await?;
+
+                        // Reset the accumulator — next review starts fresh.
+                        changes_since_last_review.clear();
+
+                        // If the review found issues, inject feedback for the
+                        // next iteration so the coder agent gets immediate,
+                        // actionable correction.
+                        if !verdict.approved {
+                            let feedback =
+                                super::review::build_review_feedback_instruction(&verdict);
+                            tracing::info!(
+                                turn_id = %turn_id,
+                                issues = verdict.issues.len(),
+                                "executor: checkpoint review found issues — injecting feedback"
+                            );
+                            no_tool_nudge_instruction = Some(feedback);
+                        } else {
+                            tracing::debug!(
+                                turn_id = %turn_id,
+                                "executor: checkpoint review approved changes"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // Review failure is non-fatal — log and continue.
+                        tracing::warn!(
+                            turn_id = %turn_id,
+                            error = %e,
+                            "executor: checkpoint review failed — continuing without review"
+                        );
+                        changes_since_last_review.clear();
+                    }
+                }
+            }
 
             if let Some(stop_reason) = non_retryable_stop_reason {
                 tracing::warn!(

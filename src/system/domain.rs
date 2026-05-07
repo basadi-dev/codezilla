@@ -587,6 +587,10 @@ pub enum RuntimeEventKind {
     SpeculativeJudgeStarted,
     /// Speculative execution: the judge selected the winning approach.
     SpeculativeJudgeCompleted,
+    /// Checkpoint review: a review pass on recent file changes has started.
+    CheckpointReviewStarted,
+    /// Checkpoint review: the review pass completed with a verdict.
+    CheckpointReviewCompleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -904,6 +908,32 @@ pub struct JudgeRanking {
 pub struct SpeculativeResult {
     pub candidates: Vec<CandidateSolution>,
     pub verdict: JudgeVerdict,
+}
+
+// ── Checkpoint review types ───────────────────────────────────────────────────
+
+/// Verdict from a checkpoint review of recent file changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointReviewVerdict {
+    /// Whether the reviewer approved the changes (no blocking issues).
+    pub approved: bool,
+    /// Concrete issues found by the reviewer.
+    pub issues: Vec<ReviewIssue>,
+    /// Optional improvement suggestions (non-blocking).
+    pub suggestions: Vec<String>,
+}
+
+/// A single issue identified during checkpoint review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewIssue {
+    /// Human-readable description of the issue.
+    pub description: String,
+    /// Severity level: "critical", "warning", or "info".
+    pub severity: String,
+    /// File path the issue relates to (may be empty).
+    pub file: String,
 }
 
 pub fn now_seconds() -> TimestampSeconds {

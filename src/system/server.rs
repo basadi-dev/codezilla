@@ -267,6 +267,8 @@ impl AppServer {
                     RuntimeEventKind::SpeculativeCandidateCompleted => "speculative/candidate/completed",
                     RuntimeEventKind::SpeculativeJudgeStarted => "speculative/judge/started",
                     RuntimeEventKind::SpeculativeJudgeCompleted => "speculative/judge/completed",
+                    RuntimeEventKind::CheckpointReviewStarted => "checkpoint/review/started",
+                    RuntimeEventKind::CheckpointReviewCompleted => "checkpoint/review/completed",
                 };
                 let _ = write_json_line(
                     &writer,
