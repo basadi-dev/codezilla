@@ -351,27 +351,6 @@ impl ComposerState {
         }
     }
 
-    /// Return the character index of the start of the line containing `pos`.
-    pub fn line_start(&self, pos: usize) -> usize {
-        let pos = pos.min(self.chars.len());
-        let mut i = pos;
-        while i > 0 && self.chars[i - 1] != '\n' {
-            i -= 1;
-        }
-        i
-    }
-
-    /// Return the character index just past the end of the line containing `pos`
-    /// (excludes the trailing newline, if any).
-    pub fn line_end(&self, pos: usize) -> usize {
-        let pos = pos.min(self.chars.len());
-        let mut i = pos;
-        while i < self.chars.len() && self.chars[i] != '\n' {
-            i += 1;
-        }
-        i
-    }
-
     pub fn delete_to_line_start(&mut self) {
         let start = self.current_line_start();
         if start >= self.cursor {

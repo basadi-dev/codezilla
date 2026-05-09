@@ -128,22 +128,13 @@ pub enum ProviderError {
     },
     /// Rate-limited (HTTP 429). `retry_after_secs` is extracted from the
     /// `Retry-After` header when available.
-    RateLimit {
-        retry_after_secs: Option<u64>,
-    },
+    RateLimit { retry_after_secs: Option<u64> },
     /// Authentication failed (invalid API key, expired token, etc.).
-    AuthFailed {
-        detail: String,
-    },
+    AuthFailed { detail: String },
     /// The requested model was not found on the server.
-    ModelNotFound {
-        model: String,
-    },
+    ModelNotFound { model: String },
     /// Server error (5xx) from the provider.
-    ServerError {
-        status: u16,
-        body: String,
-    },
+    ServerError { status: u16, body: String },
     /// Network-level failure (DNS, TCP, TLS).
     Network(String),
 }

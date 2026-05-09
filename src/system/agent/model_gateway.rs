@@ -1067,8 +1067,13 @@ pub fn build_compaction_messages(
                     // not their full content. This can save 20K+ tokens.
                     let is_read_only = matches!(
                         last_tool_name,
-                        "read_file" | "list_dir" | "view_file" | "grep_search"
-                            | "search_web" | "read_url" | "read_browser_page"
+                        "read_file"
+                            | "list_dir"
+                            | "view_file"
+                            | "grep_search"
+                            | "search_web"
+                            | "read_url"
+                            | "read_browser_page"
                     );
                     if is_read_only {
                         transcript.push_str("[OK] (content already processed)\n\n");

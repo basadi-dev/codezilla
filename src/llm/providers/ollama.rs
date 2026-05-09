@@ -337,7 +337,8 @@ fn classify_ollama_error(status: u16, body: &str, model: &str) -> ProviderError 
 
     // Model not found (Ollama returns this as a 404 or in the error body)
     if status == 404
-        || (lower.contains("model") && (lower.contains("not found") || lower.contains("does not exist")))
+        || (lower.contains("model")
+            && (lower.contains("not found") || lower.contains("does not exist")))
     {
         return ProviderError::ModelNotFound {
             model: model.to_string(),
@@ -364,10 +365,7 @@ fn classify_ollama_error(status: u16, body: &str, model: &str) -> ProviderError 
 
 /// Returns `true` for HTTP status codes that are transient and worth retrying.
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    matches!(
-        status.as_u16(),
-        429 | 502 | 503 | 504
-    )
+    matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -431,14 +429,9 @@ pub async fn stream(
                     // Ollama sends `{"error": "..."}` when the model crashes,
                     // runs out of memory, or hits a context limit.
                     if let Some(err_msg) = v.get("error").and_then(Value::as_str) {
-                        tracing::error!(
-                            error = err_msg,
-                            "ollama: server error during stream"
-                        );
+                        tracing::error!(error = err_msg, "ollama: server error during stream");
                         let _ = tx
-                            .send(StreamChunk::Text(format!(
-                                "\n[Ollama error: {err_msg}]"
-                            )))
+                            .send(StreamChunk::Text(format!("\n[Ollama error: {err_msg}]")))
                             .await;
                         let _ = tx.send(StreamChunk::Done).await;
                         return;
@@ -469,9 +462,7 @@ pub async fn stream(
                         "ollama: server error in final stream chunk"
                     );
                     let _ = tx
-                        .send(StreamChunk::Text(format!(
-                            "\n[Ollama error: {err_msg}]"
-                        )))
+                        .send(StreamChunk::Text(format!("\n[Ollama error: {err_msg}]")))
                         .await;
                 } else {
                     for chunk in parse_chat_chunk_streaming(&v, &mut inline_tool_buffer) {

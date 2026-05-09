@@ -1,22 +1,26 @@
-//! Speculative execution: launch N parallel read-only candidate sub-agents,
-//! then use a judge model pass to select the best approach for implementation.
+//! Speculative execution: launch N parallel single-shot LLM calls to explore
+//! diverse implementation approaches, then use a judge model pass to select
+//! the best plan for implementation.
 //!
 //! This module implements the "tournament" pattern for agentic coding.
-//! Candidates are read-only scouts that explore the codebase and produce
-//! structured implementation plans. The judge is a single non-agentic model
-//! call that compares plans and picks the winner.
+//! Candidates are single-shot LLM completions — no tool access, no agent loop.
+//! Each receives the same task and produces a structured implementation plan.
+//! The judge is a single non-agentic model call that compares plans and picks
+//! the winner.
+//!
+//! Using single-shot calls instead of full sub-agents avoids the reliability
+//! problem where candidates spend their entire timeout budget on tool calls
+//! and never produce a written plan.
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
-use uuid::Uuid;
 
-use super::supervisor::{AgentSupervisor, ChildAgentRequest, TurnCompletionOutcome};
 use crate::system::config::AgentConfig;
 use crate::system::domain::{
-    ApprovalPolicy, ApprovalPolicyKind, CandidateSolution, JudgeRanking, JudgeVerdict,
-    PermissionProfile, RuntimeEventKind, SandboxMode, SpeculativeResult, ThreadId, TurnId,
+    CandidateSolution, JudgeRanking, JudgeVerdict, RuntimeEventKind, SpeculativeResult, ThreadId,
+    TurnId,
 };
 use crate::system::runtime::ConversationRuntime;
 
@@ -24,22 +28,14 @@ use crate::system::runtime::ConversationRuntime;
 
 pub(crate) struct SpeculativeOrchestrator {
     runtime: ConversationRuntime,
-    supervisor: AgentSupervisor,
     candidates_count: usize,
-    candidate_timeout_secs: u64,
 }
 
 impl SpeculativeOrchestrator {
     pub fn new(runtime: ConversationRuntime, config: &AgentConfig) -> Self {
-        let supervisor = AgentSupervisor::new(
-            runtime.clone(),
-            config.max_concurrent_child_agents(),
-        );
         Self {
             runtime,
-            supervisor,
             candidates_count: config.speculative_candidates,
-            candidate_timeout_secs: config.speculative_candidate_timeout_secs,
         }
     }
 
@@ -55,17 +51,16 @@ impl SpeculativeOrchestrator {
         task: &str,
         parent_thread_id: &ThreadId,
         parent_turn_id: &TurnId,
-        cwd: &str,
-        agent_depth: u32,
+        _cwd: &str,
+        _agent_depth: u32,
     ) -> Pin<Box<dyn Future<Output = Result<SpeculativeResult>> + Send + '_>> {
         // Clone everything we need into owned values for the async block.
         let task = task.to_string();
         let parent_thread_id = parent_thread_id.clone();
         let parent_turn_id = parent_turn_id.clone();
-        let cwd = cwd.to_string();
 
         Box::pin(async move {
-            self.run_inner(&task, &parent_thread_id, &parent_turn_id, &cwd, agent_depth)
+            self.run_inner(&task, &parent_thread_id, &parent_turn_id)
                 .await
         })
     }
@@ -75,8 +70,6 @@ impl SpeculativeOrchestrator {
         task: &str,
         parent_thread_id: &ThreadId,
         parent_turn_id: &TurnId,
-        cwd: &str,
-        agent_depth: u32,
     ) -> Result<SpeculativeResult> {
         let n = self.candidates_count;
 
@@ -84,8 +77,7 @@ impl SpeculativeOrchestrator {
             parent_thread_id = %parent_thread_id,
             parent_turn_id = %parent_turn_id,
             candidates = n,
-            timeout_secs = self.candidate_timeout_secs,
-            "speculative: starting parallel candidate exploration"
+            "speculative: starting parallel single-shot candidate exploration"
         );
 
         // Publish lifecycle event so the TUI can show speculative phase status.
@@ -102,7 +94,13 @@ impl SpeculativeOrchestrator {
             )
             .await;
 
-        // ── 1. Spawn N candidates in parallel ─────────────────────────────────
+        // ── 1. Launch N single-shot LLM calls in parallel ─────────────────────
+        // Each candidate is a direct model completion — no agent loop, no tool
+        // calls. This avoids the reliability problem where full sub-agents
+        // spend their entire timeout budget exploring without writing a plan.
+        let model_settings = self.runtime.inner.effective_config.model_settings.clone();
+        let client = self.runtime.inner.model_gateway.inner_client().clone();
+
         let mut handles = Vec::with_capacity(n);
         for i in 0..n {
             let prompt = candidate_agent_prompt(task, i + 1, n);
@@ -121,35 +119,27 @@ impl SpeculativeOrchestrator {
                 )
                 .await;
 
-            let supervisor = self.supervisor.clone();
-            let cwd = cwd.to_string();
-            let parent_thread_id = parent_thread_id.clone();
-            let parent_turn_id = parent_turn_id.clone();
-            let timeout = self.candidate_timeout_secs;
-            let depth = agent_depth;
+            let client = client.clone();
+            let provider_id = model_settings.provider_id.clone();
+            let model_id = model_settings.model_id.clone();
+            // Vary temperature slightly across candidates to encourage diversity.
+            let temperature = 0.4 + (i as f32) * 0.15;
 
+            let spawn_time = std::time::Instant::now();
             let child_future = tokio::spawn(async move {
-                supervisor.run_child(ChildAgentRequest {
-                    prompt,
-                    cwd,
-                    // Read-only: no approvals needed, sandbox locked to ReadOnly.
-                    approval_policy: ApprovalPolicy {
-                        kind: ApprovalPolicyKind::Never,
-                        granular: None,
-                    },
-                    permission_profile: PermissionProfile {
-                        sandbox_mode: SandboxMode::ReadOnly,
-                        writable_roots: Vec::new(),
-                        network_enabled: false,
-                        allowed_domains: Vec::new(),
-                        allowed_unix_sockets: Vec::new(),
-                    },
-                    timeout_secs: timeout,
-                    agent_depth: depth + 1,
-                    parent_thread_id,
-                    parent_turn_id,
-                    parent_tool_call_id: format!("spec_candidate_{i}"),
-                }).await
+                let messages = vec![crate::llm::Message::user(prompt)];
+                let result = client
+                    .complete(
+                        &provider_id,
+                        &messages,
+                        &[], // No tools — single-shot planning only
+                        &model_id,
+                        temperature,
+                        Some("medium"),
+                        4096,
+                    )
+                    .await;
+                (result, spawn_time)
             });
 
             handles.push((i, child_future));
@@ -158,40 +148,26 @@ impl SpeculativeOrchestrator {
         // ── 2. Await all candidates ───────────────────────────────────────────
         let mut candidates: Vec<CandidateSolution> = Vec::with_capacity(n);
         for (i, handle) in handles {
-            let t0 = std::time::Instant::now();
             match handle.await {
-                Ok(Ok(run)) => {
-                    let elapsed_ms = t0.elapsed().as_millis() as u64;
-                    let approach_label = extract_approach_label(&run.result_text);
-                    let files_examined = extract_files_examined(&run.result_text);
-                    let estimated_complexity = extract_complexity(&run.result_text);
-
-                    let outcome_label = match &run.outcome {
-                        TurnCompletionOutcome::Completed => "completed",
-                        TurnCompletionOutcome::TimedOut => "timed_out",
-                        TurnCompletionOutcome::Failed(_) => "failed",
-                        TurnCompletionOutcome::Interrupted => "interrupted",
-                    };
+                Ok((Ok(response), spawn_time)) => {
+                    let elapsed_ms = spawn_time.elapsed().as_millis() as u64;
+                    let plan_text = response.content.trim().to_string();
+                    let approach_label = extract_approach_label(&plan_text);
+                    let files_examined = extract_files_examined(&plan_text);
+                    let estimated_complexity = extract_complexity(&plan_text);
 
                     tracing::info!(
                         candidate = i,
                         approach = %approach_label,
-                        outcome = outcome_label,
                         elapsed_ms,
-                        "speculative: candidate finished"
+                        plan_len = plan_text.len(),
+                        "speculative: candidate completed"
                     );
 
-                    // Only include candidates that produced meaningful output.
-                    let plan_text = run.result_text.trim().to_string();
-                    if !plan_text.is_empty()
-                        && !matches!(
-                            run.outcome,
-                            TurnCompletionOutcome::Failed(_) | TurnCompletionOutcome::Interrupted
-                        )
-                    {
+                    if !plan_text.is_empty() {
                         let candidate = CandidateSolution {
                             candidate_id: format!("candidate_{i}"),
-                            agent_thread_id: run.child_thread_id,
+                            agent_thread_id: format!("single_shot_{i}"),
                             approach_label,
                             plan_text,
                             files_examined,
@@ -209,7 +185,7 @@ impl SpeculativeOrchestrator {
                                     "candidateIndex": i,
                                     "approachLabel": &candidate.approach_label,
                                     "elapsedMs": elapsed_ms,
-                                    "status": outcome_label,
+                                    "status": "completed",
                                 }),
                             )
                             .await;
@@ -218,13 +194,12 @@ impl SpeculativeOrchestrator {
                     } else {
                         tracing::warn!(
                             candidate = i,
-                            outcome = outcome_label,
-                            "speculative: candidate produced no usable plan, discarding"
+                            "speculative: candidate produced empty plan, discarding"
                         );
                     }
                 }
-                Ok(Err(e)) => {
-                    tracing::warn!(candidate = i, error = %e, "speculative: candidate agent error");
+                Ok((Err(e), _spawn_time)) => {
+                    tracing::warn!(candidate = i, error = %e, "speculative: candidate LLM call failed");
                 }
                 Err(e) => {
                     tracing::warn!(candidate = i, error = %e, "speculative: candidate task panicked");
@@ -272,7 +247,9 @@ impl SpeculativeOrchestrator {
             )
             .await;
 
-        let verdict = self.run_judge(task, &candidates, parent_thread_id, parent_turn_id).await?;
+        let verdict = self
+            .run_judge(task, &candidates, parent_thread_id, parent_turn_id)
+            .await?;
 
         let _ = self
             .runtime
@@ -300,43 +277,36 @@ impl SpeculativeOrchestrator {
         })
     }
 
-    /// Run the judge as a sub-agent that evaluates candidate plans and returns
-    /// a structured selection. The judge itself is a read-only agent that only
-    /// needs to process text — no tool access needed.
+    /// Run the judge as a single-shot LLM call that evaluates candidate plans
+    /// and returns a structured selection. No tool access needed.
     async fn run_judge(
         &self,
         task: &str,
         candidates: &[CandidateSolution],
-        parent_thread_id: &ThreadId,
-        parent_turn_id: &TurnId,
+        _parent_thread_id: &ThreadId,
+        _parent_turn_id: &TurnId,
     ) -> Result<JudgeVerdict> {
         let prompt = judge_prompt(task, candidates);
+        let model_settings = self.runtime.inner.effective_config.model_settings.clone();
+        let messages = vec![crate::llm::Message::user(prompt)];
 
-        let run = self
-            .supervisor
-            .run_child(ChildAgentRequest {
-                prompt,
-                cwd: ".".to_string(),
-                approval_policy: ApprovalPolicy {
-                    kind: ApprovalPolicyKind::Never,
-                    granular: None,
-                },
-                permission_profile: PermissionProfile {
-                    sandbox_mode: SandboxMode::ReadOnly,
-                    writable_roots: Vec::new(),
-                    network_enabled: false,
-                    allowed_domains: Vec::new(),
-                    allowed_unix_sockets: Vec::new(),
-                },
-                timeout_secs: 60, // Judge should be fast — just comparing text plans
-                agent_depth: 1,   // Judge doesn't need to spawn children
-                parent_thread_id: parent_thread_id.clone(),
-                parent_turn_id: parent_turn_id.clone(),
-                parent_tool_call_id: format!("spec_judge_{}", Uuid::new_v4().simple()),
-            })
+        let response = self
+            .runtime
+            .inner
+            .model_gateway
+            .inner_client()
+            .complete(
+                &model_settings.provider_id,
+                &messages,
+                &[],
+                &model_settings.model_id,
+                0.1, // Low temperature for decisive judging
+                Some("low"),
+                2048,
+            )
             .await?;
 
-        parse_judge_verdict(&run.result_text, candidates)
+        parse_judge_verdict(&response.content, candidates)
     }
 }
 
@@ -418,27 +388,53 @@ fn judge_prompt(task: &str, candidates: &[CandidateSolution]) -> String {
 // ─── Output parsing ───────────────────────────────────────────────────────────
 
 /// Extract the approach label from candidate output.
+/// Tries several common formatting patterns, then falls back to the first
+/// heading if no explicit label is found.
 fn extract_approach_label(text: &str) -> String {
-    // Look for "**Approach Label**: ..." or "Approach Label: ..."
+    // Pass 1: look for explicit label markers
     for line in text.lines() {
         let trimmed = line.trim();
+        // Strip all leading markdown formatting: #, ##, ###, **, *
         let stripped = trimmed
+            .trim_start_matches('#')
+            .trim()
             .trim_start_matches("**")
-            .trim_start_matches('*');
-        if let Some(rest) = stripped
+            .trim_start_matches('*')
+            .trim();
+
+        // Match: "Approach Label", "Approach", case-insensitive
+        let rest = stripped
             .strip_prefix("Approach Label")
             .or_else(|| stripped.strip_prefix("approach label"))
-        {
+            .or_else(|| stripped.strip_prefix("Approach"))
+            .or_else(|| stripped.strip_prefix("approach"));
+
+        if let Some(rest) = rest {
             let label = rest
                 .trim_start_matches("**")
                 .trim_start_matches(':')
                 .trim_start_matches("**:")
+                .trim()
+                .trim_end_matches("**")
                 .trim();
-            if !label.is_empty() {
+            // Require at least 3 chars to avoid matching bare "Approach:" with no value
+            if label.len() >= 3 {
                 return label.chars().take(60).collect();
             }
         }
     }
+
+    // Pass 2: fall back to the first markdown heading
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let heading = trimmed.trim_start_matches('#').trim();
+            if heading.len() >= 3 {
+                return heading.chars().take(60).collect();
+            }
+        }
+    }
+
     "Unnamed approach".to_string()
 }
 
@@ -490,15 +486,14 @@ fn extract_complexity(text: &str) -> String {
 
 /// Parse the judge's text output into a structured `JudgeVerdict`.
 /// Designed to be lenient — models don't always follow the exact format.
-fn parse_judge_verdict(
-    text: &str,
-    candidates: &[CandidateSolution],
-) -> Result<JudgeVerdict> {
+fn parse_judge_verdict(text: &str, candidates: &[CandidateSolution]) -> Result<JudgeVerdict> {
     let lower = text.to_ascii_lowercase();
 
     // Extract selected candidate number
     let selected_num = extract_selected_number(&lower).unwrap_or(1);
-    let selected_idx = (selected_num as usize).saturating_sub(1).min(candidates.len() - 1);
+    let selected_idx = (selected_num as usize)
+        .saturating_sub(1)
+        .min(candidates.len() - 1);
     let selected_candidate_id = candidates[selected_idx].candidate_id.clone();
 
     // Extract rationale
@@ -652,7 +647,11 @@ pub(crate) fn build_speculative_plan_instruction(result: &SpeculativeResult) -> 
          Execute the above plan step by step. Start with the first file change immediately.",
         result.candidates.len(),
         winner
-            .and_then(|w| result.verdict.ranking.iter().find(|r| r.candidate_id == w.candidate_id))
+            .and_then(|w| result
+                .verdict
+                .ranking
+                .iter()
+                .find(|r| r.candidate_id == w.candidate_id))
             .map(|r| r.score * 100.0)
             .unwrap_or(90.0),
         result.verdict.rationale,
@@ -669,6 +668,18 @@ mod tests {
     fn extract_approach_label_from_markdown() {
         let text = "**Approach Label**: Caching with TTL\n\n**Summary**: blah blah";
         assert_eq!(extract_approach_label(text), "Caching with TTL");
+    }
+
+    #[test]
+    fn extract_approach_label_from_heading() {
+        let text = "## Refactor the Parser\n\nSome plan details here.";
+        assert_eq!(extract_approach_label(text), "Refactor the Parser");
+    }
+
+    #[test]
+    fn extract_approach_label_from_approach_prefix() {
+        let text = "**Approach**: Event-driven redesign\n\nDetails follow.";
+        assert_eq!(extract_approach_label(text), "Event-driven redesign");
     }
 
     #[test]

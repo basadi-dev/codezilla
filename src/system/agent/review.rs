@@ -20,8 +20,7 @@ use serde_json::json;
 
 use crate::system::config::AgentConfig;
 use crate::system::domain::{
-    CheckpointReviewVerdict, FileChangeSummary, ReviewIssue,
-    RuntimeEventKind, ThreadId, TurnId,
+    CheckpointReviewVerdict, FileChangeSummary, ReviewIssue, RuntimeEventKind, ThreadId, TurnId,
 };
 use crate::system::runtime::ConversationRuntime;
 
@@ -92,7 +91,7 @@ impl CheckpointReviewer {
                 &messages,
                 &[], // No tools needed for review
                 &model_settings.model_id,
-                0.1, // Low temperature for consistent review output
+                0.1,         // Low temperature for consistent review output
                 Some("low"), // Low reasoning effort — fast review
                 2048,
             )
@@ -176,7 +175,10 @@ impl CheckpointReviewer {
                 if remaining > 0 {
                     let diff_to_show = if fc.diff.len() > remaining {
                         let truncated: String = fc.diff.chars().take(remaining).collect();
-                        format!("{truncated}\n... [diff truncated, {} more chars]", fc.diff.len() - remaining)
+                        format!(
+                            "{truncated}\n... [diff truncated, {} more chars]",
+                            fc.diff.len() - remaining
+                        )
                     } else {
                         fc.diff.clone()
                     };
@@ -218,10 +220,7 @@ impl CheckpointReviewer {
 
 // ─── Verdict parsing ──────────────────────────────────────────────────────────
 
-fn parse_review_verdict(
-    text: &str,
-    file_changes: &[FileChangeSummary],
-) -> CheckpointReviewVerdict {
+fn parse_review_verdict(text: &str, file_changes: &[FileChangeSummary]) -> CheckpointReviewVerdict {
     let lower = text.to_ascii_lowercase();
 
     // Extract approved status
@@ -354,9 +353,7 @@ fn extract_suggestions(text: &str) -> Vec<String> {
 
 /// Build a system message to inject the review feedback into the executor's
 /// next iteration. Only called when the review found issues.
-pub(crate) fn build_review_feedback_instruction(
-    verdict: &CheckpointReviewVerdict,
-) -> String {
+pub(crate) fn build_review_feedback_instruction(verdict: &CheckpointReviewVerdict) -> String {
     let mut instruction = String::with_capacity(1024);
 
     instruction.push_str(
@@ -420,8 +417,7 @@ mod tests {
 
     #[test]
     fn parse_approved_yes() {
-        let text =
-            "APPROVED: yes\n\nISSUES: none\n\nSUGGESTIONS: none";
+        let text = "APPROVED: yes\n\nISSUES: none\n\nSUGGESTIONS: none";
         let verdict = parse_review_verdict(text, &[]);
         assert!(verdict.approved);
         assert!(verdict.issues.is_empty());

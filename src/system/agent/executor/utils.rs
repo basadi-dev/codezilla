@@ -206,14 +206,10 @@ pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
             // Line range sanity checks.
             if let (Some(s), Some(e)) = (start, end) {
                 if s == 0 {
-                    return Some(
-                        "`start_line` must be ≥ 1 (lines are 1-indexed)".into(),
-                    );
+                    return Some("`start_line` must be ≥ 1 (lines are 1-indexed)".into());
                 }
                 if s > e {
-                    return Some(format!(
-                        "`start_line` ({s}) must be ≤ `end_line` ({e})"
-                    ));
+                    return Some(format!("`start_line` ({s}) must be ≤ `end_line` ({e})"));
                 }
                 // Guard against impossibly large ranges that suggest hallucinated
                 // line numbers (e.g. patching line 999999 of a 200-line file).

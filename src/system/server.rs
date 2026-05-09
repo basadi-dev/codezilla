@@ -263,8 +263,12 @@ impl AppServer {
                     RuntimeEventKind::CompactionStatus => "compaction/status",
                     RuntimeEventKind::ChildAgentSpawned => "agent/spawned",
                     RuntimeEventKind::TokenUsageUpdate => "token/usage/update",
-                    RuntimeEventKind::SpeculativeCandidateStarted => "speculative/candidate/started",
-                    RuntimeEventKind::SpeculativeCandidateCompleted => "speculative/candidate/completed",
+                    RuntimeEventKind::SpeculativeCandidateStarted => {
+                        "speculative/candidate/started"
+                    }
+                    RuntimeEventKind::SpeculativeCandidateCompleted => {
+                        "speculative/candidate/completed"
+                    }
                     RuntimeEventKind::SpeculativeJudgeStarted => "speculative/judge/started",
                     RuntimeEventKind::SpeculativeJudgeCompleted => "speculative/judge/completed",
                     RuntimeEventKind::CheckpointReviewStarted => "checkpoint/review/started",

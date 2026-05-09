@@ -180,11 +180,10 @@ impl ActivityState {
     /// the user resolves the approval the timer resumes from where it left
     /// off.
     pub fn turn_elapsed(&self, now: Instant) -> Option<Duration> {
-        self.turn_started_at
-            .map(|t| {
-                now.saturating_duration_since(t)
-                    .saturating_sub(self.effective_paused_duration(now))
-            })
+        self.turn_started_at.map(|t| {
+            now.saturating_duration_since(t)
+                .saturating_sub(self.effective_paused_duration(now))
+        })
     }
 
     /// True when nothing is in flight — no tools, no turn, not streaming.
@@ -584,19 +583,34 @@ mod tests {
         s.start_tool("c1", "bash_exec", None, t0);
 
         // At t0+3s, elapsed should be 3s
-        assert_eq!(s.turn_elapsed(t0 + Duration::from_secs(3)).unwrap().as_secs(), 3);
+        assert_eq!(
+            s.turn_elapsed(t0 + Duration::from_secs(3))
+                .unwrap()
+                .as_secs(),
+            3
+        );
 
         // Block at t0+3s
         s.set_blocked_at(BlockedReason::Approval, t0 + Duration::from_secs(3));
 
         // At t0+10s (7s after block), elapsed should still be 3s
-        assert_eq!(s.turn_elapsed(t0 + Duration::from_secs(10)).unwrap().as_secs(), 3);
+        assert_eq!(
+            s.turn_elapsed(t0 + Duration::from_secs(10))
+                .unwrap()
+                .as_secs(),
+            3
+        );
 
         // Unblock at t0+10s
         s.clear_blocked_at(t0 + Duration::from_secs(10));
 
         // At t0+15s (5s after unblock), elapsed should be 3+5=8s
-        assert_eq!(s.turn_elapsed(t0 + Duration::from_secs(15)).unwrap().as_secs(), 8);
+        assert_eq!(
+            s.turn_elapsed(t0 + Duration::from_secs(15))
+                .unwrap()
+                .as_secs(),
+            8
+        );
     }
 
     #[test]
@@ -612,7 +626,12 @@ mod tests {
         s.clear_blocked_at(t0 + Duration::from_secs(9));
 
         // Wall time 12s, paused 5s total → effective 7s
-        assert_eq!(s.turn_elapsed(t0 + Duration::from_secs(12)).unwrap().as_secs(), 7);
+        assert_eq!(
+            s.turn_elapsed(t0 + Duration::from_secs(12))
+                .unwrap()
+                .as_secs(),
+            7
+        );
     }
 
     #[test]

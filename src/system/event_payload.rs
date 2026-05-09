@@ -253,9 +253,11 @@ impl RuntimeEventPayload {
             RuntimeEventKind::SpeculativeCandidateStarted => Ok(Self::SpeculativeCandidateStarted(
                 decode("SpeculativeCandidateStarted", &event.payload).unwrap_or_default(),
             )),
-            RuntimeEventKind::SpeculativeCandidateCompleted => Ok(Self::SpeculativeCandidateCompleted(
-                decode("SpeculativeCandidateCompleted", &event.payload).unwrap_or_default(),
-            )),
+            RuntimeEventKind::SpeculativeCandidateCompleted => {
+                Ok(Self::SpeculativeCandidateCompleted(
+                    decode("SpeculativeCandidateCompleted", &event.payload).unwrap_or_default(),
+                ))
+            }
             RuntimeEventKind::SpeculativeJudgeStarted => Ok(Self::SpeculativeJudgeStarted(
                 decode("SpeculativeJudgeStarted", &event.payload).unwrap_or_default(),
             )),

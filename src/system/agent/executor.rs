@@ -1052,10 +1052,8 @@ impl TurnExecutor {
                 && checkpoint_reviews_run < agent_cfg.checkpoint_review_max_per_turn
                 && !review_cooldown
             {
-                let reviewer = super::review::CheckpointReviewer::new(
-                    self.runtime.clone(),
-                    &agent_cfg,
-                );
+                let reviewer =
+                    super::review::CheckpointReviewer::new(self.runtime.clone(), &agent_cfg);
 
                 match reviewer
                     .review(

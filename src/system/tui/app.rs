@@ -562,18 +562,16 @@ impl InteractiveApp {
         };
 
         if is_double_click {
-            // Double-click: select the entire line under the cursor.
-            self.transcript_selection.lock(
-                SelectionPoint {
-                    line: point.line,
-                    col: 0,
-                },
-                SelectionPoint {
-                    line: point.line,
-                    col: usize::MAX / 2,
-                },
-            );
-            // Explicit line selection should detach from bottom-follow.
+            // Double-click: select the word under the cursor and enter word-snap
+            // mode so subsequent drag extends word-by-word.
+            let width = self.transcript_area.width;
+            self.ensure_transcript_render_cache(width);
+            let plain_lines = self.transcript_plain_lines(width);
+            let (word_start, word_end) =
+                super::selection::transcript_word_range_at(point, &plain_lines);
+            self.transcript_selection
+                .start_word_snap(word_start, word_end);
+            // Explicit selection should detach from bottom-follow.
             self.transcript_view.set_auto_scroll(false);
             // Reset so triple-click doesn't extend.
             self.transcript_selection.forget_click();
@@ -588,7 +586,15 @@ impl InteractiveApp {
             return;
         }
         if let Some(point) = self.mouse_to_selection_point(col, row, true) {
-            self.transcript_selection.update_end(point);
+            if self.transcript_selection.word_snap() {
+                let width = self.transcript_area.width;
+                self.ensure_transcript_render_cache(width);
+                let plain_lines = self.transcript_plain_lines(width);
+                self.transcript_selection
+                    .update_end_word_snap(point, &plain_lines);
+            } else {
+                self.transcript_selection.update_end(point);
+            }
             // Detach from auto-follow only after actual movement (true drag),
             // not on a plain click-to-focus in the transcript.
             if self.transcript_selection.is_moved() {
@@ -607,7 +613,6 @@ impl InteractiveApp {
             self.clear_selection();
         }
     }
-
     fn mouse_to_selection_point(
         &mut self,
         col: u16,
@@ -820,10 +825,10 @@ impl InteractiveApp {
             let is_double_click = self.composer_selection.is_double_click(now, col, row);
 
             if is_double_click {
-                // Select the entire line containing the click position.
-                let lo = self.composer.line_start(idx);
-                let hi = self.composer.line_end(idx);
-                self.composer_selection.lock(lo, hi);
+                // Select the word under the cursor and enter word-snap mode so
+                // subsequent drag extends word-by-word.
+                let (lo, hi) = super::selection::composer_word_range_at(idx, &self.composer.chars);
+                self.composer_selection.start_word_snap(lo, hi);
                 self.composer.cursor = hi;
                 // Reset click tracking so triple-click doesn't extend further.
                 self.composer_selection.forget_click();
@@ -841,7 +846,12 @@ impl InteractiveApp {
             return;
         }
         if let Some(idx) = self.mouse_to_composer_index(col, row) {
-            self.composer_selection.update_end(idx);
+            if self.composer_selection.word_snap() {
+                self.composer_selection
+                    .update_end_word_snap(idx, &self.composer.chars);
+            } else {
+                self.composer_selection.update_end(idx);
+            }
         }
     }
 
@@ -1371,7 +1381,8 @@ impl InteractiveApp {
                  Commands: /model [provider/model]  /reasoning [auto|off|low|medium|high]  \
                  /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads  \
                  /speculate <task> (autocomplete)  ·  \
-                 CLI: codezilla -r (resume last thread)".into();
+                 CLI: codezilla -r (resume last thread)"
+                    .into();
             self.error_message = None;
             true
         } else {
@@ -2035,11 +2046,7 @@ impl InteractiveApp {
                     .get("candidateIndex")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                self.status_message = format!(
-                    "🔮 Exploring approach {}/{}…",
-                    idx + 1,
-                    total
-                );
+                self.status_message = format!("🔮 Exploring approach {}/{}…", idx + 1, total);
             }
             RuntimeEventKind::SpeculativeCandidateCompleted => {
                 let label = event
@@ -2072,8 +2079,7 @@ impl InteractiveApp {
                         .get("candidateCount")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    self.status_message =
-                        format!("🏛️  Judging {} candidate approaches…", n);
+                    self.status_message = format!("🏛️  Judging {} candidate approaches…", n);
                 } else {
                     self.status_message = "🔮 Spawning candidate explorers…".into();
                 }
@@ -2134,7 +2140,11 @@ impl InteractiveApp {
                 } else {
                     (
                         "⚠️  Review",
-                        format!("{} issue{} found — feedback injected", issue_count, if issue_count == 1 { "" } else { "s" }),
+                        format!(
+                            "{} issue{} found — feedback injected",
+                            issue_count,
+                            if issue_count == 1 { "" } else { "s" }
+                        ),
                     )
                 };
                 self.push_status_entry(
@@ -2147,7 +2157,11 @@ impl InteractiveApp {
                 self.status_message = if approved {
                     "✅ Review passed".into()
                 } else {
-                    format!("⚠️  Review: {} issue{}", issue_count, if issue_count == 1 { "" } else { "s" })
+                    format!(
+                        "⚠️  Review: {} issue{}",
+                        issue_count,
+                        if issue_count == 1 { "" } else { "s" }
+                    )
                 };
             }
         }
@@ -3032,6 +3046,20 @@ impl InteractiveApp {
         }
 
         self.transcript_render_cache = build_transcript_render_cache(&self.transcript, width);
+    }
+
+    /// Extract plain-text lines from the rendered transcript for word-snapping.
+    fn transcript_plain_lines(&mut self, width: u16) -> Vec<String> {
+        let (lines, _total) = self.transcript_lines_all(width, None);
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
     }
 
     fn invalidate_transcript_cache(&mut self) {
