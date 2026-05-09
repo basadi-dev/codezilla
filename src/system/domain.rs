@@ -125,8 +125,8 @@ pub enum ItemKind {
     Error,
     ReviewMarker,
     Status,
+    SpeculativeResult,
 }
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {

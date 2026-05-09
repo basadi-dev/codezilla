@@ -229,15 +229,15 @@ impl TurnExecutor {
                         let plan_instruction =
                             super::speculative::build_speculative_plan_instruction(&result);
 
-                        // Persist speculative result for observability.
+                        // Persist full speculative result for transcript history.
                         self.persist_turn_item(ConversationItem {
                             item_id: format!("spec_{}", Uuid::new_v4().simple()),
                             thread_id: params.thread_id.clone(),
                             turn_id: turn_id.clone(),
                             created_at: now_seconds(),
-                            kind: ItemKind::SystemMessage,
+                            kind: ItemKind::SpeculativeResult,
                             payload: json!({
-                                "text": format!(
+                                "summary": format!(
                                     "[Speculative execution: {} candidates explored, \
                                      \"{}\" selected (score {:.0}%)]\n\n{}",
                                     result.candidates.len(),
@@ -248,6 +248,8 @@ impl TurnExecutor {
                                         .unwrap_or(90.0),
                                     result.verdict.rationale,
                                 ),
+                                "candidates": result.candidates,
+                                "verdict": result.verdict,
                             }),
                         })
                         .await?;

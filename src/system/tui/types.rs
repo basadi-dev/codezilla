@@ -119,6 +119,7 @@ pub enum EntryKind {
     Reasoning,
     FileChange,
     Command,
+    Speculative,
 }
 
 // ─── Structs ──────────────────────────────────────────────────────────────────
@@ -664,6 +665,7 @@ pub fn entry_style(kind: EntryKind) -> (&'static str, Color, Color) {
         EntryKind::Reasoning => ("⋯", COLOR_REASONING, Color::Rgb(220, 215, 255)),
         EntryKind::FileChange => ("✏", COLOR_WARNING, Color::Rgb(255, 230, 190)),
         EntryKind::Command => ("$", COLOR_WARNING, Color::Rgb(200, 220, 200)),
+        EntryKind::Speculative => ("◇", COLOR_ACCENT, Color::Rgb(210, 230, 255)),
     }
 }
 
@@ -993,6 +995,25 @@ pub fn entry_from_item(item: &ConversationItem) -> TranscriptEntry {
                 kind: EntryKind::Command,
                 title: "output".into(),
                 body,
+                timestamp: Some(item.created_at),
+                completed_at: None,
+                pending: false,
+                collapsed: false,
+            }
+        }
+        ItemKind::SpeculativeResult => {
+            let summary = item
+                .payload
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Speculative execution completed");
+            TranscriptEntry {
+                item_id: item.item_id.clone(),
+                turn_id: Some(item.turn_id.clone()),
+                tool_call_id: None,
+                kind: EntryKind::Speculative,
+                title: "speculative".into(),
+                body: summary.to_string(),
                 timestamp: Some(item.created_at),
                 completed_at: None,
                 pending: false,
