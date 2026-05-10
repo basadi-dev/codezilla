@@ -68,6 +68,9 @@ async-trait = "0.1"
 pulldown-cmark = "0.12"
 similar = "2"
 image = "0.25"
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 opt-level = 3
 lto = true

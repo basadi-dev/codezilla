@@ -1,17 +1,13 @@
 use anyhow::{anyhow, Result};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 
+use super::middleware::{ConstrainedMode, GuardVerdict};
 use super::model_gateway::{estimate_items_token_pct, is_context_overflow_error, ModelStreamEvent};
 mod context;
 mod tool_dispatch;
-mod utils;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConstrainedMode {
-    FinalOrActionOnly,
-}
+pub(crate) mod utils;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnPhase {
@@ -42,10 +38,10 @@ use self::utils::{
     find_repetition_start, initial_read_budget, intent_directive, intent_to_reasoning_effort,
     is_degenerate_repetition, is_read_only_tool, progress_summary, recently_read_paths,
     should_retry_no_tool_completion, thinking_instruction, user_requested_verification,
-    wants_verbose_repo_map, ProgressState, ReadKey, TurnIntent,
+    wants_verbose_repo_map, ProgressState, TurnIntent,
 };
 use crate::system::domain::{
-    now_seconds, ConversationItem, FileChangeSummary, ItemKind, RuntimeEventKind, ThreadStatus,
+    now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus,
     TokenUsage, ToolCall, ToolResult, TurnMetrics, TurnStatus, UserInput, KEY_TEXT,
 };
 use crate::system::error as cod_error;
@@ -193,98 +189,83 @@ impl TurnExecutor {
         // subsequent iterations will recompute (reasoning_effort may differ).
         let mut cached_system_instructions: Option<Vec<String>> = Some(initial_system_instructions);
 
-        // ── Speculative execution (optional) ──────────────────────────────────
-        // If triggered, spawn N parallel read-only candidates, judge them, and
-        // inject the winning plan into the system instructions so the main loop
-        // skips exploration and executes directly.
-        if self.should_speculate(&params, turn_intent) {
-            let user_task_text = params
-                .input
-                .iter()
-                .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
-                // Strip the /speculate prefix if present
-                .trim_start_matches("/speculate")
-                .trim()
-                .to_string();
+        // ── Exploration strategy (optional) ──────────────────────────────────
+        // If a registered strategy activates (e.g. speculative tournament), run
+        // it before the main loop and inject the winning plan into system
+        // instructions so the main loop skips exploration and executes directly.
+        {
+            use super::strategy::ExplorationStrategy;
+            let strategy = super::strategy::SpeculativeStrategy::from_config(&agent_cfg);
+            if strategy.should_activate(turn_intent, &params.input, params.agent_depth) {
+                let user_task_text = params
+                    .input
+                    .iter()
+                    .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim_start_matches("/speculate")
+                    .trim()
+                    .to_string();
 
-            if !user_task_text.is_empty() {
-                let orchestrator = super::speculative::SpeculativeOrchestrator::new(
-                    self.runtime.clone(),
-                    &agent_cfg,
-                );
+                if !user_task_text.is_empty() {
+                    match strategy
+                        .explore(
+                            &user_task_text,
+                            &self.runtime,
+                            &params.thread_id,
+                            &turn_id,
+                            cwd_for_persist,
+                            params.agent_depth,
+                        )
+                        .await
+                    {
+                        Ok(result) => {
+                            // Persist full exploration result for transcript history.
+                            if !result.metadata.is_null() {
+                                self.persist_turn_item(ConversationItem {
+                                    item_id: format!("spec_{}", Uuid::new_v4().simple()),
+                                    thread_id: params.thread_id.clone(),
+                                    turn_id: turn_id.clone(),
+                                    created_at: now_seconds(),
+                                    kind: ItemKind::SpeculativeResult,
+                                    payload: result.metadata,
+                                })
+                                .await?;
+                            }
 
-                match orchestrator
-                    .run(
-                        &user_task_text,
-                        &params.thread_id,
-                        &turn_id,
-                        cwd_for_persist,
-                        params.agent_depth,
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        let plan_instruction =
-                            super::speculative::build_speculative_plan_instruction(&result);
-
-                        // Persist full speculative result for transcript history.
-                        self.persist_turn_item(ConversationItem {
-                            item_id: format!("spec_{}", Uuid::new_v4().simple()),
-                            thread_id: params.thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            created_at: now_seconds(),
-                            kind: ItemKind::SpeculativeResult,
-                            payload: json!({
-                                "summary": format!(
-                                    "[Speculative execution: {} candidates explored, \
-                                     \"{}\" selected (score {:.0}%)]\n\n{}",
-                                    result.candidates.len(),
-                                    result.verdict.selected_candidate_id,
-                                    result.verdict.ranking.iter()
-                                        .find(|r| r.candidate_id == result.verdict.selected_candidate_id)
-                                        .map(|r| r.score * 100.0)
-                                        .unwrap_or(90.0),
-                                    result.verdict.rationale,
-                                ),
-                                "candidates": result.candidates,
-                                "verdict": result.verdict,
-                            }),
-                        })
-                        .await?;
-
-                        // Inject the plan into cached system instructions for the first iteration.
-                        if let Some(instructions) = cached_system_instructions.as_mut() {
-                            instructions.push(plan_instruction);
+                            // Inject the plan into cached system instructions.
+                            if let Some(plan_instruction) = result.plan_instruction {
+                                if let Some(instructions) = cached_system_instructions.as_mut() {
+                                    instructions.push(plan_instruction);
+                                }
+                                tracing::info!(
+                                    turn_id = %turn_id,
+                                    strategy = strategy.name(),
+                                    "executor: exploration plan injected into context"
+                                );
+                            }
                         }
-
-                        tracing::info!(
-                            turn_id = %turn_id,
-                            candidates = result.candidates.len(),
-                            selected = %result.verdict.selected_candidate_id,
-                            "executor: speculative plan injected into context"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            turn_id = %turn_id,
-                            error = %e,
-                            "executor: speculative execution failed, falling back to normal execution"
-                        );
-                        // Notify the user but continue normally.
-                        self.runtime
-                            .publish_event(
-                                RuntimeEventKind::Warning,
-                                Some(params.thread_id.clone()),
-                                Some(turn_id.clone()),
-                                json!({
-                                    "message": format!(
-                                        "Speculative execution failed: {e}. Falling back to normal execution."
-                                    )
-                                }),
-                            )
-                            .await?;
+                        Err(e) => {
+                            tracing::warn!(
+                                turn_id = %turn_id,
+                                error = %e,
+                                strategy = strategy.name(),
+                                "executor: exploration strategy failed, falling back to normal execution"
+                            );
+                            self.runtime
+                                .publish_event(
+                                    RuntimeEventKind::Warning,
+                                    Some(params.thread_id.clone()),
+                                    Some(turn_id.clone()),
+                                    json!({
+                                        "message": format!(
+                                            "Exploration strategy '{}' failed: {e}. Falling back to normal execution.",
+                                            strategy.name()
+                                        )
+                                    }),
+                                )
+                                .await?;
+                        }
                     }
                 }
             }
@@ -299,61 +280,12 @@ impl TurnExecutor {
         let mut trimmed_turn_items: HashMap<String, Vec<ConversationItem>> = HashMap::new();
 
         // ── Loop-break guards ─────────────────────────────────────────────────
-        // every tool call in that round returned ok:false; reset to 0 as soon
-        // as any tool succeeds. Catches stuck loops (e.g. bad args that keep
-        // failing) without harming legitimate long tasks.
-        let mut consecutive_failures: usize = 0;
-
-        // Guard 2 — absolute backstop: a very high ceiling that only fires
-        // when the model loops *successfully* without ever finishing. Legitimate
-        // agentic tasks rarely need more than ~100 rounds.
-        let mut agent_iterations: usize = 0;
-        let mut no_tool_nudges: usize = 0;
+        // Consolidated into a single struct for testability and readability.
+        // See middleware/loop_guard.rs for the full state machine and checks.
+        let mut guards = super::middleware::LoopGuardState::new();
         let mut no_tool_nudge_instruction: Option<String> = None;
-        let mut completed_tool_rounds: usize = 0;
-        let mut total_tool_calls: usize = 0;
-        let mut file_changes: Vec<FileChangeSummary> = Vec::new();
         let turn_start_time = std::time::Instant::now();
-
-        // Guard 3 — read-only exploration saturation: counts consecutive rounds
-        // where *every* tool call was a pure read (read_file, list_dir, grep …).
-        // If the model keeps exploring without ever writing or executing, it gets
-        // a single nudge telling it to act. Resets to 0 as soon as one action
-        // tool (write_file, bash_exec, …) appears in any round.
-        // Threshold is deliberately low (4) — the repo map is now injected at
-        // turn start, so the model already knows the file tree and top-level
-        // symbols.  Excessive reading beyond 4 rounds is a sign of context bloat
-        // or confusion, not legitimate exploration.
-        let mut consecutive_read_only_rounds: usize = 0;
-
-        // Guard 4 — empty-response circuit breaker: a model response that
-        // contains *neither* text nor tool calls is a distinct failure mode from
-        // "intent narration without a call". It usually signals context
-        // saturation, reasoning-only output that wasn't surfaced, or a confused
-        // model state. We retry once with an explicit prompt then fail the turn
-        // so the user sees a clear error rather than a silent non-completion.
-        let mut consecutive_empty_responses: usize = 0;
-
-        // Guard 5 — cumulative nudge escalation: counts ALL nudges (intent,
-        // read-only, empty-response). If the model keeps needing correction
-        // it won't self-correct. Fail fast rather than burning tokens.
-        let mut total_nudges: usize = 0;
-        let mut total_invalid_tool_calls: usize = 0;
-        let mut seen_read_signatures: HashSet<ReadKey> = HashSet::new();
-
-        // Guard 6 — cross-round repetition: counts how many times each
-        // normalized tool-call signature has appeared across the entire turn.
-        // If the same call (any tool, not just read-only) shows up REPEAT_THRESHOLD
-        // times, the model is genuinely stuck repeating itself — switch to
-        // constrained mode and force action-or-finish.
-        let mut cross_round_counts: HashMap<String, usize> = HashMap::new();
         const REPEAT_THRESHOLD: usize = 3;
-        let mut repetition_handled = false;
-
-        let mut constrained_mode: Option<ConstrainedMode> = None;
-        let mut constrained_mode_violations: usize = 0;
-        let mut verification_nudges: usize = 0;
-        let mut command_attempted_after_last_file_change = false;
 
         // ── Phase-aware anti-looping state ─────────────────────────────────
         let needs_planning = matches!(
@@ -362,18 +294,20 @@ impl TurnExecutor {
         );
         let mut current_phase = TurnPhase::Orient;
         let read_budget = initial_read_budget(turn_intent);
-        let mut total_read_only_rounds: usize = 0;
         let mut plan_steps: Vec<String> = Vec::new();
         let mut completed_actions: Vec<String> = Vec::new();
 
-        // ── Checkpoint review state ────────────────────────────────────────
-        // Tracks file changes since the last review to decide when to fire.
-        let mut changes_since_last_review: Vec<FileChangeSummary> = Vec::new();
-        let mut checkpoint_reviews_run: usize = 0;
-        // Cooldown flag: after injecting review feedback, skip one tool round
-        // before re-reviewing. This prevents the review→fix→review death spiral
-        // where the fix attempt immediately triggers another review.
-        let mut review_cooldown = false;
+        // ── Middleware chain ───────────────────────────────────────────────
+        // Build the middleware pipeline. Currently includes:
+        //   - CheckpointReviewMiddleware: validates file changes between rounds.
+        // Future middlewares (LoopGuard, Security, etc.) get added here.
+        let middleware_chain = {
+            use super::middleware::{MiddlewareChain, CheckpointReviewMiddleware};
+            let mut chain = MiddlewareChain::new();
+            chain.push(Box::new(CheckpointReviewMiddleware::new()));
+            chain
+        };
+
         // Extract the user task text once for the reviewer's context.
         let user_task_text_for_review: String = params
             .input
@@ -383,32 +317,23 @@ impl TurnExecutor {
             .join("\n");
 
         loop {
-            agent_iterations += 1;
-            if agent_iterations > agent_cfg.max_iterations {
+            guards.agent_iterations += 1;
+            if let Some(GuardVerdict::FailTurn { kind, message }) =
+                guards.check_iteration_limit(&agent_cfg)
+            {
                 tracing::error!(
                     turn_id = %turn_id,
-                    agent_iterations,
+                    guards.agent_iterations,
                     "executor: backstop limit reached — terminating turn"
                 );
-                return self
-                    .fail_turn(
-                        &params.thread_id,
-                        &turn_id,
-                        "loop_limit",
-                        &format!(
-                            "Agent exceeded {} tool-call iterations without \
-                             finishing. The turn has been stopped to prevent an infinite loop.",
-                            agent_cfg.max_iterations
-                        ),
-                    )
-                    .await;
+                return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
             }
             tracing::debug!(
                 turn_id = %turn_id,
-                agent_iterations,
-                consecutive_failures,
-                no_tool_nudges,
-                completed_tool_rounds,
+                guards.agent_iterations,
+                guards.consecutive_failures,
+                guards.no_tool_nudges,
+                guards.completed_tool_rounds,
                 intent = ?turn_intent,
                 phase = current_phase.label(),
                 "executor: loop iteration"
@@ -482,18 +407,18 @@ impl TurnExecutor {
             // ── Inject structured progress summary from iteration 2+ ──────
             // Gives the model compact structured state so it doesn't have to
             // infer progress from scattered transcript. Reduces looping.
-            if agent_iterations > 1 {
+            if guards.agent_iterations > 1 {
                 let changed_paths: Vec<String> =
-                    file_changes.iter().map(|f| f.path.clone()).collect();
+                    guards.file_changes.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
                 system_instructions.push(progress_summary(&ProgressState {
                     phase: current_phase.label(),
-                    iteration: agent_iterations,
-                    reads_used: total_read_only_rounds,
+                    iteration: guards.agent_iterations,
+                    reads_used: guards.total_read_only_rounds,
                     reads_budget: read_budget,
                     plan: &plan_steps,
                     completed_actions: &completed_actions,
                     changed_files: &changed_paths,
-                    verified: command_attempted_after_last_file_change,
+                    verified: guards.command_attempted_after_last_file_change,
                 }));
             }
 
@@ -711,18 +636,18 @@ impl TurnExecutor {
             // by reinforcing the model's plan-without-acting pattern.
             let will_nudge_intent = tool_calls.is_empty()
                 && !assistant_text.is_empty()
-                && no_tool_nudges < agent_cfg.max_no_tool_nudges
+                && guards.no_tool_nudges < agent_cfg.max_no_tool_nudges
                 && should_retry_no_tool_completion(
                     &assistant_text,
                     &turn_ctx.items,
-                    completed_tool_rounds,
+                    guards.completed_tool_rounds,
                 );
             let will_nudge_verification = tool_calls.is_empty()
                 && !assistant_text.is_empty()
                 && verification_requested
-                && !file_changes.is_empty()
-                && !command_attempted_after_last_file_change
-                && verification_nudges == 0;
+                && !guards.file_changes.is_empty()
+                && !guards.command_attempted_after_last_file_change
+                && guards.verification_nudges == 0;
 
             // Persist reasoning/thinking text if the model produced any.
             // ItemKind::ReasoningText is defined in the domain but was previously
@@ -765,10 +690,10 @@ impl TurnExecutor {
             if tool_calls.is_empty() {
                 tracing::debug!(
                     turn_id = %turn_id,
-                    agent_iterations,
-                    completed_tool_rounds,
-                    no_tool_nudges,
-                    consecutive_empty_responses,
+                    guards.agent_iterations,
+                    guards.completed_tool_rounds,
+                    guards.no_tool_nudges,
+                    guards.consecutive_empty_responses,
                     assistant_text_len = assistant_text.len(),
                     assistant_text_preview = %assistant_text.chars().take(200).collect::<String>(),
                     "executor: no tool calls in model response"
@@ -781,27 +706,18 @@ impl TurnExecutor {
                 // that the task is done. Retry once with an explicit recovery
                 // prompt; on the second consecutive blank, fail the turn.
                 if assistant_text.is_empty() {
-                    consecutive_empty_responses += 1;
-                    total_nudges += 1;
+                    guards.consecutive_empty_responses += 1;
+                    guards.total_nudges += 1;
                     tracing::warn!(
                         turn_id = %turn_id,
-                        consecutive_empty_responses,
+                        guards.consecutive_empty_responses,
                         max_empty_responses = agent_cfg.max_empty_responses,
                         "executor: model returned empty response (no text, no tool calls)"
                     );
-                    if consecutive_empty_responses >= agent_cfg.max_empty_responses {
-                        return self
-                            .fail_turn(
-                                &params.thread_id,
-                                &turn_id,
-                                "empty_response",
-                                &format!(
-                                    "The model returned {consecutive_empty_responses} consecutive \
-                                     empty responses (no text and no tool calls). The turn has \
-                                     been stopped to prevent a silent incomplete result."
-                                ),
-                            )
-                            .await;
+                    if let Some(GuardVerdict::FailTurn { kind, message }) =
+                        guards.check_empty_responses(&agent_cfg)
+                    {
+                        return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
                     }
                     no_tool_nudge_instruction = Some(
                         "Your previous response was completely empty — no text and no tool call \
@@ -824,14 +740,14 @@ impl TurnExecutor {
                 }
 
                 // Model produced text — not a blank response, reset the counter.
-                consecutive_empty_responses = 0;
+                guards.consecutive_empty_responses = 0;
 
                 // ── Intent-narration guard ────────────────────────────────────
-                if no_tool_nudges < agent_cfg.max_no_tool_nudges
+                if guards.no_tool_nudges < agent_cfg.max_no_tool_nudges
                     && should_retry_no_tool_completion(
                         &assistant_text,
                         &turn_ctx.items,
-                        completed_tool_rounds,
+                        guards.completed_tool_rounds,
                     )
                 {
                     // ── Plan extraction: if the model narrated a plan,
@@ -852,39 +768,31 @@ impl TurnExecutor {
                             }
                         }
                     }
-                    no_tool_nudges += 1;
-                    total_nudges += 1;
+                    guards.no_tool_nudges += 1;
+                    guards.total_nudges += 1;
                     // Escalate to constrained mode on the 2nd nudge to make
                     // looping structurally harder, not just recoverable.
-                    if no_tool_nudges >= 2 && constrained_mode.is_none() {
-                        constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
+                    if guards.no_tool_nudges >= 2 && guards.constrained_mode.is_none() {
+                        guards.constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
                         tracing::warn!(
                             turn_id = %turn_id,
-                            no_tool_nudges,
+                            guards.no_tool_nudges,
                             "executor: escalating to constrained mode after repeated narration"
                         );
                     }
-                    if total_nudges >= agent_cfg.max_total_nudges {
+                    if let Some(GuardVerdict::FailTurn { kind, message }) =
+                        guards.check_nudge_budget(&agent_cfg)
+                    {
                         tracing::error!(
                             turn_id = %turn_id,
-                            total_nudges,
+                            guards.total_nudges,
                             "executor: cumulative nudge limit reached — terminating turn"
                         );
-                        return self
-                            .fail_turn(
-                                &params.thread_id,
-                                &turn_id,
-                                "nudge_limit",
-                                &format!(
-                                    "Agent required {total_nudges} corrections without making \
-                                     progress. The turn has been stopped."
-                                ),
-                            )
-                            .await;
+                        return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
                     }
                     tracing::warn!(
                         turn_id = %turn_id,
-                        no_tool_nudges,
+                        guards.no_tool_nudges,
                         max_no_tool_nudges = agent_cfg.max_no_tool_nudges,
                         "executor: nudging model to emit tool call (described intent but no call)"
                     );
@@ -903,7 +811,7 @@ impl TurnExecutor {
                         "You described a plan but emitted no tool call — nothing ran. \
                          Do not narrate. Emit exactly one tool call now.{file_hint} \
                          Retry {}/{}.",
-                        no_tool_nudges, agent_cfg.max_no_tool_nudges
+                        guards.no_tool_nudges, agent_cfg.max_no_tool_nudges
                     ));
                     self.runtime
                         .publish_event(
@@ -924,29 +832,21 @@ impl TurnExecutor {
                 // command attempt after the last file change, then let the model
                 // report pass/fail normally.
                 if verification_requested
-                    && !file_changes.is_empty()
-                    && !command_attempted_after_last_file_change
-                    && verification_nudges == 0
+                    && !guards.file_changes.is_empty()
+                    && !guards.command_attempted_after_last_file_change
+                    && guards.verification_nudges == 0
                 {
-                    verification_nudges += 1;
-                    total_nudges += 1;
-                    if total_nudges >= agent_cfg.max_total_nudges {
+                    guards.verification_nudges += 1;
+                    guards.total_nudges += 1;
+                    if let Some(GuardVerdict::FailTurn { kind, message }) =
+                        guards.check_nudge_budget(&agent_cfg)
+                    {
                         tracing::error!(
                             turn_id = %turn_id,
-                            total_nudges,
+                            guards.total_nudges,
                             "executor: cumulative nudge limit reached — terminating turn"
                         );
-                        return self
-                            .fail_turn(
-                                &params.thread_id,
-                                &turn_id,
-                                "nudge_limit",
-                                &format!(
-                                    "Agent required {total_nudges} corrections without making \
-                                     progress. The turn has been stopped."
-                                ),
-                            )
-                            .await;
+                        return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
                     }
                     tracing::warn!(
                         turn_id = %turn_id,
@@ -973,15 +873,15 @@ impl TurnExecutor {
                 }
                 tracing::info!(
                     turn_id = %turn_id,
-                    agent_iterations,
-                    completed_tool_rounds,
+                    guards.agent_iterations,
+                    guards.completed_tool_rounds,
                     "executor: turn completing — no tool calls, no nudge required"
                 );
                 let metrics = TurnMetrics {
-                    agent_iterations,
-                    tool_call_count: total_tool_calls,
+                    agent_iterations: guards.agent_iterations,
+                    tool_call_count: guards.total_tool_calls,
                     elapsed_ms: turn_start_time.elapsed().as_millis() as u64,
-                    file_changes: file_changes.clone(),
+                    file_changes: guards.file_changes.clone(),
                 };
                 return self
                     .complete_turn(
@@ -993,8 +893,8 @@ impl TurnExecutor {
                     )
                     .await;
             }
-            no_tool_nudges = 0;
-            consecutive_empty_responses = 0;
+            guards.no_tool_nudges = 0;
+            guards.consecutive_empty_responses = 0;
 
             // Snapshot whether this round is pure read-only *before* tool_calls is moved.
             let round_is_read_only = tool_calls.iter().all(|c| is_read_only_tool(&c.tool_name));
@@ -1017,137 +917,84 @@ impl TurnExecutor {
                 result = self.execute_tool_round(
                     &turn_ctx,
                     tool_calls,
-                    &mut seen_read_signatures,
-                    &mut cross_round_counts,
-                    constrained_mode.is_some(),
+                    &mut guards.seen_read_signatures,
+                    &mut guards.cross_round_counts,
+                    guards.constrained_mode.is_some(),
                 ) => result?,
             };
-            completed_tool_rounds += 1;
-            total_tool_calls += round_call_count;
+            guards.record_tool_round(had_any_success, round_call_count);
             if !round_file_changes.is_empty() {
-                command_attempted_after_last_file_change = false;
+                guards.command_attempted_after_last_file_change = false;
                 // Track completed actions for progress summary
                 for fc in &round_file_changes {
                     completed_actions.push(format!("edited {}", fc.path));
                 }
             }
             if round_has_command {
-                command_attempted_after_last_file_change = true;
+                guards.command_attempted_after_last_file_change = true;
                 completed_actions.push("ran command".into());
             }
-            file_changes.extend(round_file_changes.iter().cloned());
-            changes_since_last_review.extend(round_file_changes);
-
-            // ── Checkpoint review ──────────────────────────────────────────
-            // Fire a lightweight review after file-changing tool rounds when:
-            //   - checkpoint_review_enabled is true
-            //   - not inside a child agent (prevents recursive review storms)
-            //   - enough changes have accumulated since the last review
-            //   - we haven't exceeded the per-turn review cap
-            //   - not in cooldown from a previous review feedback injection
-            if agent_cfg.checkpoint_review_enabled
-                && params.agent_depth == 0
-                && !changes_since_last_review.is_empty()
-                && changes_since_last_review.len() >= agent_cfg.checkpoint_review_min_changes
-                && checkpoint_reviews_run < agent_cfg.checkpoint_review_max_per_turn
-                && !review_cooldown
+            let round_file_changes_count = round_file_changes.len();
+            guards.file_changes.extend(round_file_changes.iter().cloned());
+            // ── Middleware: post-tool hooks ──────────────────────────────────
+            // Run all registered middlewares after tool dispatch. Currently
+            // this fires the checkpoint review; future middlewares hook in here.
             {
-                let reviewer =
-                    super::review::CheckpointReviewer::new(self.runtime.clone(), &agent_cfg);
-
-                match reviewer
-                    .review(
-                        &user_task_text_for_review,
-                        &plan_steps,
-                        &completed_actions,
-                        &changes_since_last_review,
-                        &params.thread_id,
-                        &turn_id,
-                    )
-                    .await
+                use super::middleware::{MiddlewareAction, TurnMiddlewareContext};
+                let mut mw_ctx = TurnMiddlewareContext {
+                    runtime: Some(self.runtime.clone()),
+                    thread_id: params.thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    agent_config: agent_cfg.clone(),
+                    agent_depth: params.agent_depth,
+                    cwd: cwd_for_persist.to_string(),
+                    user_task_text: user_task_text_for_review.clone(),
+                    system_instructions: Vec::new(),
+                    file_changes: guards.file_changes.clone(),
+                    plan_steps: plan_steps.clone(),
+                    completed_actions: completed_actions.clone(),
+                    agent_iterations: guards.agent_iterations,
+                    completed_tool_rounds: guards.completed_tool_rounds,
+                };
+                // round_file_changes was consumed by extend above, so pass the
+                // tail of guards.file_changes that corresponds to this round.
+                let round_start = guards.file_changes.len().saturating_sub(round_file_changes_count);
+                let round_changes_slice = &guards.file_changes[round_start..];
+                match middleware_chain
+                    .run_post_tools(&mut mw_ctx, &[], round_changes_slice)
+                    .await?
                 {
-                    Ok(verdict) => {
-                        checkpoint_reviews_run += 1;
-
-                        // Persist the review verdict for observability.
-                        self.persist_turn_item(ConversationItem {
-                            item_id: format!("review_{}", Uuid::new_v4().simple()),
-                            thread_id: params.thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            created_at: now_seconds(),
-                            kind: ItemKind::ReviewMarker,
-                            payload: json!({
-                                "approved": verdict.approved,
-                                "issues": verdict.issues,
-                                "suggestions": verdict.suggestions,
-                                "filesReviewed": changes_since_last_review
-                                    .iter()
-                                    .map(|f| &f.path)
-                                    .collect::<Vec<_>>(),
-                                "reviewIndex": checkpoint_reviews_run,
-                            }),
-                        })
-                        .await?;
-
-                        // Reset the accumulator — next review starts fresh.
-                        changes_since_last_review.clear();
-
-                        // If the review found issues, inject feedback for the
-                        // next iteration so the coder agent gets immediate,
-                        // actionable correction.
-                        if !verdict.approved {
-                            let feedback =
-                                super::review::build_review_feedback_instruction(&verdict);
-                            tracing::info!(
-                                turn_id = %turn_id,
-                                issues = verdict.issues.len(),
-                                review_index = checkpoint_reviews_run,
-                                remaining = agent_cfg.checkpoint_review_max_per_turn - checkpoint_reviews_run,
-                                "executor: checkpoint review found issues — injecting feedback"
-                            );
-                            no_tool_nudge_instruction = Some(feedback);
-                            // Enter cooldown: skip reviewing the immediate fix
-                            // attempt. The cooldown clears after the next tool
-                            // round, so a follow-up review can still validate.
-                            review_cooldown = true;
-                        } else {
-                            tracing::debug!(
-                                turn_id = %turn_id,
-                                "executor: checkpoint review approved changes"
-                            );
-                        }
+                    MiddlewareAction::Continue => {}
+                    MiddlewareAction::InjectInstruction(instruction) => {
+                        no_tool_nudge_instruction = Some(instruction);
                     }
-                    Err(e) => {
-                        // Review failure is non-fatal — log and continue.
-                        tracing::warn!(
+                    MiddlewareAction::FailTurn { kind, message } => {
+                        return self
+                            .fail_turn(&params.thread_id, &turn_id, &kind, &message)
+                            .await;
+                    }
+                    MiddlewareAction::CompleteTurn => {
+                        tracing::info!(
                             turn_id = %turn_id,
-                            error = %e,
-                            "executor: checkpoint review failed — continuing without review"
+                            "executor: middleware requested early turn completion"
                         );
-                        changes_since_last_review.clear();
+                        let metrics = TurnMetrics {
+                            agent_iterations: guards.agent_iterations,
+                            tool_call_count: guards.total_tool_calls,
+                            elapsed_ms: turn_start_time.elapsed().as_millis() as u64,
+                            file_changes: guards.file_changes.clone(),
+                        };
+                        return self
+                            .complete_turn(
+                                &params.thread_id,
+                                &turn_id,
+                                TokenUsage::default(),
+                                TokenUsage::default(),
+                                metrics,
+                            )
+                            .await;
                     }
                 }
-            } else if review_cooldown && !changes_since_last_review.is_empty() {
-                // Clear cooldown after the fix attempt's tool round completes.
-                // The *next* tool round (if any) can be reviewed again, up to
-                // the per-turn cap.
-                review_cooldown = false;
-                tracing::debug!(
-                    turn_id = %turn_id,
-                    checkpoint_reviews_run,
-                    max = agent_cfg.checkpoint_review_max_per_turn,
-                    "executor: review cooldown cleared after fix attempt"
-                );
-            } else if checkpoint_reviews_run >= agent_cfg.checkpoint_review_max_per_turn
-                && !changes_since_last_review.is_empty()
-            {
-                tracing::debug!(
-                    turn_id = %turn_id,
-                    checkpoint_reviews_run,
-                    max = agent_cfg.checkpoint_review_max_per_turn,
-                    "executor: checkpoint review cap reached — skipping further reviews"
-                );
-                changes_since_last_review.clear();
             }
 
             if let Some(stop_reason) = non_retryable_stop_reason {
@@ -1181,8 +1028,8 @@ impl TurnExecutor {
                     "executor: phase Plan → Execute"
                 );
             } else if current_phase == TurnPhase::Execute
-                && !file_changes.is_empty()
-                && command_attempted_after_last_file_change
+                && !guards.file_changes.is_empty()
+                && guards.command_attempted_after_last_file_change
             {
                 current_phase = TurnPhase::Verify;
                 tracing::debug!(
@@ -1190,35 +1037,28 @@ impl TurnExecutor {
                     "executor: phase Execute → Verify (files changed + command ran)"
                 );
             }
-            total_invalid_tool_calls += invalid_tool_calls;
+            guards.total_invalid_tool_calls += invalid_tool_calls;
 
             if invalid_tool_calls > 0 {
                 tracing::warn!(
                     turn_id = %turn_id,
                     invalid_tool_calls,
-                    total_invalid_tool_calls,
+                    guards.total_invalid_tool_calls,
                     "executor: invalid tool calls detected this round"
                 );
-                if total_invalid_tool_calls >= 2 {
-                    return self
-                        .fail_turn(
-                            &params.thread_id,
-                            &turn_id,
-                            "invalid_tool_limit",
-                            "The model repeatedly emitted invalid tool arguments. The turn has been stopped to prevent a failing loop.",
-                        )
-                        .await;
+                if let Some(GuardVerdict::FailTurn { kind, message }) = guards.check_invalid_tool_calls() {
+                    return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
                 }
             }
             if blocked_read_only_calls > 0 {
-                constrained_mode_violations += 1;
+                guards.constrained_mode_violations += 1;
                 tracing::warn!(
                     turn_id = %turn_id,
                     blocked_read_only_calls,
-                    constrained_mode_violations,
+                    guards.constrained_mode_violations,
                     "executor: constrained mode violation (read-only calls while blocked)"
                 );
-                if constrained_mode_violations >= 2 {
+                if guards.constrained_mode_violations >= 2 {
                     return self
                         .fail_turn(
                             &params.thread_id,
@@ -1239,13 +1079,13 @@ impl TurnExecutor {
             // If the model has emitted the same tool call (any tool, any args)
             // REPEAT_THRESHOLD times across this turn, it's stuck. Switch to
             // constrained mode and nudge once. Only fires once per turn.
-            if !repetition_handled
+            if !guards.repetition_handled
                 && max_repeat_count >= REPEAT_THRESHOLD
-                && constrained_mode.is_none()
+                && guards.constrained_mode.is_none()
             {
-                repetition_handled = true;
-                total_nudges += 1;
-                constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
+                guards.repetition_handled = true;
+                guards.total_nudges += 1;
+                guards.constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
                 tracing::warn!(
                     turn_id = %turn_id,
                     max_repeat_count,
@@ -1276,22 +1116,22 @@ impl TurnExecutor {
             // Reset when any action tool ran this round; bump when every call
             // was read-only. On hitting the threshold inject a single nudge and
             // reset so a follow-up nudge fires again if the model ignores it.
-            if constrained_mode.is_none() && round_is_read_only {
-                consecutive_read_only_rounds += 1;
-                total_read_only_rounds += 1;
+            if guards.constrained_mode.is_none() && round_is_read_only {
+                guards.consecutive_read_only_rounds += 1;
+                guards.total_read_only_rounds += 1;
                 // Use intent-aware budget instead of flat config value.
                 // Effective threshold still shrinks with each nudge.
-                let effective_read_only_limit = (read_budget >> total_nudges).max(1);
+                let effective_read_only_limit = (read_budget >> guards.total_nudges).max(1);
                 tracing::debug!(
                     turn_id = %turn_id,
-                    consecutive_read_only_rounds,
+                    guards.consecutive_read_only_rounds,
                     effective_read_only_limit,
-                    "executor: read-only round ({consecutive_read_only_rounds}/{effective_read_only_limit})"
+                    "executor: read-only round ({}/{})", guards.consecutive_read_only_rounds, effective_read_only_limit
                 );
-                if consecutive_read_only_rounds >= effective_read_only_limit {
-                    consecutive_read_only_rounds = 0;
-                    total_nudges += 1;
-                    constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
+                if guards.consecutive_read_only_rounds >= effective_read_only_limit {
+                    guards.consecutive_read_only_rounds = 0;
+                    guards.total_nudges += 1;
+                    guards.constrained_mode = Some(ConstrainedMode::FinalOrActionOnly);
                     // Phase transition: Orient → Plan for edit/debug tasks
                     if needs_planning && current_phase == TurnPhase::Orient {
                         current_phase = TurnPhase::Plan;
@@ -1342,20 +1182,20 @@ impl TurnExecutor {
                         .await?;
                     no_tool_nudge_instruction = Some(msg);
                 }
-            } else if constrained_mode.is_none() {
-                if consecutive_read_only_rounds > 0 {
+            } else if guards.constrained_mode.is_none() {
+                if guards.consecutive_read_only_rounds > 0 {
                     tracing::debug!(
                         turn_id = %turn_id,
-                        consecutive_read_only_rounds,
+                        guards.consecutive_read_only_rounds,
                         "executor: action tool executed — resetting read-only counter"
                     );
                 }
-                consecutive_read_only_rounds = 0;
+                guards.consecutive_read_only_rounds = 0;
             }
 
-            if constrained_mode.is_some() && !round_is_read_only && had_any_success {
-                constrained_mode = None;
-                constrained_mode_violations = 0;
+            if guards.constrained_mode.is_some() && !round_is_read_only && had_any_success {
+                guards.constrained_mode = None;
+                guards.constrained_mode_violations = 0;
                 tracing::debug!(
                     turn_id = %turn_id,
                     "executor: constrained mode cleared after successful action"
@@ -1363,40 +1203,25 @@ impl TurnExecutor {
             }
 
             // ── Consecutive-failure guard ─────────────────────────────────────
-            // Reset counter if any tool succeeded this round; bump it if every
-            // tool failed. Trips the break after the configured all-fail
-            // rounds in a row — catches stuck loops without harming legitimate
-            // long tasks where tools normally succeed.
-            if had_any_success {
-                consecutive_failures = 0;
-            } else {
-                consecutive_failures += 1;
+            // reset/increment is now handled by record_tool_round above.
+            if !had_any_success {
                 tracing::warn!(
                     turn_id = %turn_id,
-                    consecutive_failures,
+                    guards.consecutive_failures,
                     max_consecutive_failures = agent_cfg.max_consecutive_failures,
-                    completed_tool_rounds,
+                    guards.completed_tool_rounds,
                     "executor: all tools in this round FAILED"
                 );
-                if consecutive_failures > agent_cfg.max_consecutive_failures {
-                    tracing::error!(
-                        turn_id = %turn_id,
-                        consecutive_failures,
-                        "executor: consecutive-failure limit reached — terminating turn"
-                    );
-                    return self
-                        .fail_turn(
-                            &params.thread_id,
-                            &turn_id,
-                            "loop_limit",
-                            &format!(
-                                "Agent made {consecutive_failures} consecutive rounds where every \
-                                 tool call failed. The turn has been stopped. Check that tool \
-                                 arguments are correct and the requested paths/commands exist."
-                            ),
-                        )
-                        .await;
-                }
+            }
+            if let Some(GuardVerdict::FailTurn { kind, message }) =
+                guards.check_consecutive_failures(&agent_cfg)
+            {
+                tracing::error!(
+                    turn_id = %turn_id,
+                    guards.consecutive_failures,
+                    "executor: consecutive-failure limit reached — terminating turn"
+                );
+                return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
             }
         }
     }
@@ -1895,46 +1720,4 @@ impl TurnExecutor {
         Ok(instructions)
     }
 
-    /// Decide whether this turn should use speculative execution.
-    ///
-    /// Criteria:
-    /// - `speculative_candidates >= 2` (otherwise no point)
-    /// - Not inside a child agent (prevents recursive speculation)
-    /// - Either `speculative_auto` is true for edit/debug intents,
-    ///   or the user explicitly prefixed with `/speculate`
-    fn should_speculate(
-        &self,
-        params: &crate::system::runtime::TurnStartParams,
-        intent: TurnIntent,
-    ) -> bool {
-        let cfg = &self.runtime.inner.effective_config.agent;
-
-        // Disabled if fewer than 2 candidates configured
-        if cfg.speculative_candidates < 2 {
-            return false;
-        }
-
-        // Don't speculate inside child agents (avoid recursive speculation storms)
-        if params.agent_depth > 0 {
-            return false;
-        }
-
-        // Explicit trigger: /speculate prefix in user input
-        let explicit = params.input.iter().any(|i| {
-            i.text
-                .as_ref()
-                .map(|t| t.text.trim_start().starts_with("/speculate"))
-                .unwrap_or(false)
-        });
-        if explicit {
-            return true;
-        }
-
-        // Auto-mode: only for complex intents
-        if cfg.speculative_auto {
-            return matches!(intent, TurnIntent::Edit | TurnIntent::Debug);
-        }
-
-        false
-    }
 }

@@ -29,7 +29,7 @@ pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnIntent {
+pub enum TurnIntent {
     Edit,
     Debug,
     Review,
