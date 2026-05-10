@@ -356,33 +356,75 @@ pub(crate) fn extract_signals(items: &[ConversationItem]) -> Vec<(PatternKind, S
     }
 
     // ── 2. Tool-sequence n-grams ──────────────────────────────────────────
-    // Build a bigram sequence of tool names in the turn and record it when
-    // it forms a meaningful pattern (e.g. read_file→patch_file).
+    // Build a sequence of tool names in the turn and record meaningful
+    // transitions using semantic categories (Read→Edit, Edit→Execute, etc.)
+    // rather than a hardcoded pair list. Also capture trigrams for common
+    // 3-step workflows (e.g. read_file→patch_file→bash_exec).
     let tool_names: Vec<&str> = items
         .iter()
         .filter(|i| i.kind == ItemKind::ToolCall)
         .filter_map(|i| i.payload.get("toolName").and_then(|v| v.as_str()))
         .collect();
 
+    // Bigrams: any pair where the category transition is meaningful.
     for window in tool_names.windows(2) {
-        let bigram = format!("{}→{}", window[0], window[1]);
-        if is_meaningful_bigram(window[0], window[1]) {
-            let hint = format!(
-                "After using `{}`, the user typically follows up with `{}`.",
-                window[0], window[1]
-            );
-            signals.push((PatternKind::ToolSequence, bigram, hint));
+        if let (Some(cat_a), Some(cat_b)) = (tool_category(window[0]), tool_category(window[1])) {
+            if is_meaningful_transition(&cat_a, &cat_b) {
+                let bigram = format!("{}→{}", window[0], window[1]);
+                let hint = format!(
+                    "After using `{}`, the user typically follows up with `{}`.",
+                    window[0], window[1]
+                );
+                signals.push((PatternKind::ToolSequence, bigram, hint));
+            }
+        }
+    }
+
+    // Trigrams: common 3-step workflows.
+    for window in tool_names.windows(3) {
+        if let (Some(cat_a), Some(cat_b), Some(cat_c)) = (
+            tool_category(window[0]),
+            tool_category(window[1]),
+            tool_category(window[2]),
+        ) {
+            if is_meaningful_trigram(&cat_a, &cat_b, &cat_c) {
+                let trigram = format!("{}→{}→{}", window[0], window[1], window[2]);
+                let hint = format!(
+                    "After `{}` then `{}`, the user typically runs `{}`.",
+                    window[0], window[1], window[2]
+                );
+                signals.push((PatternKind::ToolSequence, trigram, hint));
+            }
         }
     }
 
     // ── 3. Suffix instructions ────────────────────────────────────────────
     // Look for recurring short phrases the user appends to their messages.
+    // We now check both the trailing fragment and the full message for
+    // instruction markers, and also detect imperative sentences anywhere
+    // in the text (not just the last sentence).
     for item in items.iter().filter(|i| i.kind == ItemKind::UserMessage) {
         if let Some(text) = item.payload.get("text").and_then(|v| v.as_str()) {
+            // 3a. Trailing instruction suffix (original heuristic).
             if let Some(suffix) = extract_instruction_suffix(text) {
                 let normalised = suffix.to_lowercase();
                 let hint = format!("The user prefers: \"{suffix}\".");
                 signals.push((PatternKind::SuffixInstruction, normalised, hint));
+            }
+
+            // 3b. Full-message imperative detection — catches cases where the
+            //     entire message is a short instruction like "run tests" or
+            //     "format the code" that doesn't appear as a trailing suffix.
+            if let Some(imperative) = extract_imperative_message(text) {
+                let normalised = imperative.to_lowercase();
+                // Avoid duplicating a suffix we already captured.
+                if !signals
+                    .iter()
+                    .any(|(k, s, _)| *k == PatternKind::SuffixInstruction && s == &normalised)
+                {
+                    let hint = format!("The user often gives the instruction: \"{imperative}\".");
+                    signals.push((PatternKind::SuffixInstruction, normalised, hint));
+                }
             }
         }
     }
@@ -443,14 +485,21 @@ fn is_lint_or_format(cmd: &str) -> bool {
         "cargo fmt"
             | "cargo clippy"
             | "cargo check"
+            | "cargo test"
             | "npm run lint"
             | "npm run format"
+            | "npm test"
             | "pnpm lint"
             | "pnpm format"
+            | "pnpm test"
             | "yarn lint"
             | "yarn format"
+            | "yarn test"
             | "go vet"
             | "go fmt"
+            | "go test"
+            | "pytest"
+            | "jest"
     )
 }
 
@@ -463,17 +512,58 @@ fn build_post_edit_hint(cmd: &str, kind: &PatternKind) -> String {
     }
 }
 
-/// Meaningful bigrams are pairs where the first tool gathers info and the
-/// second acts on it, or two consecutive action tools.
-fn is_meaningful_bigram(first: &str, second: &str) -> bool {
+// ─── Tool category system ────────────────────────────────────────────────────
+
+/// Semantic category for a tool — used for generalised sequence detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolCat {
+    /// Reading / inspecting: read_file, list_dir, grep_search, image_metadata
+    Read,
+    /// Writing / modifying files: write_file, patch_file, create_file, remove_path, copy_path
+    Edit,
+    /// Running commands: bash_exec, shell_exec
+    Execute,
+    /// Searching: web_search, web_fetch
+    Search,
+}
+
+/// Map a tool name to its semantic category.
+fn tool_category(name: &str) -> Option<ToolCat> {
+    match name {
+        "read_file" | "list_dir" | "grep_search" | "image_metadata" => Some(ToolCat::Read),
+        "write_file" | "patch_file" | "create_file" | "remove_path" | "copy_path" => {
+            Some(ToolCat::Edit)
+        }
+        "bash_exec" | "shell_exec" => Some(ToolCat::Execute),
+        "web_search" | "web_fetch" => Some(ToolCat::Search),
+        _ => None,
+    }
+}
+
+/// A bigram transition is meaningful when it represents a common workflow step.
+fn is_meaningful_transition(a: &ToolCat, b: &ToolCat) -> bool {
     matches!(
-        (first, second),
-        ("read_file", "patch_file")
-            | ("read_file", "write_file")
-            | ("list_dir", "read_file")
-            | ("patch_file", "bash_exec")
-            | ("write_file", "bash_exec")
-            | ("bash_exec", "patch_file")
+        (a, b),
+        (ToolCat::Read, ToolCat::Edit)
+            | (ToolCat::Read, ToolCat::Execute)
+            | (ToolCat::Edit, ToolCat::Execute)
+            | (ToolCat::Edit, ToolCat::Read)
+            | (ToolCat::Execute, ToolCat::Edit)
+            | (ToolCat::Search, ToolCat::Edit)
+            | (ToolCat::Search, ToolCat::Execute)
+    )
+}
+
+/// A trigram is meaningful when it represents a complete 3-step workflow.
+fn is_meaningful_trigram(a: &ToolCat, b: &ToolCat, c: &ToolCat) -> bool {
+    matches!(
+        (a, b, c),
+        // Read → Edit → Execute (the classic edit-then-verify loop)
+        (ToolCat::Read, ToolCat::Edit, ToolCat::Execute)
+            | (ToolCat::Edit, ToolCat::Execute, ToolCat::Edit)
+            | (ToolCat::Read, ToolCat::Edit, ToolCat::Read)
+            | (ToolCat::Search, ToolCat::Edit, ToolCat::Execute)
+            | (ToolCat::Search, ToolCat::Read, ToolCat::Edit)
     )
 }
 
@@ -481,6 +571,7 @@ fn is_meaningful_bigram(first: &str, second: &str) -> bool {
 ///
 /// Heuristic: take the last sentence fragment (after the final `.` or `\n`)
 /// if it is 6–80 characters long and matches common instructional patterns.
+/// Also checks the full message for instruction markers (not just the suffix).
 fn extract_instruction_suffix(text: &str) -> Option<&str> {
     let text = text.trim();
     // Skip very short messages.
@@ -515,6 +606,26 @@ fn extract_instruction_suffix(text: &str) -> Option<&str> {
         "run tests",
         "cargo fmt",
         "cargo clippy",
+        "run lint",
+        "run format",
+        "typecheck",
+        "type check",
+        "check types",
+        "no boilerplate",
+        "minimal",
+        "short",
+        "simple",
+        "clean",
+        "refactor",
+        "optimize",
+        "fix the",
+        "ensure",
+        "verify",
+        "validate",
+        "test it",
+        "commit",
+        "push",
+        "deploy",
     ];
 
     if instruction_markers.iter().any(|m| lower.contains(m)) {
@@ -522,6 +633,73 @@ fn extract_instruction_suffix(text: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// Detect when the entire user message is a short imperative instruction.
+///
+/// Catches messages like "run tests", "format the code", "check for errors"
+/// that are too short for the suffix heuristic (which requires text ≥ 20 chars)
+/// or where the instruction is the whole message, not a trailing fragment.
+fn extract_imperative_message(text: &str) -> Option<&str> {
+    let text = text.trim();
+    // Only consider short-to-medium messages (3–120 chars) that look like commands.
+    if text.len() < 3 || text.len() > 120 {
+        return None;
+    }
+    // Skip messages that contain newlines — those are multi-part instructions
+    // better handled by the suffix heuristic.
+    if text.contains('\n') {
+        return None;
+    }
+
+    let lower = text.to_lowercase();
+
+    // Imperative verb starters — common short commands users give.
+    let imperative_starters = [
+        "run ",
+        "fmt",
+        "format",
+        "lint",
+        "check ",
+        "test",
+        "build",
+        "deploy",
+        "commit",
+        "push",
+        "clean",
+        "fix ",
+        "refactor",
+        "optimize",
+        "verify",
+        "validate",
+        "ensure",
+        "typecheck",
+        "cargo ",
+        "npm ",
+        "pnpm ",
+        "yarn ",
+        "go ",
+        "make ",
+        "python ",
+        "pytest",
+        "jest",
+        "deno ",
+        "bun ",
+        "gradle ",
+        "mvn ",
+    ];
+
+    // Must start with an imperative verb or toolchain command.
+    if !imperative_starters.iter().any(|s| lower.starts_with(s)) {
+        return None;
+    }
+
+    // Must not be a question or long explanatory message.
+    if lower.contains('?') || text.len() > 80 {
+        return None;
+    }
+
+    Some(text)
 }
 
 fn now_secs() -> i64 {
@@ -689,5 +867,141 @@ mod tests {
         assert_eq!(normalise_command("npm run build --production"), "npm run");
         assert_eq!(normalise_command("go vet ./..."), "go vet");
         assert_eq!(normalise_command("unknown_tool arg"), "");
+    }
+
+    // ── New tests for category-based sequence detection ────────────────────
+
+    #[test]
+    fn detects_category_bigram_read_then_edit() {
+        let items = vec![
+            make_tool_call("grep_search", None),
+            make_tool_call("patch_file", None),
+        ];
+        let signals = extract_signals(&items);
+        assert!(
+            signals.iter().any(|(k, s, _)| {
+                *k == PatternKind::ToolSequence
+                    && s.contains("grep_search")
+                    && s.contains("patch_file")
+            }),
+            "expected grep_search→patch_file bigram, got {signals:?}"
+        );
+    }
+
+    #[test]
+    fn detects_category_bigram_search_then_execute() {
+        let items = vec![
+            make_tool_call("web_search", None),
+            make_tool_call("bash_exec", None),
+        ];
+        let signals = extract_signals(&items);
+        assert!(
+            signals.iter().any(|(k, s, _)| {
+                *k == PatternKind::ToolSequence
+                    && s.contains("web_search")
+                    && s.contains("bash_exec")
+            }),
+            "expected web_search→bash_exec bigram, got {signals:?}"
+        );
+    }
+
+    #[test]
+    fn detects_trigram_read_edit_execute() {
+        let items = vec![
+            make_tool_call("read_file", None),
+            make_tool_call("patch_file", None),
+            make_tool_call("bash_exec", Some("cargo test")),
+        ];
+        let signals = extract_signals(&items);
+        assert!(
+            signals.iter().any(|(k, s, _)| {
+                *k == PatternKind::ToolSequence && s.contains("→") && s.matches('→').count() == 2
+            }),
+            "expected a trigram signal, got {signals:?}"
+        );
+    }
+
+    #[test]
+    fn no_trigram_for_unrelated_sequence() {
+        let items = vec![
+            make_tool_call("bash_exec", Some("echo hi")),
+            make_tool_call("bash_exec", Some("echo bye")),
+            make_tool_call("bash_exec", Some("echo done")),
+        ];
+        let signals = extract_signals(&items);
+        let trigrams: Vec<_> = signals
+            .iter()
+            .filter(|(k, s, _)| *k == PatternKind::ToolSequence && s.matches('→').count() == 2)
+            .collect();
+        assert!(
+            trigrams.is_empty(),
+            "should not detect trigram for execute→execute→execute, got {trigrams:?}"
+        );
+    }
+
+    #[test]
+    fn detects_imperative_short_message() {
+        let text = "run tests";
+        let result = extract_imperative_message(text);
+        assert!(
+            result.is_some(),
+            "expected imperative detection for 'run tests'"
+        );
+    }
+
+    #[test]
+    fn detects_imperative_cargo_command() {
+        let text = "cargo test";
+        let result = extract_imperative_message(text);
+        assert!(
+            result.is_some(),
+            "expected imperative detection for 'cargo test'"
+        );
+    }
+
+    #[test]
+    fn no_imperative_for_question() {
+        let text = "run tests?";
+        let result = extract_imperative_message(text);
+        assert!(
+            result.is_none(),
+            "should not detect imperative for a question"
+        );
+    }
+
+    #[test]
+    fn no_imperative_for_long_message() {
+        let text = "I think we should probably consider running the test suite after making these changes to ensure nothing is broken";
+        let result = extract_imperative_message(text);
+        assert!(
+            result.is_none(),
+            "should not detect imperative for a long explanatory message"
+        );
+    }
+
+    #[test]
+    fn detects_expanded_suffix_markers() {
+        let items = vec![make_user_msg(
+            "Please refactor the module. Ensure all types are checked",
+        )];
+        let signals = extract_signals(&items);
+        assert!(
+            signals
+                .iter()
+                .any(|(k, _, _)| *k == PatternKind::SuffixInstruction),
+            "expected suffix instruction for 'ensure all types are checked', got {signals:?}"
+        );
+    }
+
+    #[test]
+    fn detects_imperative_in_extract_signals() {
+        let items = vec![make_user_msg("run lint")];
+        let signals = extract_signals(&items);
+        assert!(
+            signals
+                .iter()
+                .any(|(k, _, _)| *k == PatternKind::SuffixInstruction),
+            "expected SuffixInstruction for imperative 'run lint', got {signals:?}"
+        );
     }
 }
