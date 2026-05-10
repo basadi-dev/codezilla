@@ -246,7 +246,6 @@ impl PatternMiner {
     }
 
     /// Return all stored patterns (for debugging / TUI display).
-    #[allow(dead_code)]
     pub fn list_all_patterns(&self) -> Result<Vec<BehaviourPattern>> {
         let conn = self.conn.lock().expect("pattern miner mutex poisoned");
         let mut stmt = conn.prepare(
@@ -282,6 +281,22 @@ impl PatternMiner {
             .collect();
 
         Ok(patterns)
+    }
+    /// Delete a pattern by its ID. Returns true if a row was removed.
+    pub fn delete_pattern(&self, pattern_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("pattern miner mutex poisoned");
+        let removed = conn.execute(
+            "DELETE FROM behaviour_patterns WHERE pattern_id = ?1",
+            params![pattern_id],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// Delete all patterns. Returns the number of rows removed.
+    pub fn delete_all_patterns(&self) -> Result<usize> {
+        let conn = self.conn.lock().expect("pattern miner mutex poisoned");
+        let removed = conn.execute("DELETE FROM behaviour_patterns", [])?;
+        Ok(removed)
     }
 }
 

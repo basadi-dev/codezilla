@@ -445,6 +445,21 @@ impl ConversationRuntime {
         &self.inner.event_bus
     }
 
+    /// List all stored behavioural patterns.
+    pub fn list_patterns(&self) -> Result<Vec<super::agent::pattern_miner::BehaviourPattern>> {
+        self.inner.pattern_miner.list_all_patterns()
+    }
+
+    /// Delete a single pattern by ID. Returns true if removed.
+    pub fn delete_pattern(&self, pattern_id: &str) -> Result<bool> {
+        self.inner.pattern_miner.delete_pattern(pattern_id)
+    }
+
+    /// Delete all stored patterns. Returns count removed.
+    pub fn delete_all_patterns(&self) -> Result<usize> {
+        self.inner.pattern_miner.delete_all_patterns()
+    }
+
     pub(crate) async fn publish_event(
         &self,
         kind: RuntimeEventKind,

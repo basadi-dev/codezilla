@@ -1373,6 +1373,78 @@ impl InteractiveApp {
             self.error_message = None;
             self.model_settings_override = Some(ms);
             true
+        } else if matches!(command, "/patterns") {
+            match self.runtime.list_patterns() {
+                Ok(patterns) => {
+                    if patterns.is_empty() {
+                        self.status_message = "No behavioural patterns learned yet".into();
+                        self.error_message = None;
+                    } else {
+                        let mut lines: Vec<String> = Vec::new();
+                        lines.push(format!("{} pattern(s) learned:", patterns.len()));
+                        for p in &patterns {
+                            let freq = p.frequency;
+                            let confirmed = if freq >= 2 { "✓" } else { "?" };
+                            lines.push(format!(
+                                "  {confirmed} [{:?}] {} (×{freq}) — {}",
+                                p.kind, p.signal, p.hint
+                            ));
+                        }
+                        self.push_status_entry(
+                            format!(
+                                "patterns_{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs()
+                            ),
+                            EntryKind::Status,
+                            "Patterns",
+                            &lines.join("\n"),
+                            None,
+                        );
+                        self.status_message = format!("{} pattern(s) listed", patterns.len());
+                        self.error_message = None;
+                    }
+                    true
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to list patterns: {e}"));
+                    true
+                }
+            }
+        } else if matches!(command, "/patterns clear") || matches!(command, "/patterns reset") {
+            match self.runtime.delete_all_patterns() {
+                Ok(count) => {
+                    self.status_message = format!("Deleted all {count} pattern(s)");
+                    self.error_message = None;
+                    true
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to delete patterns: {e}"));
+                    true
+                }
+            }
+        } else if let Some(rest) = command.strip_prefix("/patterns delete ") {
+            let pattern_id = rest.trim();
+            if pattern_id.is_empty() {
+                self.error_message = Some("Usage: /patterns delete <pattern_id>".into());
+                true
+            } else {
+                match self.runtime.delete_pattern(pattern_id) {
+                    Ok(true) => {
+                        self.status_message = format!("Deleted pattern {pattern_id}");
+                        self.error_message = None;
+                    }
+                    Ok(false) => {
+                        self.error_message = Some(format!("Pattern {pattern_id} not found"));
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("Failed to delete pattern: {e}"));
+                    }
+                }
+                true
+            }
         } else if matches!(command, "/help") {
             self.status_message =
                 "Keys: Tab/↑↓ autocomplete, Ctrl+A/E start/end-of-line, Ctrl+N new, Ctrl+F fork, \
@@ -1380,7 +1452,7 @@ impl InteractiveApp {
                  Approval: Y approve  U approve+auto  D deny  ·  \
                  Commands: /model [provider/model]  /reasoning [auto|off|low|medium|high]  \
                  /approve auto|ask|toggle  /compact  /new  /fork  /open <id>  /threads  \
-                 /speculate <task> (autocomplete)  ·  \
+                 /patterns [delete <id>|clear]  /speculate <task> (autocomplete)  ·  \
                  CLI: codezilla -r (resume last thread)"
                     .into();
             self.error_message = None;
@@ -1527,6 +1599,9 @@ impl InteractiveApp {
             "/interrupt",
             "/new",
             "/open ",
+            "/patterns",
+            "/patterns clear",
+            "/patterns delete ",
             "/quit",
             "/reload",
             "/resume ",
