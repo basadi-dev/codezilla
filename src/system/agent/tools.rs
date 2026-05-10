@@ -1157,7 +1157,10 @@ impl WebToolProvider {
             .http
             .post("https://html.duckduckgo.com/html/")
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
             .header("Accept-Language", "en-US,en;q=0.5")
             .body(format!("q={}&b=&kl=", urlencoding::encode(query)))
             .send()
@@ -1215,17 +1218,19 @@ fn extract_duckduckgo_results(html: &str, limit: usize) -> Vec<Value> {
     let document = Html::parse_document(html);
     // Only match organic web results — this class is absent on ad blocks.
     let result_sel = Selector::parse("div.web-result").unwrap();
-    let title_sel  = Selector::parse("h2.result__title a.result__a").unwrap();
-    let snip_sel   = Selector::parse("a.result__snippet").unwrap();
+    let title_sel = Selector::parse("h2.result__title a.result__a").unwrap();
+    let snip_sel = Selector::parse("a.result__snippet").unwrap();
 
     let mut results = Vec::new();
     for node in document.select(&result_sel) {
         if results.len() >= limit {
             break;
         }
-        let Some(title_el) = node.select(&title_sel).next() else { continue };
+        let Some(title_el) = node.select(&title_sel).next() else {
+            continue;
+        };
 
-        let title   = title_el.text().collect::<String>();
+        let title = title_el.text().collect::<String>();
         let raw_url = title_el.value().attr("href").unwrap_or("");
         let snippet = node
             .select(&snip_sel)
@@ -1882,11 +1887,18 @@ mod web_search_tests {
 
         let results = extract_duckduckgo_results(html, 10);
         // Ad block must be excluded — only the 2 web-result divs should appear.
-        assert_eq!(results.len(), 2, "expected 2 organic results, got {results:?}");
+        assert_eq!(
+            results.len(),
+            2,
+            "expected 2 organic results, got {results:?}"
+        );
 
         assert_eq!(results[0]["title"], "Rust Programming Language");
         assert_eq!(results[0]["url"], "https://rust-lang.org/");
-        assert_eq!(results[0]["snippet"], "Rust is a fast, reliable, productive language.");
+        assert_eq!(
+            results[0]["snippet"],
+            "Rust is a fast, reliable, productive language."
+        );
         assert_eq!(results[0]["published"], serde_json::Value::Null);
 
         // DDG redirect wrapper should be decoded to the real destination URL.

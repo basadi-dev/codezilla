@@ -290,9 +290,7 @@ impl PatternMiner {
 /// Extract (kind, signal, hint) triples from a turn's conversation items.
 ///
 /// Stateless, pure function — easy to unit-test without a database.
-pub(crate) fn extract_signals(
-    items: &[ConversationItem],
-) -> Vec<(PatternKind, String, String)> {
+pub(crate) fn extract_signals(items: &[ConversationItem]) -> Vec<(PatternKind, String, String)> {
     let mut signals: Vec<(PatternKind, String, String)> = Vec::new();
 
     // ── 1. Post-edit commands ─────────────────────────────────────────────
@@ -348,11 +346,7 @@ pub(crate) fn extract_signals(
     let tool_names: Vec<&str> = items
         .iter()
         .filter(|i| i.kind == ItemKind::ToolCall)
-        .filter_map(|i| {
-            i.payload
-                .get("toolName")
-                .and_then(|v| v.as_str())
-        })
+        .filter_map(|i| i.payload.get("toolName").and_then(|v| v.as_str()))
         .collect();
 
     for window in tool_names.windows(2) {
@@ -415,8 +409,8 @@ fn normalise_command(cmd: &str) -> String {
 
     // Only track well-known toolchain commands to avoid noise.
     let known = [
-        "cargo", "npm", "pnpm", "yarn", "make", "go", "python", "python3", "pytest",
-        "jest", "deno", "bun", "gradle", "mvn",
+        "cargo", "npm", "pnpm", "yarn", "make", "go", "python", "python3", "pytest", "jest",
+        "deno", "bun", "gradle", "mvn",
     ];
     if !known.contains(&prog) {
         return String::new();
@@ -601,9 +595,7 @@ mod tests {
 
     #[test]
     fn detects_suffix_instruction() {
-        let items = vec![make_user_msg(
-            "Refactor the parser module. Keep it concise",
-        )];
+        let items = vec![make_user_msg("Refactor the parser module. Keep it concise")];
         let signals = extract_signals(&items);
         assert!(
             signals
@@ -669,16 +661,16 @@ mod tests {
             make_tool_call("bash_exec", Some("cargo fmt")),
         ];
         let signals = extract_signals(&items);
-        let fmt_count = signals
-            .iter()
-            .filter(|(_, s, _)| s == "cargo fmt")
-            .count();
+        let fmt_count = signals.iter().filter(|(_, s, _)| s == "cargo fmt").count();
         assert_eq!(fmt_count, 1, "should deduplicate within a single turn");
     }
 
     #[test]
     fn normalise_strips_flags() {
-        assert_eq!(normalise_command("cargo clippy -- -D warnings"), "cargo clippy");
+        assert_eq!(
+            normalise_command("cargo clippy -- -D warnings"),
+            "cargo clippy"
+        );
         assert_eq!(normalise_command("npm run build --production"), "npm run");
         assert_eq!(normalise_command("go vet ./..."), "go vet");
         assert_eq!(normalise_command("unknown_tool arg"), "");

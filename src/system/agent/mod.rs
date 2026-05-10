@@ -36,13 +36,13 @@ pub use memory::{
 #[allow(unused_imports)]
 pub use model_gateway::{ModelDescription, ModelGateway, ModelRequest, ModelStreamEvent};
 #[allow(unused_imports)]
+pub use pattern_miner::PatternMiner;
+#[allow(unused_imports)]
 pub use permission::PermissionManager;
 #[allow(unused_imports)]
 pub use sandbox::SandboxManager;
 #[allow(unused_imports)]
 pub use state::{BranchHandle, InMemoryStateManager, StateManager, StateSnapshot};
-#[allow(unused_imports)]
-pub use pattern_miner::PatternMiner;
 #[allow(unused_imports)]
 pub use tool_wrappers::{CachingToolProvider, LoggingToolProvider, RateLimitToolProvider};
 #[allow(unused_imports)]
