@@ -6,6 +6,7 @@ pub mod extensions;
 pub mod memory;
 pub mod middleware;
 pub mod model_gateway;
+pub mod pattern_miner;
 pub mod permission;
 pub mod review;
 pub mod sandbox;
@@ -40,6 +41,8 @@ pub use permission::PermissionManager;
 pub use sandbox::SandboxManager;
 #[allow(unused_imports)]
 pub use state::{BranchHandle, InMemoryStateManager, StateManager, StateSnapshot};
+#[allow(unused_imports)]
+pub use pattern_miner::PatternMiner;
 #[allow(unused_imports)]
 pub use tool_wrappers::{CachingToolProvider, LoggingToolProvider, RateLimitToolProvider};
 #[allow(unused_imports)]

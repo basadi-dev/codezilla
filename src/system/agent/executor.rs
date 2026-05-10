@@ -1409,6 +1409,51 @@ impl TurnExecutor {
             )
             .await?;
 
+        // ── Behavioural pattern mining (background, fire-and-forget) ─────────
+        // Analyse only this turn's items (not the whole thread history) to
+        // avoid re-scoring patterns from previous turns. Wrapped in a
+        // tokio::spawn so the JoinHandle is properly detached (avoids the
+        // clippy::let_underscore_future lint that fires on `let _ = spawn_blocking`).
+        {
+            let pattern_miner = self.runtime.inner.pattern_miner.clone();
+            let persistence = self.runtime.inner.persistence_manager.clone();
+            let thread_id_owned = thread_id.to_string();
+            let turn_id_owned = turn_id.to_string();
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    match persistence.read_thread(&thread_id_owned) {
+                        Ok(persisted) => {
+                            // Only analyse items belonging to the completed turn.
+                            let turn_items: Vec<_> = persisted
+                                .items
+                                .iter()
+                                .filter(|i| i.turn_id == turn_id_owned)
+                                .cloned()
+                                .collect();
+                            if let Err(e) = pattern_miner.analyse_turn(&turn_items) {
+                                tracing::warn!(error = %e, "pattern_miner: analyse_turn failed");
+                            } else {
+                                tracing::debug!(
+                                    thread_id = %thread_id_owned,
+                                    turn_id = %turn_id_owned,
+                                    items = turn_items.len(),
+                                    "pattern_miner: turn analysed"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                thread_id = %thread_id_owned,
+                                "pattern_miner: failed to read thread for analysis"
+                            );
+                        }
+                    }
+                })
+                .await;
+            });
+        }
+
         self.maybe_auto_compact(thread_id).await;
 
         Ok(())
@@ -1724,6 +1769,28 @@ impl TurnExecutor {
         for skill in skills {
             if skill.enabled {
                 instructions.push(format!("Skill {}: {}", skill.name, skill.description));
+            }
+        }
+
+        // ── Behavioural habits ───────────────────────────────────────────────────────────────
+        // Inject recurring user-behaviour patterns as reminder sentences so
+        // the agent proactively reproduces habits the user expects (e.g.
+        // "run cargo fmt after edits") without being told every time.
+        match self.runtime.inner.pattern_miner.load_habits() {
+            Ok(habits) if !habits.is_empty() => {
+                let habit_block = habits.join("\n- ");
+                instructions.push(format!(
+                    "Based on past behaviour, the user expects the following habits to be \
+                     followed automatically:\n- {habit_block}"
+                ));
+                tracing::debug!(
+                    habit_count = habits.len(),
+                    "executor: injected behavioural habits into system prompt"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "executor: failed to load behavioural habits");
             }
         }
 

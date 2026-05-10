@@ -20,7 +20,7 @@ use crate::llm::LlmClient;
 use super::agent::supervisor::{AgentSupervisor, SpawnAgentToolProviderReal};
 use super::agent::{
     ApprovalManager, BashToolProvider, EventBus, ExtensionManager, FileToolProvider,
-    ImageToolProvider, ListDirToolProvider, ModelGateway, PermissionManager,
+    ImageToolProvider, ListDirToolProvider, ModelGateway, PatternMiner, PermissionManager,
     RequestUserInputToolProvider, SandboxManager, SearchToolProvider, ShellToolProvider,
     ToolOrchestrator, WebToolProvider,
 };
@@ -272,6 +272,9 @@ pub(crate) struct RuntimeInner {
     /// caller `undo_tool_call(id)` after a bad edit.
     #[allow(dead_code)]
     pub(crate) checkpoint_store: Arc<super::agent::checkpoint::CheckpointStore>,
+    /// Behavioural pattern miner — learns recurring habits from transcripts
+    /// and injects them as system-prompt hints on future turns.
+    pub(crate) pattern_miner: Arc<PatternMiner>,
 }
 
 // ─── ConversationRuntime (thin coordinator) ───────────────────────────────────
@@ -359,6 +362,18 @@ impl ConversationRuntime {
         // ── Build Self first so the runtime handle is available ────────────
         // SpawnAgentToolProvider needs a ConversationRuntime clone, so we
         // construct Self before registering it, then swap the stub out.
+        let pattern_miner = {
+            let db_path = std::path::Path::new(&effective_config.app_home)
+                .join("state")
+                .join("patterns.sqlite3");
+            Arc::new(
+                PatternMiner::open(&db_path).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "pattern_miner: failed to open db, using in-memory fallback");
+                    // Safety: open_in_memory only fails on OOM — acceptable panic.
+                    PatternMiner::open_in_memory().expect("in-memory pattern miner")
+                }),
+            )
+        };
         let inner = RuntimeInner {
             runtime_id: format!("runtime_{}", Uuid::new_v4().simple()),
             effective_config,
@@ -377,6 +392,7 @@ impl ConversationRuntime {
             // so write invalidations are visible to the map builder.
             repo_map,
             checkpoint_store,
+            pattern_miner,
         };
         let me = Self {
             inner: Arc::new(inner),
