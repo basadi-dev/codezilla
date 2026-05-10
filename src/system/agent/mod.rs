@@ -28,16 +28,16 @@ pub use executor::TurnExecutor;
 #[allow(unused_imports)]
 pub use extensions::ExtensionManager;
 #[allow(unused_imports)]
+pub use memory::{
+    EmbeddingProvider, MemoryEntry, MemoryHit, MemoryKind, MemoryStats, SemanticMemoryStore,
+    SqliteVecMemoryStore,
+};
+#[allow(unused_imports)]
 pub use model_gateway::{ModelDescription, ModelGateway, ModelRequest, ModelStreamEvent};
 #[allow(unused_imports)]
 pub use permission::PermissionManager;
 #[allow(unused_imports)]
 pub use sandbox::SandboxManager;
-#[allow(unused_imports)]
-pub use memory::{
-    EmbeddingProvider, MemoryEntry, MemoryHit, MemoryKind, MemoryStats, SemanticMemoryStore,
-    SqliteVecMemoryStore,
-};
 #[allow(unused_imports)]
 pub use state::{BranchHandle, InMemoryStateManager, StateManager, StateSnapshot};
 #[allow(unused_imports)]

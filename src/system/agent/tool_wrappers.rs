@@ -241,7 +241,8 @@ impl RateLimitToolProvider {
         max_calls: usize,
         window_secs: u64,
     ) -> Self {
-        self.limits.insert(tool_name.into(), (max_calls, window_secs));
+        self.limits
+            .insert(tool_name.into(), (max_calls, window_secs));
         self
     }
 
@@ -261,7 +262,10 @@ impl RateLimitToolProvider {
         let mut state = self.state.lock().unwrap();
         let bucket = state
             .entry(tool_name.to_string())
-            .or_insert_with(|| BucketState { window_start: now, calls_in_window: 0 });
+            .or_insert_with(|| BucketState {
+                window_start: now,
+                calls_in_window: 0,
+            });
 
         if now >= bucket.window_start + window_secs {
             bucket.window_start = now;
@@ -341,7 +345,11 @@ mod tests {
         fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
             vec![]
         }
-        async fn execute(&self, call: &ToolCall, _ctx: &ToolExecutionContext) -> Result<ToolResult> {
+        async fn execute(
+            &self,
+            call: &ToolCall,
+            _ctx: &ToolExecutionContext,
+        ) -> Result<ToolResult> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             Ok(ToolResult {
                 tool_call_id: call.tool_call_id.clone(),
@@ -374,7 +382,9 @@ mod tests {
 
     #[tokio::test]
     async fn logging_passes_through_result() {
-        let inner = Arc::new(EchoProvider { call_count: Arc::new(AtomicUsize::new(0)) });
+        let inner = Arc::new(EchoProvider {
+            call_count: Arc::new(AtomicUsize::new(0)),
+        });
         let logged = LoggingToolProvider::new(inner);
         let result = logged
             .execute(&call("read_file", json!({"path": "x.rs"})), &exec_ctx("t1"))
@@ -386,7 +396,9 @@ mod tests {
     #[tokio::test]
     async fn caching_deduplicates_read_file_within_turn() {
         let count = Arc::new(AtomicUsize::new(0));
-        let inner = Arc::new(EchoProvider { call_count: count.clone() });
+        let inner = Arc::new(EchoProvider {
+            call_count: count.clone(),
+        });
         let cached = CachingToolProvider::new(inner);
         let c = call("read_file", json!({"path": "src/main.rs"}));
         let ctx = exec_ctx("turn1");
@@ -395,26 +407,38 @@ mod tests {
         cached.execute(&c, &ctx).await.unwrap();
         cached.execute(&c, &ctx).await.unwrap();
 
-        assert_eq!(count.load(Ordering::SeqCst), 1, "inner called once; rest served from cache");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "inner called once; rest served from cache"
+        );
     }
 
     #[tokio::test]
     async fn caching_does_not_cross_turns() {
         let count = Arc::new(AtomicUsize::new(0));
-        let inner = Arc::new(EchoProvider { call_count: count.clone() });
+        let inner = Arc::new(EchoProvider {
+            call_count: count.clone(),
+        });
         let cached = CachingToolProvider::new(inner);
         let c = call("read_file", json!({"path": "src/lib.rs"}));
 
         cached.execute(&c, &exec_ctx("turn_a")).await.unwrap();
         cached.execute(&c, &exec_ctx("turn_b")).await.unwrap();
 
-        assert_eq!(count.load(Ordering::SeqCst), 2, "different turns → two real calls");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "different turns → two real calls"
+        );
     }
 
     #[tokio::test]
     async fn caching_does_not_cache_writes() {
         let count = Arc::new(AtomicUsize::new(0));
-        let inner = Arc::new(EchoProvider { call_count: count.clone() });
+        let inner = Arc::new(EchoProvider {
+            call_count: count.clone(),
+        });
         let cached = CachingToolProvider::new(inner);
         let c = call("write_file", json!({"path": "out.rs", "content": "x"}));
         let ctx = exec_ctx("t1");
@@ -422,12 +446,18 @@ mod tests {
         cached.execute(&c, &ctx).await.unwrap();
         cached.execute(&c, &ctx).await.unwrap();
 
-        assert_eq!(count.load(Ordering::SeqCst), 2, "write_file must never be cached");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "write_file must never be cached"
+        );
     }
 
     #[tokio::test]
     async fn rate_limit_allows_up_to_max() {
-        let inner = Arc::new(EchoProvider { call_count: Arc::new(AtomicUsize::new(0)) });
+        let inner = Arc::new(EchoProvider {
+            call_count: Arc::new(AtomicUsize::new(0)),
+        });
         let limited = RateLimitToolProvider::new(inner).with_limit("web_fetch", 2, 60);
         let c = call("web_fetch", json!({"url": "https://example.com"}));
         let ctx = exec_ctx("t1");
@@ -450,7 +480,9 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_passes_unlimited_tools() {
-        let inner = Arc::new(EchoProvider { call_count: Arc::new(AtomicUsize::new(0)) });
+        let inner = Arc::new(EchoProvider {
+            call_count: Arc::new(AtomicUsize::new(0)),
+        });
         let limited = RateLimitToolProvider::new(inner).with_limit("web_fetch", 1, 60);
         let c = call("read_file", json!({"path": "x"})); // no limit configured
         let ctx = exec_ctx("t1");

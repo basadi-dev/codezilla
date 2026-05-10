@@ -28,9 +28,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::system::config::AgentConfig;
-use crate::system::domain::{
-    FileChangeSummary, ThreadId, ToolCall, ToolResult, TurnId,
-};
+use crate::system::domain::{FileChangeSummary, ThreadId, ToolCall, ToolResult, TurnId};
 use crate::system::runtime::ConversationRuntime;
 
 // ─── MiddlewareAction ─────────────────────────────────────────────────────────
@@ -150,10 +148,7 @@ impl MiddlewareChain {
 
     /// Run `pre_turn` on every middleware in order. Returns the first
     /// non-Continue action, or Continue if all pass.
-    pub async fn run_pre_turn(
-        &self,
-        ctx: &mut TurnMiddlewareContext,
-    ) -> Result<MiddlewareAction> {
+    pub async fn run_pre_turn(&self, ctx: &mut TurnMiddlewareContext) -> Result<MiddlewareAction> {
         for mw in &self.middlewares {
             let action = mw.pre_turn(ctx).await?;
             match &action {
@@ -334,7 +329,10 @@ mod tests {
         assert!(matches!(action, MiddlewareAction::Continue));
         assert_eq!(pre.load(Ordering::SeqCst), 2);
 
-        let action = chain.run_post_response(&mut ctx, "hello", &[]).await.unwrap();
+        let action = chain
+            .run_post_response(&mut ctx, "hello", &[])
+            .await
+            .unwrap();
         assert!(matches!(action, MiddlewareAction::Continue));
         assert_eq!(post_resp.load(Ordering::SeqCst), 2);
 

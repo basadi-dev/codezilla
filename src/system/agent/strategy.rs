@@ -49,12 +49,7 @@ pub trait ExplorationStrategy: Send + Sync {
     ///
     /// Called early in `run_turn` — if no strategy activates, the executor
     /// falls through to the default greedy behaviour (Orient → Plan → Execute).
-    fn should_activate(
-        &self,
-        intent: TurnIntent,
-        input: &[UserInput],
-        agent_depth: u32,
-    ) -> bool;
+    fn should_activate(&self, intent: TurnIntent, input: &[UserInput], agent_depth: u32) -> bool;
 
     /// Run the exploration/planning phase.
     ///
@@ -172,17 +167,14 @@ impl ExplorationStrategy for SpeculativeStrategy {
         agent_depth: u32,
     ) -> Result<ExplorationResult> {
         let agent_cfg = &runtime.inner.effective_config.agent;
-        let orchestrator = super::speculative::SpeculativeOrchestrator::new(
-            runtime.clone(),
-            agent_cfg,
-        );
+        let orchestrator =
+            super::speculative::SpeculativeOrchestrator::new(runtime.clone(), agent_cfg);
 
         let result = orchestrator
             .run(task, thread_id, turn_id, cwd, agent_depth)
             .await?;
 
-        let plan_instruction =
-            super::speculative::build_speculative_plan_instruction(&result);
+        let plan_instruction = super::speculative::build_speculative_plan_instruction(&result);
 
         let metadata = serde_json::json!({
             "summary": format!(
@@ -275,11 +267,8 @@ impl ExplorationStrategy for TreeOfThoughtStrategy {
         _cwd: &str,
         _agent_depth: u32,
     ) -> Result<ExplorationResult> {
-        let orchestrator = TreeOfThoughtOrchestrator::new(
-            runtime.clone(),
-            self.branches,
-            self.survivors,
-        );
+        let orchestrator =
+            TreeOfThoughtOrchestrator::new(runtime.clone(), self.branches, self.survivors);
         let result = orchestrator.run(task).await?;
 
         let metadata = serde_json::json!({
@@ -321,7 +310,11 @@ struct TreeOfThoughtOrchestrator {
 
 impl TreeOfThoughtOrchestrator {
     fn new(runtime: ConversationRuntime, branches: usize, survivors: usize) -> Self {
-        Self { runtime, branches, survivors }
+        Self {
+            runtime,
+            branches,
+            survivors,
+        }
     }
 
     async fn run(&self, task: &str) -> Result<TotResult> {
@@ -331,23 +324,47 @@ impl TreeOfThoughtOrchestrator {
         let model = settings.model_id.clone();
 
         // ── Step 1: Generate N branches ───────────────────────────────────────
-        tracing::info!(branches = self.branches, "tree_of_thought: generating branches");
+        tracing::info!(
+            branches = self.branches,
+            "tree_of_thought: generating branches"
+        );
         let branch_prompt = tot_branch_prompt(task, self.branches);
         let branch_response = client
-            .complete(&provider, &[crate::llm::Message::user(branch_prompt)], &[], &model, 0.5, Some("medium"), 4096)
+            .complete(
+                &provider,
+                &[crate::llm::Message::user(branch_prompt)],
+                &[],
+                &model,
+                0.5,
+                Some("medium"),
+                4096,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("tot_branch_failed: {e}"))?;
 
         let branches_text = branch_response.content.trim().to_string();
         if branches_text.is_empty() {
-            return Err(anyhow::anyhow!("tot: branch generation produced empty response"));
+            return Err(anyhow::anyhow!(
+                "tot: branch generation produced empty response"
+            ));
         }
 
         // ── Step 2: Prune — keep the top K survivors ──────────────────────────
-        tracing::info!(survivors = self.survivors, "tree_of_thought: pruning branches");
+        tracing::info!(
+            survivors = self.survivors,
+            "tree_of_thought: pruning branches"
+        );
         let prune_prompt = tot_prune_prompt(task, &branches_text, self.survivors);
         let prune_response = client
-            .complete(&provider, &[crate::llm::Message::user(prune_prompt)], &[], &model, 0.3, Some("medium"), 3072)
+            .complete(
+                &provider,
+                &[crate::llm::Message::user(prune_prompt)],
+                &[],
+                &model,
+                0.3,
+                Some("medium"),
+                3072,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("tot_prune_failed: {e}"))?;
         let pruned_text = prune_response.content.trim().to_string();
@@ -356,7 +373,15 @@ impl TreeOfThoughtOrchestrator {
         tracing::info!("tree_of_thought: deepening survivors");
         let deepen_prompt = tot_deepen_prompt(task, &pruned_text);
         let deepen_response = client
-            .complete(&provider, &[crate::llm::Message::user(deepen_prompt)], &[], &model, 0.3, Some("high"), 5120)
+            .complete(
+                &provider,
+                &[crate::llm::Message::user(deepen_prompt)],
+                &[],
+                &model,
+                0.3,
+                Some("high"),
+                5120,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("tot_deepen_failed: {e}"))?;
         let deepened_text = deepen_response.content.trim().to_string();
@@ -365,14 +390,23 @@ impl TreeOfThoughtOrchestrator {
         tracing::info!("tree_of_thought: judge selecting winner");
         let judge_prompt = tot_judge_prompt(task, &deepened_text);
         let judge_response = client
-            .complete(&provider, &[crate::llm::Message::user(judge_prompt)], &[], &model, 0.2, Some("medium"), 2048)
+            .complete(
+                &provider,
+                &[crate::llm::Message::user(judge_prompt)],
+                &[],
+                &model,
+                0.2,
+                Some("medium"),
+                2048,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("tot_judge_failed: {e}"))?;
         let judgment = judge_response.content.trim().to_string();
 
         let winner_label = extract_tot_winner_label(&judgment);
         let rationale = extract_tot_rationale(&judgment);
-        let plan_instruction = build_tot_plan_instruction(task, &deepened_text, &winner_label, &rationale);
+        let plan_instruction =
+            build_tot_plan_instruction(task, &deepened_text, &winner_label, &rationale);
 
         Ok(TotResult {
             branches_explored: self.branches,

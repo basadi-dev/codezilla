@@ -41,8 +41,8 @@ use self::utils::{
     wants_verbose_repo_map, ProgressState, TurnIntent,
 };
 use crate::system::domain::{
-    now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus,
-    TokenUsage, ToolCall, ToolResult, TurnMetrics, TurnStatus, UserInput, KEY_TEXT,
+    now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus, TokenUsage, ToolCall,
+    ToolResult, TurnMetrics, TurnStatus, UserInput, KEY_TEXT,
 };
 use crate::system::error as cod_error;
 use crate::system::runtime::RepoMapVerbosity;
@@ -302,7 +302,7 @@ impl TurnExecutor {
         //   - CheckpointReviewMiddleware: validates file changes between rounds.
         // Future middlewares (LoopGuard, Security, etc.) get added here.
         let middleware_chain = {
-            use super::middleware::{MiddlewareChain, CheckpointReviewMiddleware};
+            use super::middleware::{CheckpointReviewMiddleware, MiddlewareChain};
             let mut chain = MiddlewareChain::new();
             chain.push(Box::new(CheckpointReviewMiddleware::new()));
             chain
@@ -326,7 +326,9 @@ impl TurnExecutor {
                     guards.agent_iterations,
                     "executor: backstop limit reached — terminating turn"
                 );
-                return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
+                return self
+                    .fail_turn(&params.thread_id, &turn_id, &kind, &message)
+                    .await;
             }
             tracing::debug!(
                 turn_id = %turn_id,
@@ -408,8 +410,11 @@ impl TurnExecutor {
             // Gives the model compact structured state so it doesn't have to
             // infer progress from scattered transcript. Reduces looping.
             if guards.agent_iterations > 1 {
-                let changed_paths: Vec<String> =
-                    guards.file_changes.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+                let changed_paths: Vec<String> = guards
+                    .file_changes
+                    .iter()
+                    .map(|f| f.path.clone())
+                    .collect::<Vec<_>>();
                 system_instructions.push(progress_summary(&ProgressState {
                     phase: current_phase.label(),
                     iteration: guards.agent_iterations,
@@ -717,7 +722,9 @@ impl TurnExecutor {
                     if let Some(GuardVerdict::FailTurn { kind, message }) =
                         guards.check_empty_responses(&agent_cfg)
                     {
-                        return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
+                        return self
+                            .fail_turn(&params.thread_id, &turn_id, &kind, &message)
+                            .await;
                     }
                     no_tool_nudge_instruction = Some(
                         "Your previous response was completely empty — no text and no tool call \
@@ -788,7 +795,9 @@ impl TurnExecutor {
                             guards.total_nudges,
                             "executor: cumulative nudge limit reached — terminating turn"
                         );
-                        return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
+                        return self
+                            .fail_turn(&params.thread_id, &turn_id, &kind, &message)
+                            .await;
                     }
                     tracing::warn!(
                         turn_id = %turn_id,
@@ -846,7 +855,9 @@ impl TurnExecutor {
                             guards.total_nudges,
                             "executor: cumulative nudge limit reached — terminating turn"
                         );
-                        return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
+                        return self
+                            .fail_turn(&params.thread_id, &turn_id, &kind, &message)
+                            .await;
                     }
                     tracing::warn!(
                         turn_id = %turn_id,
@@ -935,7 +946,9 @@ impl TurnExecutor {
                 completed_actions.push("ran command".into());
             }
             let round_file_changes_count = round_file_changes.len();
-            guards.file_changes.extend(round_file_changes.iter().cloned());
+            guards
+                .file_changes
+                .extend(round_file_changes.iter().cloned());
             // ── Middleware: post-tool hooks ──────────────────────────────────
             // Run all registered middlewares after tool dispatch. Currently
             // this fires the checkpoint review; future middlewares hook in here.
@@ -958,7 +971,10 @@ impl TurnExecutor {
                 };
                 // round_file_changes was consumed by extend above, so pass the
                 // tail of guards.file_changes that corresponds to this round.
-                let round_start = guards.file_changes.len().saturating_sub(round_file_changes_count);
+                let round_start = guards
+                    .file_changes
+                    .len()
+                    .saturating_sub(round_file_changes_count);
                 let round_changes_slice = &guards.file_changes[round_start..];
                 match middleware_chain
                     .run_post_tools(&mut mw_ctx, &[], round_changes_slice)
@@ -1046,8 +1062,12 @@ impl TurnExecutor {
                     guards.total_invalid_tool_calls,
                     "executor: invalid tool calls detected this round"
                 );
-                if let Some(GuardVerdict::FailTurn { kind, message }) = guards.check_invalid_tool_calls() {
-                    return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
+                if let Some(GuardVerdict::FailTurn { kind, message }) =
+                    guards.check_invalid_tool_calls()
+                {
+                    return self
+                        .fail_turn(&params.thread_id, &turn_id, &kind, &message)
+                        .await;
                 }
             }
             if blocked_read_only_calls > 0 {
@@ -1221,7 +1241,9 @@ impl TurnExecutor {
                     guards.consecutive_failures,
                     "executor: consecutive-failure limit reached — terminating turn"
                 );
-                return self.fail_turn(&params.thread_id, &turn_id, &kind, &message).await;
+                return self
+                    .fail_turn(&params.thread_id, &turn_id, &kind, &message)
+                    .await;
             }
         }
     }
@@ -1719,5 +1741,4 @@ impl TurnExecutor {
 
         Ok(instructions)
     }
-
 }

@@ -662,6 +662,7 @@ pub fn should_auto_collapse_tool(tool_name: &str) -> bool {
             | "list_dir"
             | "grep_search"
             | "web_fetch"
+            | "web_search"
             | "image_metadata"
             | "create_directory"
             | "remove_path"
@@ -1924,6 +1925,13 @@ fn format_tool_call_title(tool_name: &str, arguments: &Value) -> String {
                 .unwrap_or(url);
             format!("{tool_name}  {short}")
         }
+        "web_search" => {
+            let query = arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            format!("{tool_name}  {}", truncate_chars(query, 60))
+        }
         "copy_path" => {
             let source = arguments
                 .get("source")
@@ -2070,6 +2078,20 @@ fn format_tool_call(tool_name: &str, arguments: &Value) -> String {
             match (source, target) {
                 (Some(source), Some(target)) => format!("{source}\n-> {target}"),
                 _ => pretty_json_or_text(Some(arguments), None),
+            }
+        }
+        "web_search" => {
+            let mut lines = Vec::new();
+            if let Some(query) = arguments.get("query").and_then(Value::as_str) {
+                lines.push(query.to_string());
+            }
+            if let Some(count) = arguments.get("count").and_then(Value::as_u64) {
+                lines.push(format!("count: {count}"));
+            }
+            if lines.is_empty() {
+                pretty_json_or_text(Some(arguments), None)
+            } else {
+                lines.join("\n")
             }
         }
         _ => pretty_json_or_text(Some(arguments), None),

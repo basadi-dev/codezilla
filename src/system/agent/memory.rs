@@ -42,10 +42,10 @@ use rusqlite::{params, Connection};
 use uuid::Uuid;
 
 // ─── MemoryKind ───────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
+    #[default]
     Observation,
     Plan,
     Fact,
@@ -90,12 +90,6 @@ pub struct MemoryEntry {
     pub metadata: HashMap<String, String>,
     /// Scope entries to a conversation thread for filtered recall.
     pub thread_id: Option<String>,
-}
-
-impl Default for MemoryKind {
-    fn default() -> Self {
-        MemoryKind::Observation
-    }
 }
 
 /// A single result from a similarity search.
@@ -202,14 +196,20 @@ impl SqliteVecMemoryStore {
     pub fn open(path: &Path, embedder: std::sync::Arc<dyn EmbeddingProvider>) -> Result<Self> {
         let conn = Connection::open(path)?;
         Self::init_schema(&conn)?;
-        Ok(Self { conn: Mutex::new(conn), embedder })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            embedder,
+        })
     }
 
     /// Create a transient in-memory store (useful for tests and short-lived agents).
     pub fn open_in_memory(embedder: std::sync::Arc<dyn EmbeddingProvider>) -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::init_schema(&conn)?;
-        Ok(Self { conn: Mutex::new(conn), embedder })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            embedder,
+        })
     }
 
     fn init_schema(conn: &Connection) -> Result<()> {
@@ -253,7 +253,15 @@ impl SemanticMemoryStore for SqliteVecMemoryStore {
                 "INSERT INTO memory_entries
                     (id, kind, text, metadata, thread_id, embedding, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![id, kind_str, entry.text, metadata_json, entry.thread_id, blob, now],
+                params![
+                    id,
+                    kind_str,
+                    entry.text,
+                    metadata_json,
+                    entry.thread_id,
+                    blob,
+                    now
+                ],
             )?;
         }
 
@@ -308,13 +316,22 @@ impl SemanticMemoryStore for SqliteVecMemoryStore {
                 let score = cosine_similarity(&query_vec, &embedding);
                 Some(MemoryHit {
                     entry_id: id,
-                    entry: MemoryEntry { kind, text, metadata, thread_id },
+                    entry: MemoryEntry {
+                        kind,
+                        text,
+                        metadata,
+                        thread_id,
+                    },
                     score,
                 })
             })
             .collect();
 
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(k);
         Ok(hits)
     }
@@ -335,16 +352,20 @@ impl SemanticMemoryStore for SqliteVecMemoryStore {
             conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |r| r.get(0))?;
 
         let mut by_kind: HashMap<MemoryKind, usize> = HashMap::new();
-        let mut stmt =
-            conn.prepare("SELECT kind, COUNT(*) FROM memory_entries GROUP BY kind")?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?)))?.flatten()
+        let mut stmt = conn.prepare("SELECT kind, COUNT(*) FROM memory_entries GROUP BY kind")?;
+        for row in stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?)))?
+            .flatten()
         {
             if let Ok(kind) = row.0.parse::<MemoryKind>() {
                 by_kind.insert(kind, row.1);
             }
         }
 
-        Ok(MemoryStats { total_entries: total, by_kind })
+        Ok(MemoryStats {
+            total_entries: total,
+            by_kind,
+        })
     }
 }
 
@@ -373,7 +394,12 @@ mod tests {
             for (i, b) in text.bytes().enumerate() {
                 v[i % self.dim] += b as f32;
             }
-            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON);
+            let norm: f32 = v
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt()
+                .max(f32::EPSILON);
             for x in &mut v {
                 *x /= norm;
             }
@@ -386,7 +412,11 @@ mod tests {
     }
 
     fn entry(kind: MemoryKind, text: &str) -> MemoryEntry {
-        MemoryEntry { kind, text: text.into(), ..Default::default() }
+        MemoryEntry {
+            kind,
+            text: text.into(),
+            ..Default::default()
+        }
     }
 
     // ── Basic persistence ──────────────────────────────────────────────────
@@ -405,9 +435,15 @@ mod tests {
         let s = store(8);
         assert_eq!(s.stats().unwrap().total_entries, 0);
 
-        s.ingest(entry(MemoryKind::Fact, "rust is memory-safe")).await.unwrap();
-        s.ingest(entry(MemoryKind::Observation, "agent wrote a test")).await.unwrap();
-        s.ingest(entry(MemoryKind::Fact, "sqlite stores blobs")).await.unwrap();
+        s.ingest(entry(MemoryKind::Fact, "rust is memory-safe"))
+            .await
+            .unwrap();
+        s.ingest(entry(MemoryKind::Observation, "agent wrote a test"))
+            .await
+            .unwrap();
+        s.ingest(entry(MemoryKind::Fact, "sqlite stores blobs"))
+            .await
+            .unwrap();
 
         let stats = s.stats().unwrap();
         assert_eq!(stats.total_entries, 3);
@@ -420,9 +456,15 @@ mod tests {
     #[tokio::test]
     async fn query_returns_top_k_descending() {
         let s = store(16);
-        s.ingest(entry(MemoryKind::Fact, "apple fruit food")).await.unwrap();
-        s.ingest(entry(MemoryKind::Fact, "banana fruit yellow")).await.unwrap();
-        s.ingest(entry(MemoryKind::Fact, "database sql query")).await.unwrap();
+        s.ingest(entry(MemoryKind::Fact, "apple fruit food"))
+            .await
+            .unwrap();
+        s.ingest(entry(MemoryKind::Fact, "banana fruit yellow"))
+            .await
+            .unwrap();
+        s.ingest(entry(MemoryKind::Fact, "database sql query"))
+            .await
+            .unwrap();
 
         let hits = s.query("fruit food", 2).await.unwrap();
         assert_eq!(hits.len(), 2);
@@ -450,11 +492,20 @@ mod tests {
     #[tokio::test]
     async fn query_filtered_by_kind() {
         let s = store(8);
-        s.ingest(entry(MemoryKind::Fact, "rust language")).await.unwrap();
-        s.ingest(entry(MemoryKind::Plan, "refactor module")).await.unwrap();
-        s.ingest(entry(MemoryKind::Fact, "sqlite database")).await.unwrap();
+        s.ingest(entry(MemoryKind::Fact, "rust language"))
+            .await
+            .unwrap();
+        s.ingest(entry(MemoryKind::Plan, "refactor module"))
+            .await
+            .unwrap();
+        s.ingest(entry(MemoryKind::Fact, "sqlite database"))
+            .await
+            .unwrap();
 
-        let hits = s.query_filtered("rust", 10, Some(MemoryKind::Fact), None).await.unwrap();
+        let hits = s
+            .query_filtered("rust", 10, Some(MemoryKind::Fact), None)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|h| h.entry.kind == MemoryKind::Fact));
     }
@@ -470,7 +521,10 @@ mod tests {
         s.ingest(e1).await.unwrap();
         s.ingest(e2).await.unwrap();
 
-        let hits = s.query_filtered("observation", 10, None, Some("thread_a")).await.unwrap();
+        let hits = s
+            .query_filtered("observation", 10, None, Some("thread_a"))
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.thread_id.as_deref(), Some("thread_a"));
     }
@@ -500,10 +554,16 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_entry() {
         let s = store(8);
-        let id = s.ingest(entry(MemoryKind::Plan, "plan step")).await.unwrap();
+        let id = s
+            .ingest(entry(MemoryKind::Plan, "plan step"))
+            .await
+            .unwrap();
         assert!(s.delete(&id).await.unwrap());
         assert_eq!(s.stats().unwrap().total_entries, 0);
-        assert!(!s.delete(&id).await.unwrap(), "second delete must return false");
+        assert!(
+            !s.delete(&id).await.unwrap(),
+            "second delete must return false"
+        );
     }
 
     #[tokio::test]

@@ -1005,7 +1005,7 @@ impl WebToolProvider {
         Self {
             http: Client::builder()
                 .timeout(Duration::from_secs(30))
-                .user_agent("Codezilla/2.0 (https://github.com/basaid-dev/codezilla)")
+                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .build()
                 .unwrap_or_default(),
         }
@@ -1019,7 +1019,7 @@ impl ToolProvider for WebToolProvider {
     }
 
     fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
+        let mut tools = vec![ToolDefinition {
             name: "web_fetch".into(),
             provider_kind: ToolProviderKind::Builtin,
             description: "Fetch a URL and return its content as plain text (HTML is converted)."
@@ -1034,10 +1034,49 @@ impl ToolProvider for WebToolProvider {
             }),
             requires_approval: false,
             supports_parallel_calls: true,
-        }]
+        }];
+
+        tools.push(ToolDefinition {
+            name: "web_search".into(),
+            provider_kind: ToolProviderKind::Builtin,
+            description: "Search the web and return a ranked list of results with titles, \
+                          URLs, and snippets. Use this to find current information or \
+                          discover relevant pages before fetching them."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query"
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of results to return (1–10, default 5)",
+                        "minimum": 1,
+                        "maximum": 10
+                    }
+                },
+                "required": ["query"]
+            }),
+            requires_approval: false,
+            supports_parallel_calls: true,
+        });
+
+        tools
     }
 
     async fn execute(&self, call: &ToolCall, _ctx: &ToolExecutionContext) -> Result<ToolResult> {
+        match call.tool_name.as_str() {
+            "web_fetch" => self.do_web_fetch(call).await,
+            "web_search" => self.do_web_search(call).await,
+            other => Err(anyhow!("tool_not_found: {other}")),
+        }
+    }
+}
+
+impl WebToolProvider {
+    async fn do_web_fetch(&self, call: &ToolCall) -> Result<ToolResult> {
         let url = call
             .arguments
             .get("url")
@@ -1097,6 +1136,125 @@ impl ToolProvider for WebToolProvider {
             },
         })
     }
+
+    async fn do_web_search(&self, call: &ToolCall) -> Result<ToolResult> {
+        let query = call
+            .arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("tool_invalid_arguments: missing query"))?;
+
+        let count = call
+            .arguments
+            .get("count")
+            .and_then(Value::as_u64)
+            .unwrap_or(5)
+            .clamp(1, 10);
+
+        // DuckDuckGo HTML-lite requires a POST with an encoded form body.
+        // A GET request triggers a CAPTCHA challenge page instead of results.
+        let response = self
+            .http
+            .post("https://html.duckduckgo.com/html/")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.5")
+            .body(format!("q={}&b=&kl=", urlencoding::encode(query)))
+            .send()
+            .await
+            .map_err(|e| anyhow!("web_search_error: {e}"))?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            return Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({ "error": format!("HTTP {status}") }),
+                error_message: Some(format!("web_search HTTP {status}")),
+            });
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| anyhow!("web_search_parse_error: {e}"))?;
+
+        // Guard against bot-detection challenge pages.
+        if body.contains("anomaly-modal") || body.contains("challenge-form") {
+            return Ok(ToolResult {
+                tool_call_id: call.tool_call_id.clone(),
+                ok: false,
+                output: json!({ "error": "web_search: DuckDuckGo returned a CAPTCHA challenge. Try again shortly." }),
+                error_message: Some("web_search: CAPTCHA challenge received".into()),
+            });
+        }
+
+        let results = extract_duckduckgo_results(&body, count as usize);
+
+        tracing::debug!(query, result_count = results.len(), "web_search: completed");
+
+        Ok(ToolResult {
+            tool_call_id: call.tool_call_id.clone(),
+            ok: true,
+            output: json!({ "query": query, "results": results }),
+            error_message: None,
+        })
+    }
+}
+
+/// Parse organic results from a DuckDuckGo HTML Lite POST response.
+///
+/// # Selectors (verified against live HTML 2025-05-10)
+/// Organic results live in: `div.result.results_links_deep.web-result`
+/// - Title link:  `h2.result__title > a.result__a`  (href is the direct destination URL)
+/// - Snippet:     `a.result__snippet`                (inner text; the href is the same destination URL)
+///
+/// Ad blocks use `result--ad` and are excluded by the `web-result` class filter.
+fn extract_duckduckgo_results(html: &str, limit: usize) -> Vec<Value> {
+    use scraper::{Html, Selector};
+    let document = Html::parse_document(html);
+    // Only match organic web results — this class is absent on ad blocks.
+    let result_sel = Selector::parse("div.web-result").unwrap();
+    let title_sel  = Selector::parse("h2.result__title a.result__a").unwrap();
+    let snip_sel   = Selector::parse("a.result__snippet").unwrap();
+
+    let mut results = Vec::new();
+    for node in document.select(&result_sel) {
+        if results.len() >= limit {
+            break;
+        }
+        let Some(title_el) = node.select(&title_sel).next() else { continue };
+
+        let title   = title_el.text().collect::<String>();
+        let raw_url = title_el.value().attr("href").unwrap_or("");
+        let snippet = node
+            .select(&snip_sel)
+            .next()
+            .map(|el| el.text().collect::<String>())
+            .unwrap_or_default();
+
+        // Organic result hrefs are direct absolute URLs.
+        // Defensive: handle the rare DuckDuckGo redirect wrapper just in case.
+        let url = if raw_url.contains("duckduckgo.com/l/?uddg=") {
+            raw_url
+                .split("uddg=")
+                .nth(1)
+                .and_then(|s| s.split('&').next())
+                .and_then(|enc| urlencoding::decode(enc).ok())
+                .map(|cow| cow.into_owned())
+                .unwrap_or_else(|| raw_url.to_string())
+        } else {
+            raw_url.to_string()
+        };
+
+        results.push(json!({
+            "title":     title.trim(),
+            "url":       url,
+            "snippet":   snippet.trim(),
+            "published": null,
+        }));
+    }
+    results
 }
 
 // ─── ImageToolProvider ────────────────────────────────────────────────────────
@@ -1627,5 +1785,135 @@ mod orchestrator_tests {
         };
         let err = orch.execute(&call, exec_ctx()).await.unwrap_err();
         assert!(err.to_string().contains("tool_not_found"));
+    }
+}
+
+#[cfg(test)]
+mod web_search_tests {
+    use super::*;
+    use crate::system::domain::{ApprovalPolicy, PermissionProfile, ToolProviderKind};
+
+    fn exec_ctx() -> ToolExecutionContext {
+        ToolExecutionContext {
+            thread_id: "t".into(),
+            turn_id: "u".into(),
+            cwd: ".".into(),
+            permission_profile: PermissionProfile::default(),
+            approval_policy: ApprovalPolicy::default(),
+            agent_depth: 0,
+        }
+    }
+
+    fn list_ctx() -> ToolListingContext {
+        ToolListingContext {
+            thread_id: "t".into(),
+            cwd: ".".into(),
+            features: HashMap::new(),
+        }
+    }
+
+    // ── list_tools visibility ──────────────────────────────────────────────
+
+    #[test]
+    fn always_includes_web_search() {
+        let p = WebToolProvider::new();
+        let listed = p.list_tools(&list_ctx());
+        let names: Vec<&str> = listed.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"web_fetch"));
+        assert!(names.contains(&"web_search"));
+    }
+
+    #[test]
+    fn web_search_tool_is_parallel_safe() {
+        let p = WebToolProvider::new();
+        let def = p
+            .list_tools(&list_ctx())
+            .into_iter()
+            .find(|t| t.name == "web_search")
+            .unwrap();
+        assert!(def.supports_parallel_calls);
+        assert!(!def.requires_approval);
+    }
+
+    // ── argument validation (no network call needed) ───────────────────────
+
+    #[tokio::test]
+    async fn web_search_missing_query_returns_error() {
+        let p = WebToolProvider::new();
+        let call = ToolCall {
+            tool_call_id: "c1".into(),
+            provider_kind: ToolProviderKind::Builtin,
+            tool_name: "web_search".into(),
+            arguments: json!({}),
+        };
+        let err = p.execute(&call, &exec_ctx()).await.unwrap_err();
+        assert!(err.to_string().contains("missing query"), "got: {err}");
+    }
+
+    // ── result parsing ─────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_duckduckgo_results_parses_organic_html() {
+        // Matches the actual DuckDuckGo HTML-lite POST response structure.
+        let html = r#"
+            <div class="result results_links results_links_deep web-result ">
+                <h2 class="result__title">
+                    <a rel="nofollow" class="result__a" href="https://rust-lang.org/">Rust Programming Language</a>
+                </h2>
+                <a class="result__snippet" href="https://rust-lang.org/">
+                    Rust is a fast, reliable, productive language.
+                </a>
+            </div>
+            <div class="result results_links results_links_deep web-result ">
+                <h2 class="result__title">
+                    <a rel="nofollow" class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fdoc.rust-lang.org%2F">The Rust Reference</a>
+                </h2>
+                <a class="result__snippet" href="https://doc.rust-lang.org/">
+                    The official Rust reference.
+                </a>
+            </div>
+            <div class="result results_links result--ad">
+                <h2 class="result__title">
+                    <a class="result__a" href="https://ads.example.com/">Buy Rust Course</a>
+                </h2>
+                <a class="result__snippet">Ad snippet that should be excluded.</a>
+            </div>
+        "#;
+
+        let results = extract_duckduckgo_results(html, 10);
+        // Ad block must be excluded — only the 2 web-result divs should appear.
+        assert_eq!(results.len(), 2, "expected 2 organic results, got {results:?}");
+
+        assert_eq!(results[0]["title"], "Rust Programming Language");
+        assert_eq!(results[0]["url"], "https://rust-lang.org/");
+        assert_eq!(results[0]["snippet"], "Rust is a fast, reliable, productive language.");
+        assert_eq!(results[0]["published"], serde_json::Value::Null);
+
+        // DDG redirect wrapper should be decoded to the real destination URL.
+        assert_eq!(results[1]["title"], "The Rust Reference");
+        assert_eq!(results[1]["url"], "https://doc.rust-lang.org/");
+        assert_eq!(results[1]["snippet"], "The official Rust reference.");
+    }
+
+    #[test]
+    fn extract_duckduckgo_results_respects_limit() {
+        fn make_result(n: usize) -> String {
+            format!(
+                r#"<div class="result results_links results_links_deep web-result ">
+                    <h2 class="result__title"><a class="result__a" href="https://ex.com/{n}">Result {n}</a></h2>
+                    <a class="result__snippet" href="https://ex.com/{n}">Snippet {n}.</a>
+                </div>"#
+            )
+        }
+        let html: String = (0..8).map(make_result).collect();
+        assert_eq!(extract_duckduckgo_results(&html, 3).len(), 3);
+        assert_eq!(extract_duckduckgo_results(&html, 8).len(), 8);
+        assert_eq!(extract_duckduckgo_results(&html, 100).len(), 8);
+    }
+
+    #[test]
+    fn extract_duckduckgo_results_empty_on_no_web_results() {
+        assert!(extract_duckduckgo_results("", 5).is_empty());
+        assert!(extract_duckduckgo_results("<html><body>no results</body></html>", 5).is_empty());
     }
 }

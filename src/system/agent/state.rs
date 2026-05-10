@@ -146,7 +146,11 @@ impl InMemoryStateManager {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
         {
-            if entry.metadata().map(|m| m.len() as usize > max_file_bytes).unwrap_or(false) {
+            if entry
+                .metadata()
+                .map(|m| m.len() as usize > max_file_bytes)
+                .unwrap_or(false)
+            {
                 continue;
             }
             let relative = entry
@@ -188,7 +192,13 @@ impl StateManager for InMemoryStateManager {
         };
         {
             let mut snaps = self.snapshots.lock().unwrap();
-            snaps.insert(id.clone(), InMemorySnapshot { meta: meta.clone(), files });
+            snaps.insert(
+                id.clone(),
+                InMemorySnapshot {
+                    meta: meta.clone(),
+                    files,
+                },
+            );
         }
         self.order.lock().unwrap().push(id.clone());
 
@@ -339,7 +349,10 @@ mod tests {
         assert!(mgr.list_snapshots().is_empty());
 
         let tmp = TempDir::new().unwrap();
-        let snap = mgr.snapshot(tmp.path().to_str().unwrap(), "before_edit").await.unwrap();
+        let snap = mgr
+            .snapshot(tmp.path().to_str().unwrap(), "before_edit")
+            .await
+            .unwrap();
 
         assert!(!snap.id.is_empty());
         assert_eq!(snap.label, "before_edit");
@@ -369,18 +382,26 @@ mod tests {
     async fn drop_snapshot_removes_entry() {
         let mgr = InMemoryStateManager::new();
         let tmp = TempDir::new().unwrap();
-        let snap = mgr.snapshot(tmp.path().to_str().unwrap(), "test").await.unwrap();
+        let snap = mgr
+            .snapshot(tmp.path().to_str().unwrap(), "test")
+            .await
+            .unwrap();
 
         assert!(mgr.drop_snapshot(&snap.id));
         assert!(mgr.list_snapshots().is_empty());
-        assert!(!mgr.drop_snapshot(&snap.id), "second drop must return false");
+        assert!(
+            !mgr.drop_snapshot(&snap.id),
+            "second drop must return false"
+        );
     }
 
     #[tokio::test]
     async fn restore_unknown_snapshot_returns_error() {
         let mgr = InMemoryStateManager::new();
         let tmp = TempDir::new().unwrap();
-        let err = mgr.restore("nonexistent_id", tmp.path().to_str().unwrap()).await;
+        let err = mgr
+            .restore("nonexistent_id", tmp.path().to_str().unwrap())
+            .await;
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("snapshot_not_found"));
     }
@@ -417,7 +438,10 @@ mod tests {
 
         assert!(branch.workspace_path.exists());
         assert_eq!(branch.source_snapshot_id, snap.id);
-        assert!(branch.workspace_path.join("main.rs").exists(), "branch should contain the file");
+        assert!(
+            branch.workspace_path.join("main.rs").exists(),
+            "branch should contain the file"
+        );
 
         // Cleanup
         let _ = tokio::fs::remove_dir_all(&branch.workspace_path).await;
@@ -435,11 +459,20 @@ mod tests {
 
         // Fork a branch and write a new file there.
         let branch = mgr.branch(&snap.id, "exploration").await.unwrap();
-        fs::write(branch.workspace_path.join("new_feature.rs"), b"// new feature").unwrap();
+        fs::write(
+            branch.workspace_path.join("new_feature.rs"),
+            b"// new feature",
+        )
+        .unwrap();
 
         // Merge back.
-        mgr.merge_branch(&branch, cwd.to_str().unwrap()).await.unwrap();
-        assert!(cwd.join("new_feature.rs").exists(), "merged file should appear in target");
+        mgr.merge_branch(&branch, cwd.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            cwd.join("new_feature.rs").exists(),
+            "merged file should appear in target"
+        );
 
         // Cleanup
         let _ = tokio::fs::remove_dir_all(&branch.workspace_path).await;
