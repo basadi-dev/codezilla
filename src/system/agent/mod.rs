@@ -48,6 +48,6 @@ pub use tool_wrappers::{CachingToolProvider, LoggingToolProvider, RateLimitToolP
 #[allow(unused_imports)]
 pub use tools::{
     BashToolProvider, FileToolProvider, ImageToolProvider, ListDirToolProvider,
-    RequestUserInputToolProvider, SearchToolProvider, ShellToolProvider, SpawnAgentToolProvider,
-    ToolOrchestrator, ToolProvider, WebToolProvider,
+    RequestUserInputToolProvider, SearchToolProvider, ShellToolProvider, ToolOrchestrator,
+    ToolProvider, WebToolProvider,
 };

@@ -256,8 +256,11 @@ impl ModelGateway {
                         if cancel_token.is_cancelled() {
                             return;
                         }
+                        let mut ordered_tools = partial_tools.into_iter().collect::<Vec<_>>();
+                        ordered_tools.sort_by_key(|(index, _)| *index);
+
                         let mut calls = Vec::new();
-                        for (_, (id, name, args)) in partial_tools {
+                        for (_, (id, name, args)) in ordered_tools {
                             let tool_name = name.unwrap_or_default();
                             if tool_name.is_empty() {
                                 tracing::warn!(

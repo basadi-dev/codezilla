@@ -1,8 +1,10 @@
 use anyhow::{bail, Result};
+use serde_json::Value;
 use std::io::{self, Write};
 
 use super::domain::{
     ApprovalPolicy, OutputMode, PermissionProfile, RuntimeEventKind, SurfaceKind, UserInput,
+    UserInputImage,
 };
 use super::runtime::{
     ConversationRuntime, EventFilter, ThreadForkParams, ThreadResumeParams, ThreadStartParams,
@@ -31,6 +33,8 @@ pub struct ExecInvocation {
     pub thread_id: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,
     pub permission_profile: Option<PermissionProfile>,
+    pub image_paths: Vec<String>,
+    pub output_schema: Option<Value>,
 }
 
 pub struct InteractiveSurface {
@@ -127,17 +131,24 @@ impl ExecSurface {
             },
         );
 
+        let mut input = UserInput::from_text(prompt);
+        input.images = invocation
+            .image_paths
+            .into_iter()
+            .map(|path| UserInputImage { path })
+            .collect();
+
         let turn = self
             .runtime
             .start_turn(
                 TurnStartParams {
                     thread_id: thread_id.clone(),
-                    input: vec![UserInput::from_text(prompt)],
+                    input: vec![input],
                     cwd: None,
                     model_settings: None,
                     approval_policy: invocation.approval_policy.clone(),
                     permission_profile: invocation.permission_profile.clone(),
-                    output_schema: None,
+                    output_schema: invocation.output_schema,
                     repo_map_verbosity: None,
                     agent_depth: 0,
                 },

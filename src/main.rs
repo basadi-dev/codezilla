@@ -132,9 +132,18 @@ async fn async_main() -> Result<i32> {
         system::ConversationRuntime::new(effective_config.clone(), auth_manager.get_session())
             .await?;
 
+    if matches.get_many::<String>("image").is_some()
+        && !matches!(matches.subcommand(), Some(("exec", _)))
+    {
+        bail!("--image is currently supported with `codezilla exec` only");
+    }
+
     match matches.subcommand() {
         Some(("exec", sub)) => {
+            reject_unsupported_exec_flags(sub)?;
             let stdin_suffix = read_piped_stdin(process_context.stdin_is_tty)?;
+            let image_paths = collect_image_paths(&matches);
+            let output_schema = load_output_schema(sub.get_one::<String>("output-schema"))?;
             let surface = ExecSurface::new(
                 runtime,
                 if sub.get_flag("json") {
@@ -159,6 +168,8 @@ async fn async_main() -> Result<i32> {
                     thread_id: None,
                     approval_policy: Some(effective_config.approval_policy.clone()),
                     permission_profile: Some(effective_config.permission_profile.clone()),
+                    image_paths,
+                    output_schema,
                 })
                 .await
         }
@@ -177,6 +188,8 @@ async fn async_main() -> Result<i32> {
                     thread_id: None,
                     approval_policy: Some(effective_config.approval_policy.clone()),
                     permission_profile: Some(effective_config.permission_profile.clone()),
+                    image_paths: Vec::new(),
+                    output_schema: None,
                 })
                 .await
         }
@@ -283,6 +296,40 @@ async fn async_main() -> Result<i32> {
                     cwd: Some(cwd),
                 })
                 .await
+        }
+    }
+}
+
+fn reject_unsupported_exec_flags(sub: &ArgMatches) -> Result<()> {
+    for flag in ["skip-git-repo-check", "ignore-user-config", "ignore-rules"] {
+        if sub.get_flag(flag) {
+            bail!("exec --{flag} is not implemented in this build");
+        }
+    }
+    Ok(())
+}
+
+fn collect_image_paths(matches: &ArgMatches) -> Vec<String> {
+    matches
+        .get_many::<String>("image")
+        .map(|paths| paths.cloned().collect())
+        .unwrap_or_default()
+}
+
+fn load_output_schema(path: Option<&String>) -> Result<Option<serde_json::Value>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let raw = std::fs::read_to_string(path)?;
+    match serde_json::from_str(&raw) {
+        Ok(schema) => Ok(Some(schema)),
+        Err(json_err) => {
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|yaml_err| {
+                anyhow!(
+                    "failed to parse output schema {path} as JSON ({json_err}) or YAML ({yaml_err})"
+                )
+            })?;
+            Ok(Some(serde_json::to_value(yaml)?))
         }
     }
 }

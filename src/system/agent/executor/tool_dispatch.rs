@@ -136,6 +136,12 @@ impl TurnExecutor {
         // 3. Partition into batches (consecutive parallel-safe calls grouped;
         //    each non-parallel-safe call is a solo sequential batch).
         let batches = partition_into_batches(&valid_calls, |name| {
+            // Shell commands are process side effects, so keep them as a hard
+            // serialization barrier even if a dynamic provider advertises
+            // otherwise. The non-retryable-failure stop policy depends on this.
+            if matches!(name, "bash_exec" | "shell_exec") {
+                return false;
+            }
             self.runtime
                 .inner
                 .tool_orchestrator

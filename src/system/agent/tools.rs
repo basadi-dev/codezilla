@@ -1299,31 +1299,6 @@ impl ToolProvider for ImageToolProvider {
     }
 }
 
-// ─── Placeholder stub (kept for public API compat) ────────────────────────────
-// The *real* SpawnAgentToolProvider is `SpawnAgentToolProviderReal` defined in
-// runtime.rs. It is late-registered after `ConversationRuntime` is constructed
-// so it can hold a runtime clone. This stub is no longer registered anywhere.
-
-pub struct SpawnAgentToolProvider;
-
-#[async_trait]
-impl ToolProvider for SpawnAgentToolProvider {
-    fn get_kind(&self) -> ToolProviderKind {
-        ToolProviderKind::Builtin
-    }
-    fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
-        Vec::new() // deliberately empty — the real provider is registered in runtime.rs
-    }
-    async fn execute(&self, call: &ToolCall, _ctx: &ToolExecutionContext) -> Result<ToolResult> {
-        Ok(ToolResult {
-            tool_call_id: call.tool_call_id.clone(),
-            ok: false,
-            output: json!({"message":"spawn_agent: reached stub — real provider should be registered"}),
-            error_message: Some("spawn_agent: stub reached unexpectedly".into()),
-        })
-    }
-}
-
 pub struct RequestUserInputToolProvider;
 
 #[async_trait]

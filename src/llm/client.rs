@@ -35,10 +35,19 @@ impl UnifiedClient {
             .build()
             .context("building HTTP client")?;
 
+        let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
+        providers.insert(
+            "ollama".into(),
+            Arc::new(ollama::OllamaProvider {
+                http: http.clone(),
+                cfg: cfg.clone(),
+            }),
+        );
+
         Ok(Self {
             http,
             cfg,
-            providers: HashMap::new(),
+            providers,
         })
     }
 

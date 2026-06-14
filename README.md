@@ -105,14 +105,22 @@ codezilla/
 ├── Makefile            # Build commands
 ├── src/
 │   ├── main.rs         # Entry point
-│   ├── app/            # App wiring and slash commands
-│   ├── agent/          # Agent orchestrator and core state machine
-│   ├── config/         # YAML config parser
-│   ├── llm/            # Multi-provider LLM clients
-│   ├── multiagent/     # Parallel worker DAG executor
-│   ├── session/        # JSONL session persistence
-│   ├── tools/          # Native tools (file, execute, web_search, etc.)
-│   └── ui/             # Ratatui application model
+│   ├── llm/            # Multi-provider LLM clients and provider adapters
+│   ├── logger/         # Tracing/log setup
+│   └── system/
+│       ├── agent/      # Agent loop, tools, approvals, sandboxing, memory
+│       ├── bench/      # Benchmark task runner
+│       ├── intel/      # Codebase map, walking, symbol extraction, cache
+│       ├── mcp/        # Model Context Protocol registry and stdio client
+│       ├── runtime/    # Thread/turn orchestration and runtime builder
+│       ├── tui/        # Ratatui application model and rendering
+│       ├── config.rs   # Config/auth/path resolution
+│       ├── persistence.rs
+│       ├── server.rs   # JSON-RPC stdio server surfaces
+│       └── surfaces.rs # Interactive and exec entry surfaces
+├── bench/tasks/        # Benchmark fixtures and task specs
+├── docs/               # Architecture notes
+├── skills/             # Built-in skill prompts
 └── logs/               # Application logs
 ```
 

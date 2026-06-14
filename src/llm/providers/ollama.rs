@@ -905,7 +905,6 @@ use crate::llm::{CompletionRequest, LlmProvider, ProviderCaps};
 ///
 /// Delegates to the existing free functions — this is a zero-cost abstraction
 /// that satisfies the trait contract for registry-based dispatch.
-#[allow(dead_code)]
 pub struct OllamaProvider {
     pub http: Client,
     pub cfg: Config,
