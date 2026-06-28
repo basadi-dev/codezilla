@@ -4,7 +4,7 @@
 
 # Model selection
 model_settings:
-  model_id: "glm-5.1:cloud"
+  model_id: "glm-5.2:cloud"
   provider_id: "ollama"
   # reasoning_effort: "auto"     # auto | off | low | medium | high
 
@@ -12,7 +12,7 @@ model_settings:
 # Format: model_id + provider_id required; reasoning_effort optional.
 
 models:
-  - model_id: "glm-5.1:cloud"
+  - model_id: "glm-5.2:cloud"
     provider_id: "ollama"
     context_window: 198000
     modalities: ["text"]
@@ -143,5 +143,5 @@ auto_compaction:
     qwen3-coder:480b: 72
     kimi-k2.6:cloud: 65
     # Smaller / local models — compact earlier to avoid degradation
-    glm-5.1:cloud: 65
+    glm-5.2:cloud: 65
     deepseek-v4-flash:cloud: 68

@@ -243,7 +243,7 @@ pub struct ModelSettings {
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
-            model_id: "glm-5.1:cloud".into(),
+            model_id: "glm-5.2:cloud".into(),
             provider_id: "ollama".into(),
             reasoning_effort: ReasoningEffort::Auto,
             summary_mode: None,

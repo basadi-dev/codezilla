@@ -521,7 +521,17 @@ impl ConfigManager {
         let mut llm = raw.llm;
         apply_env_overrides(&mut llm);
 
-        let mut model_settings = raw.model_settings.unwrap_or_default();
+        // `model_settings` must be provided by config.yaml (or CLI overrides).
+        // We intentionally do NOT fall back to a baked-in default model here —
+        // silently selecting a production model when the user's config is
+        // incomplete was a recurring source of confusion. Require it instead.
+        let mut model_settings = raw.model_settings.ok_or_else(|| {
+            anyhow::anyhow!(
+                "config_invalid: `model_settings` is not set. \
+                 Specify it in config.yaml (e.g. `model_settings.model_id`) \
+                 or via the `model_settings.model_id` CLI override."
+            )
+        })?;
 
         // If the models preset list has an entry matching the active model_id,
         // backfill any fields that weren't explicitly set in model_settings.
@@ -796,12 +806,12 @@ fn default_app_home() -> PathBuf {
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
 fn default_spec_config_json() -> Value {
+    // Neutral baseline: no model is selected and no model presets are baked in.
+    // The active `model_settings` and the `models` preset list MUST come from
+    // config.yaml (or CLI overrides). Keeping this default model-agnostic prevents
+    // a specific production model from silently being selected when the user's
+    // config is missing or incomplete.
     json!({
-        "model_settings": {
-            "model_id": "glm-5.1:cloud",
-            "provider_id": "ollama",
-            "web_search_enabled": false
-        },
         "llm": {
             "ollama": {
                 "base_url": "https://ollama.com",
@@ -844,28 +854,9 @@ fn default_spec_config_json() -> Value {
         "auto_compaction": {
             "enabled": true,
             "threshold_pct": 70,
-            "model_thresholds": {
-                "claude-opus-4-5": 80,
-                "claude-sonnet-4-5": 80,
-                "claude-opus-4-7": 80,
-                "claude-sonnet-4-6": 80,
-                "gpt-4o": 75,
-                "gpt-4o-mini": 70,
-                "qwen3-coder:480b": 72,
-                "kimi-k2.6:cloud": 65,
-                "glm-5.1:cloud": 65,
-                "deepseek-v4-flash:cloud": 68
-            }
+            "model_thresholds": {}
         },
-        "models": [
-            { "model_id": "glm-5.1:cloud", "provider_id": "ollama", "context_window": 198000, "modalities": ["text"] },
-            { "model_id": "qwen3-coder-next:cloud", "provider_id": "ollama", "context_window": 256000, "modalities": ["text"] },
-            { "model_id": "kimi-k2.6:cloud", "provider_id": "ollama", "context_window": 256000, "modalities": ["text", "vision"] },
-            { "model_id": "deepseek-v4-flash:cloud", "provider_id": "ollama", "context_window": 1000000, "modalities": ["text"] },
-            { "model_id": "deepseek-v4-pro:cloud", "provider_id": "ollama", "context_window": 1000000, "modalities": ["text"] },
-            { "model_id": "claude-opus-4-5", "provider_id": "anthropic", "reasoning_effort": "medium", "modalities": ["text", "vision"] },
-            { "model_id": "gemma4:31b-cloud", "provider_id": "ollama", "context_window": 256000, "modalities": ["text", "vision"] }
-        ],
+        "models": [],
         "features": {},
         "trusted_projects": []
     })
