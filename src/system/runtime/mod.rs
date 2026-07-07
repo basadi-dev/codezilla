@@ -20,9 +20,9 @@ use crate::llm::LlmClient;
 use super::agent::supervisor::{AgentSupervisor, SpawnAgentToolProviderReal};
 use super::agent::{
     ApprovalManager, BashToolProvider, EventBus, ExtensionManager, FileToolProvider,
-    ImageToolProvider, ListDirToolProvider, ModelGateway, PatternMiner, PermissionManager,
-    RequestUserInputToolProvider, SandboxManager, SearchToolProvider, ShellToolProvider,
-    ToolOrchestrator, WebToolProvider,
+    GraphToolProvider, ImageToolProvider, ListDirToolProvider, ModelGateway, PatternMiner,
+    PermissionManager, RequestUserInputToolProvider, SandboxManager, SearchToolProvider,
+    ShellToolProvider, ToolOrchestrator, WebToolProvider,
 };
 use super::intel::RepoMap;
 // Agent types re-exported for callers outside runtime.rs
@@ -344,6 +344,9 @@ impl ConversationRuntime {
         // so it can hold a ConversationRuntime clone. See below.
         tool_orchestrator.register_provider(Arc::new(RequestUserInputToolProvider));
         tool_orchestrator.register_provider(Arc::new(WebToolProvider::new()));
+        tool_orchestrator.register_provider(Arc::new(GraphToolProvider::new(
+            std::path::PathBuf::from(&effective_config.app_home),
+        )));
 
         let mcp_registry = Arc::new(super::mcp::McpRegistry::new());
         for srv_cfg in &effective_config.mcp_servers {

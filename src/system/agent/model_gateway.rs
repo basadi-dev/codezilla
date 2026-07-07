@@ -1141,31 +1141,44 @@ CRITICAL REQUIREMENTS:
 OUTPUT FORMAT (use exactly these section headers, omit a section only if truly empty):
 
 ## Working Context
-1–2 sentences: what is being built/fixed, language/framework, cwd.
+1–2 sentences: latest user request, active goal, language/framework, cwd.
 
-## Environment
-- Language/toolchain version if known (e.g. `rustc 1.78`, `node 20`, `python 3.12`)
-- Key dependencies or workspace layout details that affect the work
-Omit if unknown.
+## Current Task State / Plan
+- Current status
+- Active plan items with done/in-progress/pending state
+- Immediate next action
+
+## Repo Map
+- Important directories/modules
+- Relevant files and symbols
+- Existing conventions discovered
+
+## Relevant File Contents
+- `path` — exact functions/types/config keys or short snippets needed to resume
+- Note stale/unknown file contents explicitly; current repository files beat this summary
 
 ## Files Modified
 - `path/to/file` — what changed — status: complete | in-progress | broken
 If none: "None."
 
-## Current Errors & Failures
-- Exact error text (first relevant line + location)
-If clean: "None."
+## Retrieved Prior Conversation Chunks
+- Prior decisions, failed attempts, review/issue/PR context, or user preferences that remain relevant
+If none: "None."
 
-## Completed Steps
-- Short bullet per finished item (file path where relevant)
+## Pinned Decisions & Constraints
+- Architectural choices, API contracts, naming rules, user constraints, coding standards
+If none: "None."
 
-## In Progress / Next Steps
-- What was being done when compaction triggered
-- Immediate next action
-Use [BLOCKED: reason] for blocked items.
+## Test / Build Results
+- Command run
+- Exact failure/success lines, error messages, test names, paths, and locations
+If clean or not run: say "Clean" or "Not run."
 
-## Key Decisions & Constraints
-- Architectural choices, API contracts, naming rules that must be respected
+## Searchable History Tags
+- Keywords, file paths, symbols, error strings, issue/PR IDs, timestamps useful for later retrieval
+
+## Open Issues
+- Unresolved errors, incomplete tasks, blockers, or risks
 If none: "None."
 
 ---

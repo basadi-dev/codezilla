@@ -36,9 +36,9 @@ use self::context::TurnContext;
 use self::utils::{
     already_read_directive, classify_turn_intent, derive_thread_title, extract_plan_from_response,
     find_repetition_start, initial_read_budget, intent_directive, intent_to_reasoning_effort,
-    is_degenerate_repetition, is_read_only_tool, progress_summary, recently_read_paths,
-    should_retry_no_tool_completion, thinking_instruction, user_requested_verification,
-    wants_verbose_repo_map, ProgressState, TurnIntent,
+    is_degenerate_repetition, is_read_only_tool, pinned_coding_context, progress_summary,
+    recently_read_paths, should_retry_no_tool_completion, thinking_instruction,
+    user_requested_verification, wants_verbose_repo_map, ProgressState, TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus, TokenUsage, ToolCall,
@@ -405,6 +405,9 @@ impl TurnExecutor {
                 )
                 .await?
             };
+            if let Some(pinned) = pinned_coding_context(&turn_ctx.cwd, &turn_ctx.items).await {
+                system_instructions.push(pinned);
+            }
 
             // ── Inject structured progress summary from iteration 2+ ──────
             // Gives the model compact structured state so it doesn't have to

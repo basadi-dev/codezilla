@@ -3,6 +3,7 @@ pub mod checkpoint;
 pub mod event_bus;
 pub mod executor;
 pub mod extensions;
+pub mod graph_tools;
 pub mod memory;
 pub mod middleware;
 pub mod model_gateway;
@@ -28,6 +29,8 @@ pub use event_bus::{EventBus, EventFilter, EventSubscription};
 pub use executor::TurnExecutor;
 #[allow(unused_imports)]
 pub use extensions::ExtensionManager;
+#[allow(unused_imports)]
+pub use graph_tools::GraphToolProvider;
 #[allow(unused_imports)]
 pub use memory::{
     EmbeddingProvider, MemoryEntry, MemoryHit, MemoryKind, MemoryStats, SemanticMemoryStore,

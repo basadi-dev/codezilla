@@ -51,6 +51,10 @@ pub enum MemoryKind {
     Fact,
     FileContext,
     ConversationSummary,
+    CommandLog,
+    GitDiff,
+    TestOutput,
+    Decision,
 }
 
 impl std::fmt::Display for MemoryKind {
@@ -61,6 +65,10 @@ impl std::fmt::Display for MemoryKind {
             MemoryKind::Fact => "fact",
             MemoryKind::FileContext => "file_context",
             MemoryKind::ConversationSummary => "conversation_summary",
+            MemoryKind::CommandLog => "command_log",
+            MemoryKind::GitDiff => "git_diff",
+            MemoryKind::TestOutput => "test_output",
+            MemoryKind::Decision => "decision",
         };
         write!(f, "{s}")
     }
@@ -75,6 +83,10 @@ impl std::str::FromStr for MemoryKind {
             "fact" => Ok(MemoryKind::Fact),
             "file_context" => Ok(MemoryKind::FileContext),
             "conversation_summary" => Ok(MemoryKind::ConversationSummary),
+            "command_log" => Ok(MemoryKind::CommandLog),
+            "git_diff" => Ok(MemoryKind::GitDiff),
+            "test_output" => Ok(MemoryKind::TestOutput),
+            "decision" => Ok(MemoryKind::Decision),
             other => Err(anyhow!("unknown memory kind: {other}")),
         }
     }
@@ -631,6 +643,10 @@ mod tests {
             MemoryKind::Fact,
             MemoryKind::FileContext,
             MemoryKind::ConversationSummary,
+            MemoryKind::CommandLog,
+            MemoryKind::GitDiff,
+            MemoryKind::TestOutput,
+            MemoryKind::Decision,
         ];
         for kind in &kinds {
             let s = kind.to_string();

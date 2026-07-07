@@ -6,6 +6,10 @@
 //! model can navigate the code without issuing sequential `read_file` /
 //! `list_dir` calls.
 //!
+//! The [`graph`] submodule adds a persistent SQLite-backed knowledge graph
+//! (codebase-memory style) exposed to the agent via the `index_graph` /
+//! `search_graph` / `trace_path` / `find_impact` tools.
+//!
 //! # Design decisions
 //! - **No tree-sitter**: symbols are extracted with `Regex` patterns compiled
 //!   once via `once_cell::sync::Lazy`. Pattern quality is "good enough" for
@@ -17,6 +21,7 @@
 
 pub mod cache;
 pub mod format;
+pub mod graph;
 pub mod symbols;
 pub mod walker;
 

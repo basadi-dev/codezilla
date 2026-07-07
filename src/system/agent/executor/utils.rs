@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::time::Duration;
 
 use crate::system::domain::{
     ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ReasoningEffort, ToolCall,
@@ -103,6 +104,87 @@ pub(crate) fn wants_verbose_repo_map(inputs: &[UserInput]) -> bool {
         || text.contains("everything in the repo map")
         || text.contains("all files including");
     mentions_binary || mentions_git_internal || mentions_full_tree
+}
+
+/// Build a deterministic coding-state block that is pinned into every model
+/// request. This is intentionally based on local state and recent tool results,
+/// not on a lossy conversation summary.
+///
+/// Async because it snapshots git state via `tokio::process` (bounded by
+/// [`GIT_SNAPSHOT_TIMEOUT`]) so a slow repository never blocks a worker thread.
+pub(crate) async fn pinned_coding_context(
+    cwd: &str,
+    items: &[ConversationItem],
+) -> Option<String> {
+    let (git_status, git_diff_stat) = tokio::join!(
+        run_git(cwd, &["status", "--short"], 4000),
+        run_git(cwd, &["diff", "--stat"], 4000),
+    );
+    build_pinned_context(items, git_status, git_diff_stat)
+}
+
+/// Pure assembly of the pinned block from conversation items plus an optional
+/// git snapshot. Split from [`pinned_coding_context`] so it is unit-testable
+/// without spawning processes.
+fn build_pinned_context(
+    items: &[ConversationItem],
+    git_status: Option<String>,
+    git_diff_stat: Option<String>,
+) -> Option<String> {
+    let latest_request = latest_user_request(items);
+    let files = recent_file_paths(items, 12);
+    let commands = recent_commands(items, 6);
+    let latest_test = latest_test_or_diagnostic_output(items);
+
+    if latest_request.is_none()
+        && files.is_empty()
+        && commands.is_empty()
+        && latest_test.is_none()
+        && git_status.is_none()
+        && git_diff_stat.is_none()
+    {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    out.push("## Pinned Coding Context".to_string());
+    out.push(
+        "Repository state is authoritative. Treat older chat or compaction summaries as stale when they conflict with current files, git diff, or test output."
+            .to_string(),
+    );
+
+    if let Some(request) = latest_request {
+        out.push(format!("Latest user request: {}", one_line(&request, 900)));
+    }
+
+    if !files.is_empty() {
+        out.push(format!("Current/recent files: {}", files.join(", ")));
+    }
+
+    if !commands.is_empty() {
+        out.push("Recent commands:".to_string());
+        for command in commands {
+            out.push(format!("- `{}`", one_line(&command, 220)));
+        }
+    }
+
+    if let Some(status) = git_status.filter(|s| !s.trim().is_empty()) {
+        out.push("Current git status (`git status --short`):".to_string());
+        // Trim only the end: the leading porcelain column (" M foo") is data.
+        out.push(fenced("text", status.trim_end()));
+    }
+
+    if let Some(stat) = git_diff_stat.filter(|s| !s.trim().is_empty()) {
+        out.push("Current git diff stat (`git diff --stat`):".to_string());
+        out.push(fenced("text", stat.trim()));
+    }
+
+    if let Some(test) = latest_test {
+        out.push("Latest test/build/diagnostic output:".to_string());
+        out.push(fenced("text", test.trim()));
+    }
+
+    Some(out.join("\n"))
 }
 
 pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
@@ -1187,6 +1269,261 @@ pub(crate) fn progress_summary(state: &ProgressState<'_>) -> String {
     parts.join("\n")
 }
 
+fn latest_user_request(items: &[ConversationItem]) -> Option<String> {
+    items.iter().rev().find_map(|item| {
+        (item.kind == ItemKind::UserMessage)
+            .then(|| item.payload.get("text").and_then(Value::as_str))
+            .flatten()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn recent_file_paths(items: &[ConversationItem], limit: usize) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+
+    for item in items.iter().rev() {
+        if paths.len() >= limit {
+            break;
+        }
+        match item.kind {
+            ItemKind::ToolCall => {
+                if let Some(args) = item.payload.get("arguments") {
+                    collect_paths_from_value(args, &mut seen, &mut paths, limit);
+                }
+            }
+            ItemKind::FileChange => {
+                collect_paths_from_value(&item.payload, &mut seen, &mut paths, limit);
+            }
+            _ => {}
+        }
+    }
+
+    paths.reverse();
+    paths
+}
+
+fn collect_paths_from_value(
+    value: &Value,
+    seen: &mut HashSet<String>,
+    paths: &mut Vec<String>,
+    limit: usize,
+) {
+    for key in [
+        "path",
+        "file_path",
+        "filePath",
+        "target",
+        "source",
+        "write_paths",
+    ] {
+        let Some(v) = value.get(key) else {
+            continue;
+        };
+        match v {
+            Value::String(path) => push_path(path, seen, paths, limit),
+            Value::Array(values) => {
+                for item in values {
+                    if let Some(path) = item.as_str() {
+                        push_path(path, seen, paths, limit);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_path(path: &str, seen: &mut HashSet<String>, paths: &mut Vec<String>, limit: usize) {
+    if paths.len() >= limit {
+        return;
+    }
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.len() > 300 {
+        return;
+    }
+    if seen.insert(trimmed.to_string()) {
+        paths.push(trimmed.to_string());
+    }
+}
+
+fn recent_commands(items: &[ConversationItem], limit: usize) -> Vec<String> {
+    let mut commands = Vec::new();
+    for item in items.iter().rev() {
+        if commands.len() >= limit {
+            break;
+        }
+        if item.kind != ItemKind::ToolCall {
+            continue;
+        }
+        let tool = item
+            .payload
+            .get("toolName")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(tool, "bash_exec" | "shell_exec") {
+            continue;
+        }
+        let Some(args) = item.payload.get("arguments") else {
+            continue;
+        };
+        if let Some(command) = args.get("command").and_then(Value::as_str) {
+            commands.push(command.to_string());
+        } else if let Some(argv) = args.get("argv") {
+            commands.push(argv_to_string(argv));
+        }
+    }
+    commands.reverse();
+    commands
+}
+
+fn argv_to_string(argv: &Value) -> String {
+    match argv {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        other => other.to_string(),
+    }
+}
+
+fn latest_test_or_diagnostic_output(items: &[ConversationItem]) -> Option<String> {
+    let mut last_tool = "";
+    let mut result_for_tool: Option<(&str, &ConversationItem)> = None;
+
+    for item in items {
+        match item.kind {
+            ItemKind::ToolCall => {
+                last_tool = item
+                    .payload
+                    .get("toolName")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+            }
+            ItemKind::ToolResult => {
+                result_for_tool = Some((last_tool, item));
+            }
+            _ => {}
+        }
+    }
+
+    let (tool, item) = result_for_tool?;
+    if !matches!(tool, "bash_exec" | "shell_exec") {
+        return None;
+    }
+    let output = item
+        .payload
+        .get("output")
+        .map(value_to_text)
+        .unwrap_or_default();
+    let error = item
+        .payload
+        .get("errorMessage")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let combined = format!("{error}\n{output}");
+    if looks_like_test_or_diagnostic(&combined) {
+        Some(tail_chars(combined.trim(), 2400))
+    } else {
+        None
+    }
+}
+
+fn looks_like_test_or_diagnostic(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    // Test-runner / build phrases that are unambiguous wherever they appear.
+    const PHRASES: &[&str] = &[
+        "test result:",
+        "tests failed",
+        "test failed",
+        "failures:",
+        "passed;",
+        "panicked at",
+        "assertion failed",
+        "traceback (most recent call last)",
+        "npm err!",
+        "compilation failed",
+    ];
+    if PHRASES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    // Compiler-style diagnostics, anchored at line starts so ordinary output
+    // that merely mentions "error:" or "warning:" mid-sentence isn't pinned.
+    lower.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("error:")
+            || trimmed.starts_with("error[")
+            || trimmed.starts_with("warning:")
+            || trimmed.starts_with("fatal:")
+    })
+}
+
+fn value_to_text(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Upper bound on each git snapshot command. A repo on a slow filesystem (or
+/// one mid-operation holding the index lock) must never stall a turn.
+const GIT_SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(1500);
+
+async fn run_git(cwd: &str, args: &[&str], max_chars: usize) -> Option<String> {
+    let command = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output();
+    let output = tokio::time::timeout(GIT_SNAPSHOT_TIMEOUT, command)
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(tail_chars(trimmed, max_chars))
+    }
+}
+
+/// Keep the last `max_chars` characters (used for outputs, where the end —
+/// the failure summary — matters most).
+fn tail_chars(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        text.to_string()
+    } else {
+        chars[chars.len() - max_chars..].iter().collect()
+    }
+}
+
+/// Keep the first `max_chars` characters (used for requests and commands,
+/// where the beginning carries the intent).
+fn head_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        text.chars().take(max_chars).collect()
+    }
+}
+
+fn one_line(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    head_chars(&compact, max_chars)
+}
+
+fn fenced(lang: &str, body: &str) -> String {
+    format!("```{lang}\n{body}\n```")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,6 +1540,17 @@ mod tests {
         }
     }
 
+    fn item(kind: ItemKind, payload: serde_json::Value) -> ConversationItem {
+        ConversationItem {
+            item_id: "item_test".into(),
+            thread_id: "thread_test".into(),
+            turn_id: "turn_test".into(),
+            created_at: 0,
+            kind,
+            payload,
+        }
+    }
+
     fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
         ToolCall {
             tool_call_id: format!("call_{name}"),
@@ -1210,6 +1558,86 @@ mod tests {
             tool_name: name.to_string(),
             arguments,
         }
+    }
+
+    #[test]
+    fn pinned_coding_context_includes_request_paths_commands_and_diagnostics() {
+        let items = vec![
+            user_item("fix the auth regression"),
+            item(
+                ItemKind::ToolCall,
+                json!({
+                    "toolName": "read_file",
+                    "arguments": {"path": "src/auth.rs"}
+                }),
+            ),
+            item(
+                ItemKind::ToolCall,
+                json!({
+                    "toolName": "bash_exec",
+                    "arguments": {"command": "cargo test auth"}
+                }),
+            ),
+            item(
+                ItemKind::ToolResult,
+                json!({
+                    "ok": false,
+                    "output": "test result: FAILED. 0 passed; 1 failed",
+                    "errorMessage": "error: auth_regression failed"
+                }),
+            ),
+        ];
+
+        let context = build_pinned_context(&items, None, None).unwrap();
+        assert!(context.contains("fix the auth regression"));
+        assert!(context.contains("src/auth.rs"));
+        assert!(context.contains("cargo test auth"));
+        assert!(context.contains("auth_regression failed"));
+    }
+
+    #[test]
+    fn pinned_coding_context_includes_git_snapshot_when_present() {
+        let items = vec![user_item("commit my changes")];
+        let context = build_pinned_context(
+            &items,
+            Some(" M src/lib.rs".to_string()),
+            Some("1 file changed".to_string()),
+        )
+        .unwrap();
+        assert!(context.contains(" M src/lib.rs"));
+        assert!(context.contains("1 file changed"));
+    }
+
+    #[test]
+    fn pinned_coding_context_empty_when_nothing_known() {
+        assert!(build_pinned_context(&[], None, None).is_none());
+    }
+
+    #[test]
+    fn diagnostic_matcher_requires_line_anchored_or_test_phrases() {
+        assert!(looks_like_test_or_diagnostic(
+            "test result: FAILED. 0 passed; 1 failed"
+        ));
+        assert!(looks_like_test_or_diagnostic(
+            "error[E0308]: mismatched types"
+        ));
+        assert!(looks_like_test_or_diagnostic("  error: something broke"));
+        assert!(looks_like_test_or_diagnostic(
+            "thread 'main' panicked at src/lib.rs:3"
+        ));
+        // Prose mentioning the words mid-sentence is not a diagnostic.
+        assert!(!looks_like_test_or_diagnostic(
+            "the previous error: handling logic was removed; no tests were run"
+        ));
+        assert!(!looks_like_test_or_diagnostic("ls -la output, nothing failed here"));
+    }
+
+    #[test]
+    fn one_line_keeps_the_head_of_long_text() {
+        let long = format!("fix the parser {}", "x".repeat(2000));
+        let line = one_line(&long, 40);
+        assert!(line.starts_with("fix the parser"));
+        assert_eq!(line.chars().count(), 40);
     }
 
     #[test]
