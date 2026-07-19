@@ -86,11 +86,12 @@ impl ToolProvider for GraphToolProvider {
             ToolDefinition {
                 name: "index_graph".into(),
                 provider_kind: ToolProviderKind::Builtin,
-                description: "Index the current repository into a persistent SQLite knowledge graph \
+                description:
+                    "Index the current repository into a persistent SQLite knowledge graph \
                  (functions, classes, files, CALLS edges). Must be called before search_graph / \
                  trace_path / find_impact. Re-indexing is cheap and replaces the \
                  previous index. Returns a summary with counts."
-                    .into(),
+                        .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -128,10 +129,11 @@ impl ToolProvider for GraphToolProvider {
             ToolDefinition {
                 name: "trace_path".into(),
                 provider_kind: ToolProviderKind::Builtin,
-                description: "Traverse the CALLS graph from a named symbol. `outbound` = what does \
+                description:
+                    "Traverse the CALLS graph from a named symbol. `outbound` = what does \
                  X call; `inbound` = what calls X. BFS up to max_depth hops. Returns visited \
                  nodes with depth + file + line. Call `index_graph` first."
-                    .into(),
+                        .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {

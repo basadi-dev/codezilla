@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -9,6 +10,20 @@ use super::domain::{
     now_seconds, ConversationItem, ItemKind, MemoryMode, PersistedThread, ThreadFilter,
     ThreadMetadata, ThreadStatus, TurnMetadata, TurnStatus,
 };
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMemoryRecord {
+    pub memory_id: String,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub kind: String,
+    pub scope: String,
+    pub content: String,
+    pub importance: f32,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
 
 pub struct PersistenceManager {
     conn: Mutex<Connection>,
@@ -353,6 +368,10 @@ impl PersistenceManager {
                 }
             }
         }
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM conversation_memories", [])?;
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -372,6 +391,185 @@ impl PersistenceManager {
         let path = self.memories_root.join(format!("{thread_id}.json"));
         fs::write(path, serde_json::to_vec_pretty(payload)?)?;
         Ok(())
+    }
+
+    pub fn append_conversation_memory(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        kind: &str,
+        scope: &str,
+        content: &str,
+        importance: f32,
+    ) -> Result<String> {
+        let content = content.trim();
+        if content.is_empty() {
+            anyhow::bail!("empty_memory_content");
+        }
+        let memory_id = format!("mem_{}", uuid::Uuid::new_v4().simple());
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO conversation_memories (
+                    memory_id, thread_id, turn_id, kind, scope, content, importance, created_at, last_used_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
+                "#,
+                params![
+                    memory_id,
+                    thread_id,
+                    turn_id,
+                    kind,
+                    scope,
+                    content,
+                    importance,
+                    now_seconds(),
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(memory_id)
+    }
+
+    pub fn search_conversation_memories(
+        &self,
+        thread_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationMemoryRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let query_terms = memory_terms(query);
+        if query_terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut scored = self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT memory_id, thread_id, turn_id, kind, scope, content, importance, created_at, last_used_at
+                FROM conversation_memories
+                WHERE thread_id = ?1 OR scope = 'global'
+                ORDER BY created_at DESC
+                LIMIT 1000
+                "#,
+            )?;
+            let mut rows = stmt.query(params![thread_id])?;
+            let mut records = Vec::new();
+            while let Some(row) = rows.next()? {
+                let record = ConversationMemoryRecord {
+                    memory_id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    turn_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    scope: row.get(4)?,
+                    content: row.get(5)?,
+                    importance: row.get::<_, f64>(6)? as f32,
+                    created_at: row.get(7)?,
+                    last_used_at: row.get(8)?,
+                };
+                let content_terms = memory_terms(&record.content);
+                let overlap = query_terms.intersection(&content_terms).count() as f32;
+                if overlap > 0.0 {
+                    let recency = 1.0 / (1.0 + ((now_seconds() - record.created_at).max(0) as f32 / 86_400.0));
+                    let score = overlap + record.importance + recency;
+                    records.push((score, record));
+                }
+            }
+            Ok(records)
+        })?;
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        let records: Vec<_> = scored.into_iter().map(|(_, record)| record).collect();
+        self.touch_conversation_memories(records.iter().map(|r| r.memory_id.as_str()))?;
+        Ok(records)
+    }
+
+    pub fn list_conversation_memories(
+        &self,
+        thread_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationMemoryRecord>> {
+        let limit = limit.clamp(1, 200);
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT memory_id, thread_id, turn_id, kind, scope, content, importance, created_at, last_used_at
+                FROM conversation_memories
+                WHERE thread_id = ?1 OR scope = 'global'
+                ORDER BY created_at DESC
+                LIMIT ?2
+                "#,
+            )?;
+            let mut rows = stmt.query(params![thread_id, limit as i64])?;
+            let mut records = Vec::new();
+            while let Some(row) = rows.next()? {
+                records.push(ConversationMemoryRecord {
+                    memory_id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    turn_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    scope: row.get(4)?,
+                    content: row.get(5)?,
+                    importance: row.get::<_, f64>(6)? as f32,
+                    created_at: row.get(7)?,
+                    last_used_at: row.get(8)?,
+                });
+            }
+            Ok(records)
+        })
+    }
+
+    pub fn update_conversation_memory(
+        &self,
+        memory_id: &str,
+        thread_id: &str,
+        kind: Option<&str>,
+        scope: Option<&str>,
+        content: Option<&str>,
+        importance: Option<f32>,
+    ) -> Result<bool> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                r#"
+                UPDATE conversation_memories
+                SET kind = COALESCE(?2, kind),
+                    scope = COALESCE(?3, scope),
+                    content = COALESCE(?4, content),
+                    importance = COALESCE(?5, importance)
+                WHERE memory_id = ?1 AND (thread_id = ?6 OR scope = 'global')
+                "#,
+                params![memory_id, kind, scope, content, importance, thread_id],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    pub fn delete_conversation_memory(&self, memory_id: &str, thread_id: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "DELETE FROM conversation_memories WHERE memory_id = ?1 AND (thread_id = ?2 OR scope = 'global')",
+                params![memory_id, thread_id],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    fn touch_conversation_memories<'a>(&self, ids: impl Iterator<Item = &'a str>) -> Result<()> {
+        let ids: Vec<String> = ids.map(str::to_string).collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_conn(|conn| {
+            for id in ids {
+                conn.execute(
+                    "UPDATE conversation_memories SET last_used_at = ?2 WHERE memory_id = ?1",
+                    params![id, now_seconds()],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     #[allow(dead_code)]
@@ -467,6 +665,19 @@ impl PersistenceManager {
                 level TEXT NOT NULL,
                 message TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS conversation_memories (
+                memory_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                content TEXT NOT NULL,
+                importance REAL NOT NULL DEFAULT 0.5,
+                created_at INTEGER NOT NULL,
+                last_used_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversation_memories_thread ON conversation_memories(thread_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_conversation_memories_scope ON conversation_memories(scope);
             "#,
             )?;
             conn.execute(
@@ -554,6 +765,26 @@ impl PersistenceManager {
         f(&conn)
     }
 }
+
+fn memory_terms(text: &str) -> HashSet<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter_map(|term| {
+            let term = term.trim().to_ascii_lowercase();
+            if term.len() >= 3 && !MEMORY_STOP_WORDS.contains(&term.as_str()) {
+                Some(term)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+const MEMORY_STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "that", "this", "with", "you", "your", "are", "was", "were", "have",
+    "has", "had", "but", "not", "can", "could", "would", "should", "from", "about", "into", "when",
+    "where", "what", "how", "why", "then", "than", "them", "they", "there", "their", "use",
+    "using", "used", "need", "want", "like",
+];
 
 fn next_item_order(tx: &Transaction<'_>, thread_id: &str) -> Result<i64> {
     let next = tx.query_row(

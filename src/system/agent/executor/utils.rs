@@ -112,10 +112,7 @@ pub(crate) fn wants_verbose_repo_map(inputs: &[UserInput]) -> bool {
 ///
 /// Async because it snapshots git state via `tokio::process` (bounded by
 /// [`GIT_SNAPSHOT_TIMEOUT`]) so a slow repository never blocks a worker thread.
-pub(crate) async fn pinned_coding_context(
-    cwd: &str,
-    items: &[ConversationItem],
-) -> Option<String> {
+pub(crate) async fn pinned_coding_context(cwd: &str, items: &[ConversationItem]) -> Option<String> {
     let (git_status, git_diff_stat) = tokio::join!(
         run_git(cwd, &["status", "--short"], 4000),
         run_git(cwd, &["diff", "--stat"], 4000),
@@ -1629,7 +1626,9 @@ mod tests {
         assert!(!looks_like_test_or_diagnostic(
             "the previous error: handling logic was removed; no tests were run"
         ));
-        assert!(!looks_like_test_or_diagnostic("ls -la output, nothing failed here"));
+        assert!(!looks_like_test_or_diagnostic(
+            "ls -la output, nothing failed here"
+        ));
     }
 
     #[test]

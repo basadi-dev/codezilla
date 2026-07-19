@@ -20,9 +20,9 @@ use crate::llm::LlmClient;
 use super::agent::supervisor::{AgentSupervisor, SpawnAgentToolProviderReal};
 use super::agent::{
     ApprovalManager, BashToolProvider, EventBus, ExtensionManager, FileToolProvider,
-    GraphToolProvider, ImageToolProvider, ListDirToolProvider, ModelGateway, PatternMiner,
-    PermissionManager, RequestUserInputToolProvider, SandboxManager, SearchToolProvider,
-    ShellToolProvider, ToolOrchestrator, WebToolProvider,
+    GraphToolProvider, ImageToolProvider, ListDirToolProvider, MemoryToolProvider, ModelGateway,
+    PatternMiner, PermissionManager, RequestUserInputToolProvider, SandboxManager,
+    SearchToolProvider, ShellToolProvider, ToolOrchestrator, WebToolProvider,
 };
 use super::intel::RepoMap;
 // Agent types re-exported for callers outside runtime.rs
@@ -339,6 +339,7 @@ impl ConversationRuntime {
                 .with_checkpoint_store(checkpoint_store.clone()),
         ));
         tool_orchestrator.register_provider(Arc::new(SearchToolProvider));
+        tool_orchestrator.register_provider(Arc::new(MemoryToolProvider::new(persistence.clone())));
         tool_orchestrator.register_provider(Arc::new(ImageToolProvider));
         // NOTE: SpawnAgentToolProvider is registered *after* Self is constructed (late registration)
         // so it can hold a ConversationRuntime clone. See below.

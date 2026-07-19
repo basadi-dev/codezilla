@@ -32,6 +32,61 @@ impl TurnPhase {
     }
 }
 
+fn classify_memory_candidate(user_text: &str) -> (&'static str, f32) {
+    let lower = user_text.to_ascii_lowercase();
+    if lower.contains("prefer")
+        || lower.contains("i like")
+        || lower.contains("i usually")
+        || lower.contains("remember")
+    {
+        ("preference", 0.9)
+    } else if lower.contains("decision")
+        || lower.contains("we decided")
+        || lower.contains("let's use")
+        || lower.contains("use ")
+    {
+        ("decision", 0.75)
+    } else if lower.contains("project")
+        || lower.contains("repo")
+        || lower.contains("database")
+        || lower.contains("model")
+        || lower.contains("agent")
+    {
+        ("project_context", 0.65)
+    } else {
+        ("episodic", 0.45)
+    }
+}
+
+fn compact_memory_text(text: &str, max_chars: usize) -> String {
+    let mut compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() > max_chars {
+        let keep = max_chars.saturating_sub(1);
+        compact = compact.chars().take(keep).collect();
+        compact.push('…');
+    }
+    compact
+}
+
+fn should_auto_remember(user_text: &str, kind: &str, importance: f32) -> bool {
+    if importance < 0.6 || kind == "episodic" {
+        return false;
+    }
+    let lower = user_text.to_ascii_lowercase();
+    if lower.contains("forget ")
+        || lower.contains("don't remember")
+        || lower.contains("do not remember")
+        || lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("api key")
+        || lower.contains("token")
+        || lower.contains("ssn")
+    {
+        return false;
+    }
+    true
+}
+
 use self::context::TurnContext;
 use self::utils::{
     already_read_directive, classify_turn_intent, derive_thread_title, extract_plan_from_response,
@@ -88,6 +143,21 @@ impl TurnExecutor {
             self.append_user_input(&params.thread_id, &turn_id, &input)
                 .await?;
         }
+
+        let memory_context = match self
+            .relevant_memory_context(&params.thread_id, &params.input)
+            .await
+        {
+            Ok(memory_context) => memory_context,
+            Err(e) => {
+                tracing::warn!(
+                    thread_id = %params.thread_id,
+                    error = %e,
+                    "memory: failed to retrieve context for turn"
+                );
+                None
+            }
+        };
 
         let turn_intent = classify_turn_intent(&params.input);
         let verification_requested = user_requested_verification(&params.input);
@@ -169,6 +239,7 @@ impl TurnExecutor {
                 repo_map_text.as_deref(),
                 turn_intent,
                 &[],
+                memory_context.as_deref(),
             )
             .await?;
         {
@@ -402,6 +473,7 @@ impl TurnExecutor {
                     repo_map_text.as_deref(),
                     turn_intent,
                     &already_read,
+                    memory_context.as_deref(),
                 )
                 .await?
             };
@@ -1396,6 +1468,16 @@ impl TurnExecutor {
                 .update_thread(&thread.metadata)?;
             metadata
         };
+
+        if let Err(e) = self.remember_completed_turn(thread_id, turn_id).await {
+            tracing::warn!(
+                thread_id,
+                turn_id,
+                error = %e,
+                "memory: failed to persist completed turn"
+            );
+        }
+
         self.runtime
             .publish_event(
                 crate::system::domain::RuntimeEventKind::TurnCompleted,
@@ -1460,6 +1542,115 @@ impl TurnExecutor {
         self.maybe_auto_compact(thread_id).await;
 
         Ok(())
+    }
+
+    async fn relevant_memory_context(
+        &self,
+        thread_id: &str,
+        input: &[UserInput],
+    ) -> Result<Option<String>> {
+        if !self.thread_memory_enabled(thread_id).await? {
+            return Ok(None);
+        }
+        let query = input
+            .iter()
+            .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if query.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let hits = self
+            .runtime
+            .inner
+            .persistence_manager
+            .search_conversation_memories(thread_id, &query, 6)?;
+        if hits.is_empty() {
+            return Ok(None);
+        }
+
+        let mut lines = Vec::with_capacity(hits.len());
+        for hit in hits {
+            lines.push(format!(
+                "- [{}:{} importance={:.2} source_thread={} source_turn={} last_used={}] {}",
+                hit.scope,
+                hit.kind,
+                hit.importance,
+                hit.thread_id,
+                hit.turn_id,
+                hit.last_used_at
+                    .map(|ts| ts.to_string())
+                    .unwrap_or_else(|| "never".into()),
+                compact_memory_text(&hit.content, 360)
+            ));
+        }
+        Ok(Some(lines.join("\n")))
+    }
+
+    async fn remember_completed_turn(&self, thread_id: &str, turn_id: &str) -> Result<()> {
+        if !self.thread_memory_enabled(thread_id).await? {
+            return Ok(());
+        }
+        let persisted = self
+            .runtime
+            .inner
+            .persistence_manager
+            .read_thread(thread_id)?;
+        let mut user_parts = Vec::new();
+        let mut assistant_parts = Vec::new();
+
+        for item in persisted.items.iter().filter(|i| i.turn_id == turn_id) {
+            match item.kind {
+                ItemKind::UserMessage => {
+                    if let Some(text) = item.payload.get(KEY_TEXT).and_then(|v| v.as_str()) {
+                        user_parts.push(text.trim().to_string());
+                    }
+                }
+                ItemKind::AgentMessage => {
+                    if let Some(text) = item.payload.get(KEY_TEXT).and_then(|v| v.as_str()) {
+                        assistant_parts.push(text.trim().to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let user_text = user_parts.join("\n").trim().to_string();
+        if user_text.is_empty() {
+            return Ok(());
+        }
+        let assistant_text = assistant_parts.join("\n").trim().to_string();
+        let content = if assistant_text.is_empty() {
+            format!("User said: {}", compact_memory_text(&user_text, 1600))
+        } else {
+            format!(
+                "User said: {}\nAssistant answered: {}",
+                compact_memory_text(&user_text, 1000),
+                compact_memory_text(&assistant_text, 1000)
+            )
+        };
+
+        let (kind, importance) = classify_memory_candidate(&user_text);
+        if !should_auto_remember(&user_text, kind, importance) {
+            return Ok(());
+        }
+        self.runtime
+            .inner
+            .persistence_manager
+            .append_conversation_memory(thread_id, turn_id, kind, "thread", &content, importance)?;
+        Ok(())
+    }
+
+    async fn thread_memory_enabled(&self, thread_id: &str) -> Result<bool> {
+        let Some(thread) = self.runtime.load_thread(thread_id).await? else {
+            return Ok(false);
+        };
+        let guard = thread.lock().await;
+        Ok(matches!(
+            guard.metadata.memory_mode,
+            crate::system::domain::MemoryMode::Enabled
+        ))
     }
 
     /// Check context usage and trigger compaction in the background if over threshold.
@@ -1757,6 +1948,7 @@ impl TurnExecutor {
         repo_map_text: Option<&str>,
         intent: TurnIntent,
         already_read: &[String],
+        memory_context: Option<&str>,
     ) -> Result<Vec<String>> {
         let mut instructions = vec![self.runtime.inner.effective_config.system_prompt.clone()];
         if let Some(instruction) = thinking_instruction(reasoning_effort) {
@@ -1767,6 +1959,16 @@ impl TurnExecutor {
         }
         if let Some(directive) = already_read_directive(already_read) {
             instructions.push(directive);
+        }
+        if let Some(memory_context) = memory_context {
+            if !memory_context.trim().is_empty() {
+                instructions.push(format!(
+                    "Relevant durable conversation memory retrieved for this turn:\n\
+                     {memory_context}\n\n\
+                     Use these memories only when they are relevant to the current task. \
+                     Treat them as context, not as guaranteed facts if the current user message contradicts them."
+                ));
+            }
         }
         let skills = self.runtime.inner.extension_manager.list_skills(cwd).await;
         for skill in skills {

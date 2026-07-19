@@ -429,7 +429,6 @@ impl GraphStore {
         let visited = bfs_calls(&conn, &seeds, true, max_depth)?;
         materialize_nodes(&conn, &visited, true)
     }
-
 }
 
 // ─── Query helpers ────────────────────────────────────────────────────────────
@@ -458,9 +457,7 @@ fn bfs_calls(
             let rows = stmt.query_map(params![node], |r| r.get::<_, i64>(0))?;
             for row in rows {
                 let neighbour = row?;
-                if let std::collections::hash_map::Entry::Vacant(slot) =
-                    visited.entry(neighbour)
-                {
+                if let std::collections::hash_map::Entry::Vacant(slot) = visited.entry(neighbour) {
                     slot.insert(depth);
                     next.push(neighbour);
                 }
@@ -545,10 +542,10 @@ fn scan_call_sites(content: &str) -> Vec<(String, usize)> {
     });
 
     const KEYWORDS: &[&str] = &[
-        "if", "else", "for", "while", "switch", "match", "return", "fn", "def",
-        "class", "struct", "enum", "trait", "impl", "type", "let", "const",
-        "var", "pub", "async", "await", "new", "delete", "sizeof", "typeof",
-        "function", "import", "export", "from", "with", "catch", "try",
+        "if", "else", "for", "while", "switch", "match", "return", "fn", "def", "class", "struct",
+        "enum", "trait", "impl", "type", "let", "const", "var", "pub", "async", "await", "new",
+        "delete", "sizeof", "typeof", "function", "import", "export", "from", "with", "catch",
+        "try",
     ];
     // Definition keywords whose presence immediately before the identifier
     // means this is a *definition*, not a call site.
@@ -681,7 +678,10 @@ mod tests {
         write_repo(
             tmp.path(),
             &[
-                ("a.rs", "pub fn helper() {}\npub fn local_caller() {\n    helper();\n}\n"),
+                (
+                    "a.rs",
+                    "pub fn helper() {}\npub fn local_caller() {\n    helper();\n}\n",
+                ),
                 ("z.rs", "pub fn helper() {}\n"),
             ],
         );

@@ -5,6 +5,8 @@ pub mod executor;
 pub mod extensions;
 pub mod graph_tools;
 pub mod memory;
+pub mod memory_ops;
+pub mod memory_tools;
 pub mod middleware;
 pub mod model_gateway;
 pub mod pattern_miner;
@@ -36,6 +38,10 @@ pub use memory::{
     EmbeddingProvider, MemoryEntry, MemoryHit, MemoryKind, MemoryStats, SemanticMemoryStore,
     SqliteVecMemoryStore,
 };
+#[allow(unused_imports)]
+pub use memory_ops::{apply_memory_plan, AppliedMemoryPlan, MemoryControllerPlan};
+#[allow(unused_imports)]
+pub use memory_tools::MemoryToolProvider;
 #[allow(unused_imports)]
 pub use model_gateway::{ModelDescription, ModelGateway, ModelRequest, ModelStreamEvent};
 #[allow(unused_imports)]
