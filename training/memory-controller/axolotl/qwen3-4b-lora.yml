@@ -1,0 +1,55 @@
+# Axolotl config template for the Codezilla memory controller.
+#
+# Adjust `base_model` to a locally accessible Hugging Face model that matches
+# the Ollama model you plan to serve. This template is intentionally small and
+# conservative; expand the dataset before a serious run.
+
+base_model: Qwen/Qwen3-4B
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+load_in_4bit: true
+strict: false
+
+datasets:
+  - path: training/memory-controller/examples.jsonl
+    type: chat_template
+  - path: training/memory-controller/synthetic.jsonl
+    type: chat_template
+
+dataset_prepared_path: training/memory-controller/.prepared
+output_dir: training/memory-controller/out/qwen3-4b-memory-lora
+
+sequence_len: 2048
+sample_packing: false
+pad_to_sequence_len: false
+
+adapter: lora
+lora_model_dir:
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_linear: true
+
+gradient_accumulation_steps: 4
+micro_batch_size: 1
+num_epochs: 3
+optimizer: adamw_bnb_8bit
+lr_scheduler: cosine
+learning_rate: 0.0002
+warmup_steps: 10
+
+bf16: auto
+fp16:
+tf32: true
+
+logging_steps: 10
+save_steps: 100
+eval_steps:
+val_set_size: 0.05
+
+special_tokens:
+  pad_token: "<|endoftext|>"
+
+train_on_inputs: false
+group_by_length: false

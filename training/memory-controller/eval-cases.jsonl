@@ -1,0 +1,8 @@
+{"name":"store_preference","input":"I prefer concise TypeScript examples.","expected":{"store":[{"kind":"preference","scope":"global","content_contains":["concise","TypeScript"],"min_importance":0.7}],"search_count":0}}
+{"name":"search_before_recommendation","input":"How should I deploy this service?","expected":{"search_contains":["deploy","service"],"store_count":0}}
+{"name":"ignore_chatter","input":"nice, thanks","expected":{"search_count":0,"store_count":0,"update_count":0,"forget_count":0}}
+{"name":"project_scoped_override","input":"For this repo use SQLite, not Postgres.","expected":{"store":[{"kind":"project_context","scope":"thread","content_contains":["SQLite","Postgres"],"min_importance":0.7}]}}
+{"name":"forget_request_requires_search","input":"Forget my old preference for MongoDB.","expected":{"search_contains":["MongoDB"],"store_count":0}}
+{"name":"update_existing_memory","input":"Update mem_project_lang: for this project use Rust, not Go.","expected":{"search_contains":["Rust","Go"],"store_count":0,"update":[{"memoryId":"mem_project_lang","kind":"project_context","scope":"thread","content_contains":["Rust","Go"]}]}}
+{"name":"forget_exact_memory","input":"Forget memory mem_mongodb_pref; that MongoDB preference is stale.","expected":{"search_contains":["MongoDB"],"store_count":0,"forget":[{"memoryId":"mem_mongodb_pref"}]}}
+{"name":"project_override_beats_global","input":"For this repo use SQLite, even though I usually prefer PostgreSQL.","expected":{"search_contains":["preference","project"],"store":[{"kind":"project_context","scope":"thread","content_contains":["SQLite","PostgreSQL"],"min_importance":0.7}]}}
