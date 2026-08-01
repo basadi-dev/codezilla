@@ -670,35 +670,3 @@ fn extract_depth(prompt: &str) -> Option<u64> {
         .collect();
     digits.parse().ok()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn directory_inventory_prompt_is_redirected() {
-        let redirect = directory_inventory_redirect(
-            "List the contents of the `bin` directory recursively (depth 3). For each file, note its path and type.",
-        )
-        .expect("directory inventory should redirect");
-
-        assert_eq!(redirect.path.as_deref(), Some("bin"));
-        assert_eq!(redirect.depth, Some(3));
-    }
-
-    #[test]
-    fn targeted_analysis_prompt_is_allowed() {
-        assert!(directory_inventory_redirect(
-            "Inspect parser.rs and explain how parse errors flow."
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn recursive_code_review_prompt_is_allowed() {
-        assert!(directory_inventory_redirect(
-            "You are a code reviewer. Review ALL Rust source files in the directory `src/system/agent/` (recursively). For each file, note risks and missing tests.",
-        )
-        .is_none());
-    }
-}

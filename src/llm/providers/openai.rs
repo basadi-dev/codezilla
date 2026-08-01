@@ -161,3 +161,53 @@ pub async fn stream(
 
     Ok(rx)
 }
+
+use crate::llm::{CompletionRequest, LlmProvider, ProviderCaps};
+
+pub struct OpenAiProvider {
+    pub http: Client,
+    pub cfg: Config,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for OpenAiProvider {
+    fn id(&self) -> &str {
+        "openai"
+    }
+
+    fn capabilities(&self) -> ProviderCaps {
+        ProviderCaps {
+            streaming: true,
+            reasoning_effort: true,
+            vision: true,
+        }
+    }
+
+    async fn complete(&self, req: CompletionRequest<'_>) -> Result<LlmResponse> {
+        complete(
+            &self.http,
+            &self.cfg,
+            req.messages,
+            req.tools,
+            req.model,
+            req.temperature,
+            req.reasoning_effort,
+            req.max_tokens,
+        )
+        .await
+    }
+
+    async fn stream(&self, req: CompletionRequest<'_>) -> Result<mpsc::Receiver<StreamChunk>> {
+        stream(
+            &self.http,
+            &self.cfg,
+            req.messages,
+            req.tools,
+            req.model,
+            req.temperature,
+            req.reasoning_effort,
+            req.max_tokens,
+        )
+        .await
+    }
+}

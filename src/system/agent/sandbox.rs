@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -24,12 +24,11 @@ impl SandboxManager {
         if argv.is_empty() {
             bail!("tool_execution_failed: command argv cannot be empty");
         }
-        self.ensure_command_allowed(argv, sandbox)?;
-        self.ensure_writable_root(cwd, sandbox, false)?;
+        let command_argv = sandboxed_command(argv, sandbox)?;
 
-        let mut command = Command::new(&argv[0]);
-        if argv.len() > 1 {
-            command.args(&argv[1..]);
+        let mut command = Command::new(&command_argv[0]);
+        if command_argv.len() > 1 {
+            command.args(&command_argv[1..]);
         }
         command.current_dir(cwd);
         command.stdout(Stdio::piped());
@@ -124,31 +123,6 @@ impl SandboxManager {
         Ok(())
     }
 
-    fn ensure_command_allowed(&self, argv: &[String], sandbox: &SandboxRequest) -> Result<()> {
-        match sandbox.sandbox_mode.unwrap_or(SandboxMode::WorkspaceWrite) {
-            SandboxMode::DangerFullAccess | SandboxMode::External => Ok(()),
-            SandboxMode::ReadOnly | SandboxMode::WorkspaceWrite => {
-                let joined = argv.join(" ").to_lowercase();
-                if !sandbox.network_enabled
-                    && [
-                        "curl ",
-                        "wget ",
-                        "ssh ",
-                        "scp ",
-                        "git clone",
-                        "npm install",
-                        "cargo install",
-                    ]
-                    .iter()
-                    .any(|needle| joined.contains(needle))
-                {
-                    bail!("network_blocked: command appears to require network access");
-                }
-                Ok(())
-            }
-        }
-    }
-
     fn ensure_path_allowed(&self, path: &str, sandbox: &SandboxRequest, write: bool) -> Result<()> {
         match sandbox.sandbox_mode.unwrap_or(SandboxMode::WorkspaceWrite) {
             SandboxMode::DangerFullAccess | SandboxMode::External => Ok(()),
@@ -168,13 +142,11 @@ impl SandboxManager {
         if !write {
             return Ok(());
         }
-        let path = Path::new(path)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(path));
+        let path = resolve_path(path)?;
         let allowed = sandbox
             .writable_roots
             .iter()
-            .map(PathBuf::from)
+            .filter_map(|root| resolve_path(root).ok())
             .any(|root| path.starts_with(root));
         if allowed {
             Ok(())
@@ -182,4 +154,131 @@ impl SandboxManager {
             bail!("path_not_writable: {path:?} is outside writable roots");
         }
     }
+}
+
+/// Wrap a command with an OS-enforced sandbox for profiles that promise
+/// restrictions. Unsupported platforms fail closed instead of silently
+/// treating a policy label as a security boundary.
+fn sandboxed_command(argv: &[String], sandbox: &SandboxRequest) -> Result<Vec<String>> {
+    match sandbox.sandbox_mode.unwrap_or(SandboxMode::WorkspaceWrite) {
+        SandboxMode::DangerFullAccess | SandboxMode::External => Ok(argv.to_vec()),
+        SandboxMode::ReadOnly | SandboxMode::WorkspaceWrite => restricted_command(argv, sandbox),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn restricted_command(argv: &[String], sandbox: &SandboxRequest) -> Result<Vec<String>> {
+    const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+    if !Path::new(SANDBOX_EXEC).is_file() {
+        bail!("sandbox_unavailable: macOS sandbox-exec is required for restricted profiles");
+    }
+
+    let mut profile = vec![
+        "(version 1)".to_string(),
+        "(deny default)".to_string(),
+        // Command tools need to execute binaries and read their libraries and
+        // project inputs. Writes and network remain opt-in below.
+        "(allow process*)".to_string(),
+        "(allow file-read*)".to_string(),
+        "(allow sysctl-read)".to_string(),
+    ];
+
+    if matches!(sandbox.sandbox_mode, Some(SandboxMode::WorkspaceWrite)) {
+        for root in &sandbox.writable_roots {
+            let root = resolve_path(root)?;
+            profile.push(format!(
+                "(allow file-write* (subpath \"{}\"))",
+                escape_sandbox_string(&root.to_string_lossy())
+            ));
+        }
+    }
+
+    // The macOS profile language cannot safely express a hostname allowlist
+    // for arbitrary child processes. When a list is configured, deny command
+    // networking; web_fetch/web_search enforce that list at the URL layer.
+    if sandbox.network_enabled && sandbox.allowed_domains.is_empty() {
+        profile.push("(allow network*)".to_string());
+    }
+
+    let mut wrapped = vec![SANDBOX_EXEC.into(), "-p".into(), profile.join("\n")];
+    wrapped.extend(argv.iter().cloned());
+    Ok(wrapped)
+}
+
+#[cfg(target_os = "linux")]
+fn restricted_command(argv: &[String], sandbox: &SandboxRequest) -> Result<Vec<String>> {
+    let bwrap = std::env::var("CODEZILLA_BWRAP_PATH").unwrap_or_else(|_| "bwrap".into());
+    let mut wrapped = vec![
+        bwrap,
+        "--die-with-parent".into(),
+        "--ro-bind".into(),
+        "/".into(),
+        "/".into(),
+    ];
+    if !sandbox.network_enabled || !sandbox.allowed_domains.is_empty() {
+        wrapped.push("--unshare-net".into());
+    }
+    if matches!(sandbox.sandbox_mode, Some(SandboxMode::WorkspaceWrite)) {
+        for root in &sandbox.writable_roots {
+            let root = resolve_path(root)?;
+            let root = root.to_string_lossy().into_owned();
+            wrapped.extend(["--bind".into(), root.clone(), root]);
+        }
+    }
+    wrapped.push("--".into());
+    wrapped.extend(argv.iter().cloned());
+    Ok(wrapped)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn restricted_command(_argv: &[String], _sandbox: &SandboxRequest) -> Result<Vec<String>> {
+    bail!("sandbox_unavailable: restricted profiles require a supported OS sandbox")
+}
+
+#[cfg(target_os = "macos")]
+fn escape_sandbox_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Resolve the longest existing prefix before comparing a path with its
+/// allowed roots. This catches `..` traversal and symlinks in a parent of a
+/// new target, while still supporting files that have not been created yet.
+fn resolve_path(path: &str) -> Result<PathBuf> {
+    let input = Path::new(path);
+    let absolute = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(input)
+    };
+
+    let mut existing = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("invalid path: {path}"))?;
+        suffix.push(name.to_os_string());
+        existing = existing
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invalid path: {path}"))?;
+    }
+
+    let mut resolved = existing.canonicalize()?;
+    for component in suffix.iter().rev() {
+        resolved.push(component);
+    }
+
+    // Existing components may include a lexical `.` or `..` sequence on a
+    // platform where it was not normalised by canonicalize above.
+    let mut normalized = PathBuf::new();
+    for component in resolved.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
 }

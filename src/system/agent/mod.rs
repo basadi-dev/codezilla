@@ -17,11 +17,7 @@ pub mod speculative;
 pub mod state;
 pub mod strategy;
 pub mod supervisor;
-pub mod tool_wrappers;
 pub mod tools;
-
-#[cfg(test)]
-pub mod fake_model;
 
 #[allow(unused_imports)]
 pub use approval::{ApprovalManager, AutoReviewer};
@@ -52,8 +48,6 @@ pub use permission::PermissionManager;
 pub use sandbox::SandboxManager;
 #[allow(unused_imports)]
 pub use state::{BranchHandle, InMemoryStateManager, StateManager, StateSnapshot};
-#[allow(unused_imports)]
-pub use tool_wrappers::{CachingToolProvider, LoggingToolProvider, RateLimitToolProvider};
 #[allow(unused_imports)]
 pub use tools::{
     BashToolProvider, FileToolProvider, ImageToolProvider, ListDirToolProvider,

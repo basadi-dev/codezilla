@@ -1,4 +1,4 @@
-use anyhow::{bail, Context as AnyhowContext, Result};
+use anyhow::{Context as AnyhowContext, Result};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,17 +12,8 @@ use crate::system::config::LlmConfig;
 
 /// Unified LLM client that dispatches to provider implementations.
 ///
-/// Supports two dispatch modes:
-/// - **Registry-based** (preferred): Providers implement [`LlmProvider`] and are
-///   registered via `register()`. Lookup is O(1) by provider ID.
-/// - **Fallback match**: For providers not yet migrated to the trait, the legacy
-///   `match provider_id` dispatch is used.
-///
-/// This hybrid approach allows incremental migration — new providers only need
-/// the trait, and existing ones continue to work without changes.
+/// Providers are registered by ID and dispatched through a single registry.
 pub struct UnifiedClient {
-    pub http: Client,
-    pub cfg: LlmConfig,
     /// Registry of trait-based providers, keyed by provider ID.
     providers: HashMap<String, Arc<dyn LlmProvider>>,
 }
@@ -43,12 +34,28 @@ impl UnifiedClient {
                 cfg: cfg.clone(),
             }),
         );
+        let openai = Arc::new(openai::OpenAiProvider {
+            http: http.clone(),
+            cfg: cfg.clone(),
+        });
+        providers.insert("openai".into(), openai.clone());
+        providers.insert("openai-compat".into(), openai);
+        providers.insert(
+            "anthropic".into(),
+            Arc::new(anthropic::AnthropicProvider {
+                http: http.clone(),
+                cfg: cfg.clone(),
+            }),
+        );
+        providers.insert(
+            "gemini".into(),
+            Arc::new(gemini::GeminiProvider {
+                http: http.clone(),
+                cfg: cfg.clone(),
+            }),
+        );
 
-        Ok(Self {
-            http,
-            cfg,
-            providers,
-        })
+        Ok(Self { providers })
     }
 
     /// Register a provider for trait-based dispatch.
@@ -71,75 +78,20 @@ impl LlmClient for UnifiedClient {
         reasoning_effort: Option<&str>,
         max_tokens: usize,
     ) -> Result<LlmResponse> {
-        // Try registry-based dispatch first.
-        if let Some(provider) = self.providers.get(provider_id) {
-            return provider
-                .complete(CompletionRequest {
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    reasoning_effort,
-                    max_tokens,
-                })
-                .await;
-        }
-
-        // Fallback: legacy match dispatch for providers not yet migrated.
-        match provider_id {
-            "ollama" => {
-                ollama::complete(
-                    &self.http,
-                    &self.cfg,
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    max_tokens,
-                    reasoning_effort,
-                )
-                .await
-            }
-            "openai" | "openai-compat" => {
-                openai::complete(
-                    &self.http,
-                    &self.cfg,
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    reasoning_effort,
-                    max_tokens,
-                )
-                .await
-            }
-            "anthropic" => {
-                anthropic::complete(
-                    &self.http,
-                    &self.cfg,
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    reasoning_effort,
-                    max_tokens,
-                )
-                .await
-            }
-            "gemini" => {
-                gemini::complete(
-                    &self.http,
-                    &self.cfg,
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    max_tokens,
-                )
-                .await
-            }
-            p => bail!("unknown LLM provider: {p}"),
-        }
+        let provider = self
+            .providers
+            .get(provider_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown LLM provider: {provider_id}"))?;
+        provider
+            .complete(CompletionRequest {
+                messages,
+                tools,
+                model,
+                temperature,
+                reasoning_effort,
+                max_tokens,
+            })
+            .await
     }
 
     async fn stream(
@@ -152,74 +104,19 @@ impl LlmClient for UnifiedClient {
         reasoning_effort: Option<&str>,
         max_tokens: usize,
     ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
-        // Try registry-based dispatch first.
-        if let Some(provider) = self.providers.get(provider_id) {
-            return provider
-                .stream(CompletionRequest {
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    reasoning_effort,
-                    max_tokens,
-                })
-                .await;
-        }
-
-        // Fallback: legacy match dispatch.
-        match provider_id {
-            "ollama" => {
-                ollama::stream(
-                    &self.http,
-                    &self.cfg,
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    max_tokens,
-                    reasoning_effort,
-                )
-                .await
-            }
-            "openai" | "openai-compat" => {
-                openai::stream(
-                    &self.http,
-                    &self.cfg,
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    reasoning_effort,
-                    max_tokens,
-                )
-                .await
-            }
-            "anthropic" => {
-                anthropic::stream(
-                    &self.http,
-                    &self.cfg,
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    reasoning_effort,
-                    max_tokens,
-                )
-                .await
-            }
-            "gemini" => {
-                gemini::stream(
-                    &self.http,
-                    &self.cfg,
-                    messages,
-                    tools,
-                    model,
-                    temperature,
-                    max_tokens,
-                )
-                .await
-            }
-            p => bail!("unknown LLM provider: {p}"),
-        }
+        let provider = self
+            .providers
+            .get(provider_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown LLM provider: {provider_id}"))?;
+        provider
+            .stream(CompletionRequest {
+                messages,
+                tools,
+                model,
+                temperature,
+                reasoning_effort,
+                max_tokens,
+            })
+            .await
     }
 }

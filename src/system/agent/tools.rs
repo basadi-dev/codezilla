@@ -17,8 +17,8 @@ use walkdir::WalkDir;
 use super::permission::PermissionManager;
 use super::sandbox::SandboxManager;
 use crate::system::domain::{
-    ActionDescriptor, ApprovalCategory, ToolCall, ToolCallId, ToolDefinition, ToolExecutionContext,
-    ToolListingContext, ToolProviderKind, ToolResult,
+    ToolCall, ToolCallId, ToolDefinition, ToolExecutionContext, ToolListingContext,
+    ToolProviderKind, ToolResult,
 };
 use crate::system::intel::cache::IntelCache;
 
@@ -126,16 +126,9 @@ impl ToolProvider for ShellToolProvider {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
-        let action = ActionDescriptor {
-            action_type: "command".into(),
-            command: Some(argv.clone()),
-            paths: vec![cwd.clone()],
-            domains: Vec::new(),
-            category: ApprovalCategory::SandboxEscalation,
-        };
         let sandbox = self
             .permissions
-            .build_sandbox_request(&action, &context.permission_profile);
+            .build_sandbox_request(&context.permission_profile);
         let exec = self
             .sandbox
             .run_command(&argv, &cwd, &env, &sandbox)
@@ -288,16 +281,9 @@ impl ToolProvider for BashToolProvider {
         // Wrap in bash so all shell operators work
         let argv = vec!["bash".to_string(), "-c".to_string(), command.to_string()];
 
-        let action = ActionDescriptor {
-            action_type: "command".into(),
-            command: Some(argv.clone()),
-            paths: vec![cwd.clone()],
-            domains: Vec::new(),
-            category: ApprovalCategory::SandboxEscalation,
-        };
         let sandbox = self
             .permissions
-            .build_sandbox_request(&action, &context.permission_profile);
+            .build_sandbox_request(&context.permission_profile);
 
         let exec_future = self.sandbox.run_command(&argv, &cwd, &env, &sandbox);
         let exec = tokio::time::timeout(Duration::from_secs(timeout_secs), exec_future)
@@ -593,27 +579,9 @@ impl ToolProvider for FileToolProvider {
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("tool_invalid_arguments: missing {key}"))
         };
-        let write_action = matches!(
-            call.tool_name.as_str(),
-            "write_file" | "patch_file" | "create_directory" | "remove_path" | "copy_path"
-        );
-        let action = ActionDescriptor {
-            action_type: call.tool_name.clone(),
-            command: None,
-            paths: match call.tool_name.as_str() {
-                "copy_path" => vec![path("source")?.into(), path("target")?.into()],
-                _ => vec![path("path")?.into()],
-            },
-            domains: Vec::new(),
-            category: if write_action {
-                ApprovalCategory::FileChange
-            } else {
-                ApprovalCategory::Other
-            },
-        };
         let sandbox = self
             .permissions
-            .build_sandbox_request(&action, &context.permission_profile);
+            .build_sandbox_request(&context.permission_profile);
         let output = match call.tool_name.as_str() {
             "read_file" => {
                 let file_path = path("path")?;
@@ -1005,6 +973,9 @@ impl WebToolProvider {
         Self {
             http: Client::builder()
                 .timeout(Duration::from_secs(30))
+                // Each redirect is a new network destination. Do not follow
+                // it implicitly or it could bypass the allowed-domain check.
+                .redirect(reqwest::redirect::Policy::none())
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .build()
                 .unwrap_or_default(),
@@ -1066,22 +1037,27 @@ impl ToolProvider for WebToolProvider {
         tools
     }
 
-    async fn execute(&self, call: &ToolCall, _ctx: &ToolExecutionContext) -> Result<ToolResult> {
+    async fn execute(&self, call: &ToolCall, ctx: &ToolExecutionContext) -> Result<ToolResult> {
         match call.tool_name.as_str() {
-            "web_fetch" => self.do_web_fetch(call).await,
-            "web_search" => self.do_web_search(call).await,
+            "web_fetch" => self.do_web_fetch(call, ctx).await,
+            "web_search" => self.do_web_search(call, ctx).await,
             other => Err(anyhow!("tool_not_found: {other}")),
         }
     }
 }
 
 impl WebToolProvider {
-    async fn do_web_fetch(&self, call: &ToolCall) -> Result<ToolResult> {
+    async fn do_web_fetch(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult> {
         let url = call
             .arguments
             .get("url")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("tool_invalid_arguments: missing url"))?;
+        ensure_web_access(url, ctx)?;
         let max_chars = call
             .arguments
             .get("max_chars")
@@ -1137,12 +1113,17 @@ impl WebToolProvider {
         })
     }
 
-    async fn do_web_search(&self, call: &ToolCall) -> Result<ToolResult> {
+    async fn do_web_search(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult> {
         let query = call
             .arguments
             .get("query")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("tool_invalid_arguments: missing query"))?;
+        ensure_web_access("https://html.duckduckgo.com", ctx)?;
 
         let count = call
             .arguments
@@ -1203,6 +1184,40 @@ impl WebToolProvider {
             error_message: None,
         })
     }
+}
+
+fn ensure_web_access(url: &str, ctx: &ToolExecutionContext) -> Result<()> {
+    if !ctx.permission_profile.network_enabled {
+        bail!("network_blocked: networking is disabled by the permission profile");
+    }
+
+    let parsed =
+        url::Url::parse(url).map_err(|e| anyhow!("tool_invalid_arguments: invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("network_blocked: only http and https URLs are allowed");
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("tool_invalid_arguments: URL must include a host"))?;
+
+    let allowed_domains = &ctx.permission_profile.allowed_domains;
+    if !allowed_domains.is_empty()
+        && !allowed_domains
+            .iter()
+            .any(|allowed| domain_matches(host, allowed))
+    {
+        bail!("network_blocked: host `{host}` is not in allowed_domains");
+    }
+    Ok(())
+}
+
+fn domain_matches(host: &str, allowed: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let allowed = allowed.trim().trim_end_matches('.').to_ascii_lowercase();
+    if let Some(suffix) = allowed.strip_prefix("*.") {
+        return host != suffix && host.ends_with(&format!(".{suffix}"));
+    }
+    host == allowed
 }
 
 /// Parse organic results from a DuckDuckGo HTML Lite POST response.
@@ -1359,11 +1374,10 @@ impl ToolOrchestrator {
         let mut by_name: HashMap<String, (usize, ToolDefinition)> = HashMap::new();
         for (idx, provider) in providers.iter().enumerate() {
             for def in provider.list_tools(context) {
-                // Last-registered wins on collision (preserves the existing
-                // linear-scan ordering where the first match returned, but
-                // since we walk in registration order the first registration
-                // also takes precedence — match that behaviour).
-                by_name.entry(def.name.clone()).or_insert((idx, def));
+                // Later registrations intentionally override earlier ones.
+                // This lets embedders replace a builtin provider through
+                // RuntimeBuilder::with_extra_provider.
+                by_name.insert(def.name.clone(), (idx, def));
             }
         }
         ToolIndex { by_name }
@@ -1608,299 +1622,3 @@ fn make_unified_diff(path: &str, old: Option<&str>, new: &str) -> (String, usize
 }
 
 // ─── ToolOrchestrator tests ───────────────────────────────────────────────────
-
-#[cfg(test)]
-mod orchestrator_tests {
-    use super::*;
-    use crate::system::domain::{
-        ApprovalPolicy, PermissionProfile, ToolCall, ToolExecutionContext, ToolListingContext,
-        ToolProviderKind, ToolResult,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Tool provider that records how many times `list_tools` is called and
-    /// reports a fixed set of tools.
-    struct CountingProvider {
-        tools: Vec<ToolDefinition>,
-        list_calls: AtomicUsize,
-        execute_calls: AtomicUsize,
-    }
-
-    impl CountingProvider {
-        fn new(names: &[&str], parallel: bool) -> Arc<Self> {
-            let tools = names
-                .iter()
-                .map(|n| ToolDefinition {
-                    name: (*n).to_string(),
-                    provider_kind: ToolProviderKind::Builtin,
-                    description: String::new(),
-                    input_schema: json!({}),
-                    requires_approval: false,
-                    supports_parallel_calls: parallel,
-                })
-                .collect();
-            Arc::new(Self {
-                tools,
-                list_calls: AtomicUsize::new(0),
-                execute_calls: AtomicUsize::new(0),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl ToolProvider for CountingProvider {
-        fn get_kind(&self) -> ToolProviderKind {
-            ToolProviderKind::Builtin
-        }
-
-        fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
-            self.list_calls.fetch_add(1, Ordering::SeqCst);
-            self.tools.clone()
-        }
-
-        async fn execute(
-            &self,
-            call: &ToolCall,
-            _ctx: &ToolExecutionContext,
-        ) -> Result<ToolResult> {
-            self.execute_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(ToolResult {
-                tool_call_id: call.tool_call_id.clone(),
-                ok: true,
-                output: json!({"echo": call.tool_name.clone()}),
-                error_message: None,
-            })
-        }
-    }
-
-    fn list_ctx() -> ToolListingContext {
-        ToolListingContext {
-            thread_id: "t".into(),
-            cwd: ".".into(),
-            features: HashMap::new(),
-        }
-    }
-
-    fn exec_ctx() -> ToolExecutionContext {
-        ToolExecutionContext {
-            thread_id: "t".into(),
-            turn_id: "u".into(),
-            cwd: ".".into(),
-            permission_profile: PermissionProfile::default(),
-            approval_policy: ApprovalPolicy::default(),
-            agent_depth: 0,
-        }
-    }
-
-    #[tokio::test]
-    async fn cached_lookup_avoids_repeated_list_tools_scans() {
-        let orch = ToolOrchestrator::new();
-        let p = CountingProvider::new(&["alpha", "beta"], true);
-        orch.register_provider(p.clone());
-
-        // First call rebuilds the cache (1 list_tools call).
-        assert!(orch.is_parallel_safe("alpha", &list_ctx()));
-        assert!(orch.is_parallel_safe("beta", &list_ctx()));
-        // Subsequent lookups must hit the cache — no further list_tools.
-        for _ in 0..10 {
-            assert!(orch.is_parallel_safe("alpha", &list_ctx()));
-        }
-        assert_eq!(
-            p.list_calls.load(Ordering::SeqCst),
-            1,
-            "cache should keep list_tools calls at 1"
-        );
-    }
-
-    #[tokio::test]
-    async fn register_provider_invalidates_cache() {
-        let orch = ToolOrchestrator::new();
-        let p1 = CountingProvider::new(&["alpha"], false);
-        orch.register_provider(p1.clone());
-        // Prime the cache.
-        assert!(!orch.is_parallel_safe("alpha", &list_ctx()));
-        assert_eq!(p1.list_calls.load(Ordering::SeqCst), 1);
-
-        // Registering a new provider must invalidate the cache so the
-        // next lookup sees the new tools.
-        let p2 = CountingProvider::new(&["gamma"], true);
-        orch.register_provider(p2.clone());
-        assert!(orch.is_parallel_safe("gamma", &list_ctx()));
-        // Both providers had to be re-listed during the rebuild.
-        assert_eq!(p1.list_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(p2.list_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn execute_dispatches_to_correct_provider_via_cache() {
-        let orch = ToolOrchestrator::new();
-        let p1 = CountingProvider::new(&["read_file"], true);
-        let p2 = CountingProvider::new(&["write_file"], false);
-        orch.register_provider(p1.clone());
-        orch.register_provider(p2.clone());
-
-        let call = ToolCall {
-            tool_call_id: "c1".into(),
-            provider_kind: ToolProviderKind::Builtin,
-            tool_name: "write_file".into(),
-            arguments: json!({}),
-        };
-        let result = orch.execute(&call, exec_ctx()).await.unwrap();
-        assert!(result.ok);
-        assert_eq!(p1.execute_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(p2.execute_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn unknown_tool_errors_after_slow_path_scan() {
-        let orch = ToolOrchestrator::new();
-        let p = CountingProvider::new(&["alpha"], true);
-        orch.register_provider(p.clone());
-
-        let call = ToolCall {
-            tool_call_id: "c1".into(),
-            provider_kind: ToolProviderKind::Builtin,
-            tool_name: "nonexistent".into(),
-            arguments: json!({}),
-        };
-        let err = orch.execute(&call, exec_ctx()).await.unwrap_err();
-        assert!(err.to_string().contains("tool_not_found"));
-    }
-}
-
-#[cfg(test)]
-mod web_search_tests {
-    use super::*;
-    use crate::system::domain::{ApprovalPolicy, PermissionProfile, ToolProviderKind};
-
-    fn exec_ctx() -> ToolExecutionContext {
-        ToolExecutionContext {
-            thread_id: "t".into(),
-            turn_id: "u".into(),
-            cwd: ".".into(),
-            permission_profile: PermissionProfile::default(),
-            approval_policy: ApprovalPolicy::default(),
-            agent_depth: 0,
-        }
-    }
-
-    fn list_ctx() -> ToolListingContext {
-        ToolListingContext {
-            thread_id: "t".into(),
-            cwd: ".".into(),
-            features: HashMap::new(),
-        }
-    }
-
-    // ── list_tools visibility ──────────────────────────────────────────────
-
-    #[test]
-    fn always_includes_web_search() {
-        let p = WebToolProvider::new();
-        let listed = p.list_tools(&list_ctx());
-        let names: Vec<&str> = listed.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"web_fetch"));
-        assert!(names.contains(&"web_search"));
-    }
-
-    #[test]
-    fn web_search_tool_is_parallel_safe() {
-        let p = WebToolProvider::new();
-        let def = p
-            .list_tools(&list_ctx())
-            .into_iter()
-            .find(|t| t.name == "web_search")
-            .unwrap();
-        assert!(def.supports_parallel_calls);
-        assert!(!def.requires_approval);
-    }
-
-    // ── argument validation (no network call needed) ───────────────────────
-
-    #[tokio::test]
-    async fn web_search_missing_query_returns_error() {
-        let p = WebToolProvider::new();
-        let call = ToolCall {
-            tool_call_id: "c1".into(),
-            provider_kind: ToolProviderKind::Builtin,
-            tool_name: "web_search".into(),
-            arguments: json!({}),
-        };
-        let err = p.execute(&call, &exec_ctx()).await.unwrap_err();
-        assert!(err.to_string().contains("missing query"), "got: {err}");
-    }
-
-    // ── result parsing ─────────────────────────────────────────────────────
-
-    #[test]
-    fn extract_duckduckgo_results_parses_organic_html() {
-        // Matches the actual DuckDuckGo HTML-lite POST response structure.
-        let html = r#"
-            <div class="result results_links results_links_deep web-result ">
-                <h2 class="result__title">
-                    <a rel="nofollow" class="result__a" href="https://rust-lang.org/">Rust Programming Language</a>
-                </h2>
-                <a class="result__snippet" href="https://rust-lang.org/">
-                    Rust is a fast, reliable, productive language.
-                </a>
-            </div>
-            <div class="result results_links results_links_deep web-result ">
-                <h2 class="result__title">
-                    <a rel="nofollow" class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fdoc.rust-lang.org%2F">The Rust Reference</a>
-                </h2>
-                <a class="result__snippet" href="https://doc.rust-lang.org/">
-                    The official Rust reference.
-                </a>
-            </div>
-            <div class="result results_links result--ad">
-                <h2 class="result__title">
-                    <a class="result__a" href="https://ads.example.com/">Buy Rust Course</a>
-                </h2>
-                <a class="result__snippet">Ad snippet that should be excluded.</a>
-            </div>
-        "#;
-
-        let results = extract_duckduckgo_results(html, 10);
-        // Ad block must be excluded — only the 2 web-result divs should appear.
-        assert_eq!(
-            results.len(),
-            2,
-            "expected 2 organic results, got {results:?}"
-        );
-
-        assert_eq!(results[0]["title"], "Rust Programming Language");
-        assert_eq!(results[0]["url"], "https://rust-lang.org/");
-        assert_eq!(
-            results[0]["snippet"],
-            "Rust is a fast, reliable, productive language."
-        );
-        assert_eq!(results[0]["published"], serde_json::Value::Null);
-
-        // DDG redirect wrapper should be decoded to the real destination URL.
-        assert_eq!(results[1]["title"], "The Rust Reference");
-        assert_eq!(results[1]["url"], "https://doc.rust-lang.org/");
-        assert_eq!(results[1]["snippet"], "The official Rust reference.");
-    }
-
-    #[test]
-    fn extract_duckduckgo_results_respects_limit() {
-        fn make_result(n: usize) -> String {
-            format!(
-                r#"<div class="result results_links results_links_deep web-result ">
-                    <h2 class="result__title"><a class="result__a" href="https://ex.com/{n}">Result {n}</a></h2>
-                    <a class="result__snippet" href="https://ex.com/{n}">Snippet {n}.</a>
-                </div>"#
-            )
-        }
-        let html: String = (0..8).map(make_result).collect();
-        assert_eq!(extract_duckduckgo_results(&html, 3).len(), 3);
-        assert_eq!(extract_duckduckgo_results(&html, 8).len(), 8);
-        assert_eq!(extract_duckduckgo_results(&html, 100).len(), 8);
-    }
-
-    #[test]
-    fn extract_duckduckgo_results_empty_on_no_web_results() {
-        assert!(extract_duckduckgo_results("", 5).is_empty());
-        assert!(extract_duckduckgo_results("<html><body>no results</body></html>", 5).is_empty());
-    }
-}

@@ -66,17 +66,16 @@ impl PermissionManager {
         }
     }
 
-    pub fn build_sandbox_request(
-        &self,
-        action: &ActionDescriptor,
-        profile: &PermissionProfile,
-    ) -> SandboxRequest {
-        let mut writable_roots = profile
+    /// Convert the user's profile into the request enforced by the sandbox.
+    ///
+    /// Action paths deliberately are not added here: a requested destination
+    /// must be checked against the configured roots, not become a new root.
+    pub fn build_sandbox_request(&self, profile: &PermissionProfile) -> SandboxRequest {
+        let writable_roots = profile
             .writable_roots
             .iter()
             .map(|r| r.path.clone())
             .collect::<Vec<_>>();
-        writable_roots.extend(action.paths.clone());
         SandboxRequest {
             sandbox_mode: Some(profile.sandbox_mode),
             writable_roots,

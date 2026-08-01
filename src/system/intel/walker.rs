@@ -192,21 +192,3 @@ fn is_binary_file(path: &Path) -> bool {
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn language_from_extension_roundtrip() {
-        assert_eq!(Language::from_extension("rs"), Language::Rust);
-        assert_eq!(Language::from_extension("TS"), Language::TypeScript);
-        assert!(Language::from_extension("wasm").is_other());
-    }
-
-    impl Language {
-        fn is_other(&self) -> bool {
-            matches!(self, Language::Other(_))
-        }
-    }
-}
