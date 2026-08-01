@@ -23,9 +23,7 @@ impl TurnExecutor {
     /// are grouped into batches and executed concurrently with `join_all`.
     /// Non-parallel-safe calls get their own sequential batch.
     ///
-    /// Returns `(had_any_success, file_changes)` — the first is used by the
-    /// consecutive-failure guard in `run_turn`, the second collects file
-    /// modifications for benchmark metrics.
+    /// Returns round outcome counters used by loop guards and turn evidence.
     pub(crate) async fn execute_tool_round(
         &self,
         ctx: &TurnContext,
@@ -40,6 +38,8 @@ impl TurnExecutor {
         usize,
         usize,
         Option<String>,
+        usize,
+        usize,
     )> {
         // 1. Normalise: rewrite shell_exec with shell operators → bash_exec.
         let calls: Vec<ToolCall> = tool_calls
@@ -174,6 +174,8 @@ impl TurnExecutor {
         // 4. Dispatch each batch, collecting results in original-call order.
         let mut had_any_success = false;
         let mut file_changes: Vec<FileChangeSummary> = Vec::new();
+        let mut successful_commands = 0usize;
+        let mut failed_commands = 0usize;
         let mut executed_tool_call_ids: HashSet<String> = HashSet::new();
         for batch in batches {
             if batch.len() > 1 {
@@ -185,6 +187,16 @@ impl TurnExecutor {
             for mut result in results {
                 executed_tool_call_ids.insert(result.tool_call_id.clone());
                 let mut non_retryable_stop_reason = None;
+                let is_command = tool_name_by_call_id
+                    .get(&result.tool_call_id)
+                    .is_some_and(|name| matches!(name.as_str(), "bash_exec" | "shell_exec"));
+                if is_command {
+                    if result.ok {
+                        successful_commands += 1;
+                    } else {
+                        failed_commands += 1;
+                    }
+                }
                 if result.ok {
                     had_any_success = true;
                     tracing::debug!(
@@ -260,6 +272,8 @@ impl TurnExecutor {
                         blocked_read_only_calls,
                         max_repeat_count,
                         Some(stop_reason),
+                        successful_commands,
+                        failed_commands,
                     ));
                 }
             }
@@ -272,6 +286,8 @@ impl TurnExecutor {
             blocked_read_only_calls,
             max_repeat_count,
             None,
+            successful_commands,
+            failed_commands,
         ))
     }
 

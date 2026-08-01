@@ -404,6 +404,7 @@ impl ConversationRuntime {
 
         let agent_cfg = &me.inner.effective_config.agent;
         tracing::debug!(
+            turn_policy_mode = ?agent_cfg.turn_policy_mode,
             max_iterations = agent_cfg.max_iterations,
             max_consecutive_failures = agent_cfg.max_consecutive_failures,
             max_no_tool_nudges = agent_cfg.max_no_tool_nudges,

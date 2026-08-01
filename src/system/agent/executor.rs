@@ -6,31 +6,10 @@ use uuid::Uuid;
 use super::middleware::{ConstrainedMode, GuardVerdict};
 use super::model_gateway::{estimate_items_token_pct, is_context_overflow_error, ModelStreamEvent};
 mod context;
+mod decision;
+mod state;
 mod tool_dispatch;
 pub(crate) mod utils;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TurnPhase {
-    /// Initial context gathering. Read-only tools allowed within budget.
-    Orient,
-    /// Model should produce a structured plan before editing.
-    Plan,
-    /// Executing plan steps. Edit and command tools allowed.
-    Execute,
-    /// Post-change verification. Command tools preferred.
-    Verify,
-}
-
-impl TurnPhase {
-    fn label(&self) -> &'static str {
-        match self {
-            TurnPhase::Orient => "ORIENT",
-            TurnPhase::Plan => "PLAN",
-            TurnPhase::Execute => "EXECUTE",
-            TurnPhase::Verify => "VERIFY",
-        }
-    }
-}
 
 fn classify_memory_candidate(user_text: &str) -> (&'static str, f32) {
     let lower = user_text.to_ascii_lowercase();
@@ -88,12 +67,14 @@ fn should_auto_remember(user_text: &str, kind: &str, importance: f32) -> bool {
 }
 
 use self::context::TurnContext;
+use self::decision::decide_turn;
+use self::state::{TurnEvidence, TurnPhase};
 use self::utils::{
     already_read_directive, classify_turn_intent, derive_thread_title, extract_plan_from_response,
-    find_repetition_start, initial_read_budget, intent_directive, intent_to_reasoning_effort,
-    is_degenerate_repetition, is_read_only_tool, pinned_coding_context, progress_summary,
-    recently_read_paths, should_retry_no_tool_completion, thinking_instruction,
-    user_requested_verification, wants_verbose_repo_map, ProgressState, TurnIntent,
+    find_repetition_start, initial_read_budget, intent_directive, is_degenerate_repetition,
+    is_read_only_tool, pinned_coding_context, progress_summary, recently_read_paths,
+    should_retry_no_tool_completion, thinking_instruction, user_requested_verification,
+    wants_verbose_repo_map, ProgressState, TurnIntent,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus, TokenUsage, ToolCall,
@@ -364,6 +345,8 @@ impl TurnExecutor {
             TurnIntent::Edit | TurnIntent::Debug | TurnIntent::Unknown
         );
         let mut current_phase = TurnPhase::Orient;
+        let mut evidence = TurnEvidence::default();
+        let mut policy_completion_nudges = 0usize;
         let read_budget = initial_read_budget(turn_intent);
         let mut plan_steps: Vec<String> = Vec::new();
         let mut completed_actions: Vec<String> = Vec::new();
@@ -445,10 +428,16 @@ impl TurnExecutor {
             // ── Adaptive reasoning effort ──────────────────────────────────
             // On every iteration, adjust reasoning_effort based on intent.
             // The user's explicit setting takes priority (via Auto → override).
-            let adaptive_effort = intent_to_reasoning_effort(
+            let policy_decision = decide_turn(
                 turn_intent,
+                current_phase,
+                &evidence,
                 turn_ctx.effective_model_settings.reasoning_effort,
+                verification_requested,
+                false,
+                agent_cfg.turn_policy_mode,
             );
+            let adaptive_effort = policy_decision.reasoning_effort;
             if adaptive_effort != turn_ctx.effective_model_settings.reasoning_effort {
                 tracing::debug!(
                     turn_id = %turn_id,
@@ -728,6 +717,23 @@ impl TurnExecutor {
                 && !guards.file_changes.is_empty()
                 && !guards.command_attempted_after_last_file_change
                 && guards.verification_nudges == 0;
+            let completion_policy_preview = if tool_calls.is_empty() && !assistant_text.is_empty() {
+                Some(decide_turn(
+                    turn_intent,
+                    current_phase,
+                    &evidence,
+                    turn_ctx.effective_model_settings.reasoning_effort,
+                    verification_requested,
+                    true,
+                    agent_cfg.turn_policy_mode,
+                ))
+            } else {
+                None
+            };
+            let will_nudge_policy = completion_policy_preview
+                .as_ref()
+                .is_some_and(|decision| !decision.allow_completion)
+                && policy_completion_nudges == 0;
 
             // Persist reasoning/thinking text if the model produced any.
             // ItemKind::ReasoningText is defined in the domain but was previously
@@ -749,7 +755,7 @@ impl TurnExecutor {
             }
 
             if let Some(item_id) = assistant_item_id {
-                if !will_nudge_intent && !will_nudge_verification {
+                if !will_nudge_intent && !will_nudge_verification && !will_nudge_policy {
                     let item = ConversationItem {
                         item_id,
                         thread_id: params.thread_id.clone(),
@@ -957,6 +963,48 @@ impl TurnExecutor {
                         .await?;
                     continue;
                 }
+
+                let completion_decision = completion_policy_preview.unwrap_or_else(|| {
+                    decide_turn(
+                        turn_intent,
+                        current_phase,
+                        &evidence,
+                        turn_ctx.effective_model_settings.reasoning_effort,
+                        verification_requested,
+                        true,
+                        agent_cfg.turn_policy_mode,
+                    )
+                });
+                if !completion_decision.allow_completion && policy_completion_nudges == 0 {
+                    policy_completion_nudges += 1;
+                    guards.total_nudges += 1;
+                    if let Some(GuardVerdict::FailTurn { kind, message }) =
+                        guards.check_nudge_budget(&agent_cfg)
+                    {
+                        return self
+                            .fail_turn(&params.thread_id, &turn_id, &kind, &message)
+                            .await;
+                    }
+                    let blocker = completion_decision
+                        .completion_blocker
+                        .unwrap_or_else(|| "More evidence is required before completion.".into());
+                    tracing::warn!(
+                        turn_id = %turn_id,
+                        enforceable = completion_decision.enforceable,
+                        blocker = %blocker,
+                        "turn_policy: completion deferred"
+                    );
+                    no_tool_nudge_instruction = Some(blocker.clone());
+                    self.runtime
+                        .publish_event(
+                            RuntimeEventKind::Warning,
+                            Some(params.thread_id.clone()),
+                            Some(turn_id.clone()),
+                            json!({ "message": blocker }),
+                        )
+                        .await?;
+                    continue;
+                }
                 tracing::info!(
                     turn_id = %turn_id,
                     guards.agent_iterations,
@@ -988,6 +1036,7 @@ impl TurnExecutor {
                 .iter()
                 .any(|c| matches!(c.tool_name.as_str(), "bash_exec" | "shell_exec"));
             let round_call_count = tool_calls.len();
+            evidence.observe_calls(&tool_calls);
 
             let (
                 had_any_success,
@@ -996,6 +1045,8 @@ impl TurnExecutor {
                 blocked_read_only_calls,
                 max_repeat_count,
                 non_retryable_stop_reason,
+                successful_commands,
+                failed_commands,
             ) = tokio::select! {
                 _ = turn_ctx.cancel_token.cancelled() => {
                     return self.complete_interrupted(&params.thread_id, &turn_id).await;
@@ -1009,6 +1060,12 @@ impl TurnExecutor {
                 ) => result?,
             };
             guards.record_tool_round(had_any_success, round_call_count);
+            evidence.observe_round(
+                had_any_success,
+                &round_file_changes,
+                successful_commands,
+                failed_commands,
+            );
             if !round_file_changes.is_empty() {
                 guards.command_attempted_after_last_file_change = false;
                 // Track completed actions for progress summary
@@ -1119,13 +1176,20 @@ impl TurnExecutor {
                     "executor: phase Plan → Execute"
                 );
             } else if current_phase == TurnPhase::Execute
-                && !guards.file_changes.is_empty()
-                && guards.command_attempted_after_last_file_change
+                && matches!(evidence.verification, state::VerificationStatus::Passed)
             {
                 current_phase = TurnPhase::Verify;
                 tracing::debug!(
                     turn_id = %turn_id,
-                    "executor: phase Execute → Verify (files changed + command ran)"
+                    "executor: phase Execute → Verify (verification passed)"
+                );
+            } else if current_phase == TurnPhase::Verify
+                && matches!(evidence.verification, state::VerificationStatus::Failed)
+            {
+                current_phase = TurnPhase::Execute;
+                tracing::debug!(
+                    turn_id = %turn_id,
+                    "executor: phase Verify → Execute (verification failed)"
                 );
             }
             guards.total_invalid_tool_calls += invalid_tool_calls;

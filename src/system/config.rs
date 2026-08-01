@@ -10,10 +10,32 @@ use super::intel::CodebaseIntelConfig;
 
 // ── Agent orchestration config ────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPolicyMode {
+    Off,
+    #[default]
+    Observe,
+    Enforce,
+}
+
+impl TurnPolicyMode {
+    pub fn observes(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub fn enforces(self) -> bool {
+        matches!(self, Self::Enforce)
+    }
+}
+
 /// Controls the agent loop, child-agent fan-out, and model-output guards.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct AgentConfig {
+    /// Evidence-driven turn decisions: off, observe, or enforce.
+    #[serde(default)]
+    pub turn_policy_mode: TurnPolicyMode,
     /// Absolute per-turn loop backstop.
     #[serde(default = "default_agent_max_iterations")]
     pub max_iterations: usize,
@@ -82,6 +104,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            turn_policy_mode: TurnPolicyMode::default(),
             max_iterations: default_agent_max_iterations(),
             max_consecutive_failures: default_agent_max_consecutive_failures(),
             max_no_tool_nudges: default_agent_max_no_tool_nudges(),
@@ -831,6 +854,7 @@ fn default_spec_config_json() -> Value {
         "plugins_enabled": true,
         "apps_enabled": true,
         "agent": {
+            "turn_policy_mode": "observe",
             "max_iterations": 150,
             "max_consecutive_failures": 5,
             "max_no_tool_nudges": 2,

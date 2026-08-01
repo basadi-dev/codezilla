@@ -109,6 +109,9 @@ log_file: "logs/codezilla.log"
 # Agent orchestration limits. These defaults match the built-in behavior and can
 # be tuned per machine/model if benchmarks show looping or under-exploration.
 agent:
+  # Evidence-driven workflow decisions: off | observe | enforce.
+  # Observe logs proposed completion gates without changing behavior.
+  turn_policy_mode: "observe"
   max_iterations: 150
   max_consecutive_failures: 5
   max_no_tool_nudges: 2
