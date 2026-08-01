@@ -7,6 +7,7 @@ use super::middleware::{ConstrainedMode, GuardVerdict};
 use super::model_gateway::{estimate_items_token_pct, is_context_overflow_error, ModelStreamEvent};
 mod context;
 mod decision;
+pub(crate) mod intent;
 mod state;
 mod tool_dispatch;
 pub(crate) mod utils;
@@ -68,13 +69,16 @@ fn should_auto_remember(user_text: &str, kind: &str, importance: f32) -> bool {
 
 use self::context::TurnContext;
 use self::decision::decide_turn;
+use self::intent::{
+    classify_turn_intent, derive_task_traits, thinking_instruction, wants_verbose_repo_map,
+    TurnIntent,
+};
 use self::state::{TurnEvidence, TurnPhase};
 use self::utils::{
-    already_read_directive, classify_turn_intent, derive_thread_title, extract_plan_from_response,
-    find_repetition_start, initial_read_budget, intent_directive, is_degenerate_repetition,
-    is_read_only_tool, pinned_coding_context, progress_summary, recently_read_paths,
-    should_retry_no_tool_completion, thinking_instruction, user_requested_verification,
-    wants_verbose_repo_map, ProgressState, TurnIntent,
+    already_read_directive, derive_thread_title, extract_plan_from_response, find_repetition_start,
+    initial_read_budget, intent_directive, is_degenerate_repetition, is_read_only_tool,
+    pinned_coding_context, progress_summary, recently_read_paths, should_retry_no_tool_completion,
+    user_requested_verification, ProgressState,
 };
 use crate::system::domain::{
     now_seconds, ConversationItem, ItemKind, RuntimeEventKind, ThreadStatus, TokenUsage, ToolCall,
@@ -142,6 +146,8 @@ impl TurnExecutor {
 
         let turn_intent = classify_turn_intent(&params.input);
         let verification_requested = user_requested_verification(&params.input);
+        let mut task_traits = derive_task_traits(&params.input);
+        task_traits.verification_requested |= verification_requested;
         let verbose_repo_map = match params.repo_map_verbosity {
             Some(RepoMapVerbosity::Verbose) => true,
             Some(RepoMapVerbosity::Lean) => false,
@@ -340,14 +346,15 @@ impl TurnExecutor {
         const REPEAT_THRESHOLD: usize = 3;
 
         // ── Phase-aware anti-looping state ─────────────────────────────────
-        let needs_planning = matches!(
+        let mut needs_planning = matches!(
             turn_intent,
             TurnIntent::Edit | TurnIntent::Debug | TurnIntent::Unknown
         );
         let mut current_phase = TurnPhase::Orient;
         let mut evidence = TurnEvidence::default();
         let mut policy_completion_nudges = 0usize;
-        let read_budget = initial_read_budget(turn_intent);
+        let mut read_budget = initial_read_budget(turn_intent);
+        let mut max_recovery_attempts = agent_cfg.max_consecutive_failures;
         let mut plan_steps: Vec<String> = Vec::new();
         let mut completed_actions: Vec<String> = Vec::new();
 
@@ -430,14 +437,19 @@ impl TurnExecutor {
             // The user's explicit setting takes priority (via Auto → override).
             let policy_decision = decide_turn(
                 turn_intent,
+                task_traits,
                 current_phase,
                 &evidence,
                 turn_ctx.effective_model_settings.reasoning_effort,
-                verification_requested,
                 false,
                 agent_cfg.turn_policy_mode,
             );
-            let adaptive_effort = policy_decision.reasoning_effort;
+            let adaptive_effort = policy_decision.profile.model_effort;
+            if agent_cfg.turn_policy_mode.enforces() {
+                read_budget = policy_decision.profile.read_budget;
+                needs_planning = policy_decision.profile.require_plan;
+                max_recovery_attempts = policy_decision.profile.max_recovery_attempts;
+            }
             if adaptive_effort != turn_ctx.effective_model_settings.reasoning_effort {
                 tracing::debug!(
                     turn_id = %turn_id,
@@ -466,6 +478,24 @@ impl TurnExecutor {
                 )
                 .await?
             };
+            if agent_cfg.turn_policy_mode.enforces()
+                && policy_decision.profile.require_plan
+                && plan_steps.is_empty()
+                && matches!(current_phase, TurnPhase::Orient | TurnPhase::Plan)
+            {
+                system_instructions.push(
+                    "Before changing files, form a short concrete plan covering the intended edits and validation. Keep it internal if you can proceed directly; do not replace action with narration."
+                        .into(),
+                );
+            }
+            if agent_cfg.turn_policy_mode.enforces()
+                && matches!(evidence.verification, state::VerificationStatus::Failed)
+            {
+                system_instructions.push(
+                    "Verification failed. Diagnose the failure from its output, revise the approach, and rerun the narrowest relevant verification."
+                        .into(),
+                );
+            }
             if let Some(pinned) = pinned_coding_context(&turn_ctx.cwd, &turn_ctx.items).await {
                 system_instructions.push(pinned);
             }
@@ -487,7 +517,7 @@ impl TurnExecutor {
                     plan: &plan_steps,
                     completed_actions: &completed_actions,
                     changed_files: &changed_paths,
-                    verified: guards.command_attempted_after_last_file_change,
+                    verified: matches!(evidence.verification, state::VerificationStatus::Passed),
                 }));
             }
 
@@ -720,10 +750,10 @@ impl TurnExecutor {
             let completion_policy_preview = if tool_calls.is_empty() && !assistant_text.is_empty() {
                 Some(decide_turn(
                     turn_intent,
+                    task_traits,
                     current_phase,
                     &evidence,
                     turn_ctx.effective_model_settings.reasoning_effort,
-                    verification_requested,
                     true,
                     agent_cfg.turn_policy_mode,
                 ))
@@ -732,8 +762,7 @@ impl TurnExecutor {
             };
             let will_nudge_policy = completion_policy_preview
                 .as_ref()
-                .is_some_and(|decision| !decision.allow_completion)
-                && policy_completion_nudges == 0;
+                .is_some_and(|decision| !decision.allow_completion);
 
             // Persist reasoning/thinking text if the model produced any.
             // ItemKind::ReasoningText is defined in the domain but was previously
@@ -967,15 +996,15 @@ impl TurnExecutor {
                 let completion_decision = completion_policy_preview.unwrap_or_else(|| {
                     decide_turn(
                         turn_intent,
+                        task_traits,
                         current_phase,
                         &evidence,
                         turn_ctx.effective_model_settings.reasoning_effort,
-                        verification_requested,
                         true,
                         agent_cfg.turn_policy_mode,
                     )
                 });
-                if !completion_decision.allow_completion && policy_completion_nudges == 0 {
+                if !completion_decision.allow_completion {
                     policy_completion_nudges += 1;
                     guards.total_nudges += 1;
                     if let Some(GuardVerdict::FailTurn { kind, message }) =
@@ -990,6 +1019,7 @@ impl TurnExecutor {
                         .unwrap_or_else(|| "More evidence is required before completion.".into());
                     tracing::warn!(
                         turn_id = %turn_id,
+                        policy_completion_nudges,
                         enforceable = completion_decision.enforceable,
                         blocker = %blocker,
                         "turn_policy: completion deferred"
@@ -1047,6 +1077,8 @@ impl TurnExecutor {
                 non_retryable_stop_reason,
                 successful_commands,
                 failed_commands,
+                successful_verifications,
+                failed_verifications,
             ) = tokio::select! {
                 _ = turn_ctx.cancel_token.cancelled() => {
                     return self.complete_interrupted(&params.thread_id, &turn_id).await;
@@ -1065,6 +1097,8 @@ impl TurnExecutor {
                 &round_file_changes,
                 successful_commands,
                 failed_commands,
+                successful_verifications,
+                failed_verifications,
             );
             if !round_file_changes.is_empty() {
                 guards.command_attempted_after_last_file_change = false;
@@ -1086,11 +1120,20 @@ impl TurnExecutor {
             // this fires the checkpoint review; future middlewares hook in here.
             {
                 use super::middleware::{MiddlewareAction, TurnMiddlewareContext};
+                let mut middleware_agent_config = agent_cfg.clone();
+                if agent_cfg.turn_policy_mode.enforces() {
+                    middleware_agent_config.checkpoint_review_enabled =
+                        policy_decision.profile.checkpoint_reviews > 0;
+                    middleware_agent_config.checkpoint_review_min_changes =
+                        policy_decision.profile.checkpoint_min_changes;
+                    middleware_agent_config.checkpoint_review_max_per_turn =
+                        policy_decision.profile.checkpoint_reviews;
+                }
                 let mut mw_ctx = TurnMiddlewareContext {
                     runtime: Some(self.runtime.clone()),
                     thread_id: params.thread_id.clone(),
                     turn_id: turn_id.clone(),
-                    agent_config: agent_cfg.clone(),
+                    agent_config: middleware_agent_config,
                     agent_depth: params.agent_depth,
                     cwd: cwd_for_persist.to_string(),
                     user_task_text: user_task_text_for_review.clone(),
@@ -1162,35 +1205,16 @@ impl TurnExecutor {
             }
 
             // ── Phase transitions after tool execution ────────────────────
-            if current_phase == TurnPhase::Orient && !round_is_read_only {
-                // First action tool → transition to Execute (skip Plan)
-                current_phase = TurnPhase::Execute;
+            let next_phase =
+                current_phase.after_tool_round(round_is_read_only, evidence.verification);
+            if next_phase != current_phase {
                 tracing::debug!(
                     turn_id = %turn_id,
-                    "executor: phase Orient → Execute (first action tool)"
+                    from = current_phase.label(),
+                    to = next_phase.label(),
+                    "executor: phase transition after tool round"
                 );
-            } else if current_phase == TurnPhase::Plan && !round_is_read_only {
-                current_phase = TurnPhase::Execute;
-                tracing::debug!(
-                    turn_id = %turn_id,
-                    "executor: phase Plan → Execute"
-                );
-            } else if current_phase == TurnPhase::Execute
-                && matches!(evidence.verification, state::VerificationStatus::Passed)
-            {
-                current_phase = TurnPhase::Verify;
-                tracing::debug!(
-                    turn_id = %turn_id,
-                    "executor: phase Execute → Verify (verification passed)"
-                );
-            } else if current_phase == TurnPhase::Verify
-                && matches!(evidence.verification, state::VerificationStatus::Failed)
-            {
-                current_phase = TurnPhase::Execute;
-                tracing::debug!(
-                    turn_id = %turn_id,
-                    "executor: phase Verify → Execute (verification failed)"
-                );
+                current_phase = next_phase;
             }
             guards.total_invalid_tool_calls += invalid_tool_calls;
 
@@ -1371,6 +1395,20 @@ impl TurnExecutor {
                     guards.completed_tool_rounds,
                     "executor: all tools in this round FAILED"
                 );
+            }
+            if agent_cfg.turn_policy_mode.enforces()
+                && guards.consecutive_failures > max_recovery_attempts
+            {
+                return self
+                    .fail_turn(
+                        &params.thread_id,
+                        &turn_id,
+                        "recovery_limit",
+                        &format!(
+                            "Agent thinking profile allowed {max_recovery_attempts} recovery attempts, but the failures remain unresolved."
+                        ),
+                    )
+                    .await;
             }
             if let Some(GuardVerdict::FailTurn { kind, message }) =
                 guards.check_consecutive_failures(&agent_cfg)

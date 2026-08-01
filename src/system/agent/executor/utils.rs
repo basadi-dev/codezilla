@@ -4,9 +4,10 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::system::domain::{
-    ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ReasoningEffort, ToolCall,
-    UserInput,
+    ActionDescriptor, ApprovalCategory, ConversationItem, ItemKind, ToolCall, UserInput,
 };
+
+use super::intent::TurnIntent;
 
 // ─── is_read_only_tool ────────────────────────────────────────────────────────
 
@@ -27,83 +28,6 @@ pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
             | "read_browser_page"
             | "view_file"
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnIntent {
-    Edit,
-    Debug,
-    Review,
-    Answer,
-    Inventory,
-    Unknown,
-}
-
-pub(crate) fn classify_turn_intent(inputs: &[UserInput]) -> TurnIntent {
-    let text = inputs
-        .iter()
-        .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-
-    if text.is_empty() {
-        return TurnIntent::Unknown;
-    }
-    if text.contains("review") || text.contains("audit") || text.contains("regression") {
-        return TurnIntent::Review;
-    }
-    if text.contains("list ") || text.contains("inventory") || text.contains("contents of") {
-        return TurnIntent::Inventory;
-    }
-    if text.contains("fix")
-        || text.contains("implement")
-        || text.contains("change")
-        || text.contains("update")
-        || text.contains("refactor")
-        || text.contains("remove")
-    {
-        return TurnIntent::Edit;
-    }
-    if text.contains("why")
-        || text.contains("what's wrong")
-        || text.contains("what is wrong")
-        || text.contains("debug")
-        || text.contains("loop")
-    {
-        return TurnIntent::Debug;
-    }
-    if text.contains("explain") || text.contains("what") || text.contains("how") {
-        return TurnIntent::Answer;
-    }
-    TurnIntent::Unknown
-}
-
-/// Returns true when the user explicitly asks for low-level repo internals in
-/// the map (e.g. binary files, `.git`, or full file tree).
-pub(crate) fn wants_verbose_repo_map(inputs: &[UserInput]) -> bool {
-    let text = inputs
-        .iter()
-        .filter_map(|i| i.text.as_ref().map(|t| t.text.as_str()))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    if text.is_empty() {
-        return false;
-    }
-    let mentions_binary = text.contains("binary")
-        || text.contains("bin files")
-        || text.contains("non-text")
-        || text.contains("compiled artifacts");
-    let mentions_git_internal = text.contains(".git")
-        || text.contains("git objects")
-        || text.contains("git internals")
-        || text.contains("object store");
-    let mentions_full_tree = text.contains("full file tree")
-        || text.contains("entire tree")
-        || text.contains("everything in the repo map")
-        || text.contains("all files including");
-    mentions_binary || mentions_git_internal || mentions_full_tree
 }
 
 /// Build a deterministic coding-state block that is pinned into every model
@@ -550,48 +474,6 @@ where
     }
 
     batches
-}
-
-/// Map turn intent to an adaptive reasoning effort level, reducing token waste
-/// for simple queries while boosting quality for complex tasks.
-///
-/// The user's explicit `reasoning_effort` setting always takes priority.
-/// When the user has it set to `Auto`, we derive the effort from the intent.
-pub(crate) fn intent_to_reasoning_effort(
-    intent: TurnIntent,
-    user_setting: ReasoningEffort,
-) -> ReasoningEffort {
-    // User's explicit setting always wins.
-    if user_setting != ReasoningEffort::Auto {
-        return user_setting;
-    }
-    match intent {
-        TurnIntent::Inventory => ReasoningEffort::Off,
-        TurnIntent::Answer => ReasoningEffort::Low,
-        TurnIntent::Edit => ReasoningEffort::Medium,
-        TurnIntent::Debug | TurnIntent::Review => ReasoningEffort::High,
-        TurnIntent::Unknown => ReasoningEffort::Auto,
-    }
-}
-
-pub(crate) fn thinking_instruction(reasoning_effort: Option<&str>) -> Option<String> {
-    match reasoning_effort {
-        None | Some("off") | Some("auto") => None,
-        Some("low") => Some(
-            "Think briefly before responding. A short internal reasoning pass is enough.".into(),
-        ),
-        Some("medium") => Some(
-            "Think through this carefully, step by step, before giving your final answer.".into(),
-        ),
-        Some("high") => Some(
-            "Think extra hard. Reason deeply and thoroughly, considering multiple angles and edge \
-             cases, before providing your answer."
-                .into(),
-        ),
-        Some(other) => Some(format!(
-            "Reasoning effort: {other}. Think carefully before responding."
-        )),
-    }
 }
 
 // ─── action_for_tool_call (module-private helper) ────────────────────────────

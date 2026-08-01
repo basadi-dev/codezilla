@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod render;
 pub mod selection;
 pub mod threads;
+mod transcript_cache;
 pub mod transcript_view;
 pub mod types;
 

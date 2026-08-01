@@ -105,5 +105,3 @@ fn sha256(content: &str) -> [u8; 32] {
     hasher.update(content.as_bytes());
     hasher.finalize().into()
 }
-
-// ─── Tests ────────────────────────────────────────────────────────────────────

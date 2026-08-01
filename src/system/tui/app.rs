@@ -11,6 +11,7 @@ use ratatui::{
 };
 
 use super::markdown::md_to_lines;
+use super::transcript_cache::{CachedTranscriptEntry, TranscriptRenderCache};
 
 use super::super::agent::model_gateway::estimate_items_tokens;
 use super::super::domain::{
@@ -146,37 +147,6 @@ fn extract_first_url(body: &str) -> Option<String> {
         .find(|l| !l.is_empty())
         .map(|s| s.to_string())
 }
-#[derive(Debug, Clone)]
-struct CachedTranscriptEntry {
-    kind: EntryKind,
-    title: String,
-    timestamp: Option<i64>,
-    completed_at: Option<i64>,
-    pending: bool,
-    /// True when this is the in-transcript Working timer entry; the renderer
-    /// uses this to confine the pending spinner glyph to that single row.
-    is_working_timer: bool,
-    /// For markdown entries (Assistant/Summary/Reasoning), stores the original
-    /// raw body text so the renderer can call md_to_lines each frame.
-    /// For plain entries, this is empty.
-    raw_body: String,
-    /// Pre-chunked plain-text lines (used for non-markdown entries and for
-    /// counting lines in the scroll arithmetic for markdown entries).
-    body_lines: Vec<String>,
-    line_count: usize,
-    /// When true, only the header line is rendered (body is hidden).
-    collapsed: bool,
-}
-
-#[derive(Debug, Default, Clone)]
-struct TranscriptRenderCache {
-    width: u16,
-    dirty: bool,
-    entries: Vec<CachedTranscriptEntry>,
-    line_ends: Vec<usize>,
-    total_lines: usize,
-}
-
 /// Full application state for the interactive TUI.
 pub struct InteractiveApp {
     pub runtime: ConversationRuntime,
@@ -3550,9 +3520,8 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
     let mut cached_entries: Vec<CachedTranscriptEntry> = Vec::with_capacity(entries.len());
     let mut line_ends = Vec::with_capacity(entries.len());
     let mut total_lines = 0usize;
-    let mut tool_names_by_call_id: HashMap<String, String> = HashMap::new();
 
-    for (i, entry) in entries.iter().enumerate() {
+    for entry in entries {
         // System prompt entries are persisted for debugging/auditing but should
         // not be rendered in the TUI — they are internal LLM context and would
         // otherwise appear as a huge empty-looking "◈ System" block.
@@ -3572,10 +3541,8 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             EntryKind::User | EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
         );
 
-        let use_read_file = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
-            && is_read_file_body(&entry.body);
-        let use_diff = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
-            && is_diff_body(&entry.body);
+        let use_read_file = entry.kind == EntryKind::ToolCall && is_read_file_body(&entry.body);
+        let use_diff = entry.kind == EntryKind::ToolCall && is_diff_body(&entry.body);
 
         let is_working_timer = entry.item_id.starts_with(WORKING_ENTRY_ID_PREFIX);
         let (raw_body, body_lines): (String, Vec<String>) =
@@ -3625,19 +3592,6 @@ fn build_transcript_render_cache(entries: &[TranscriptEntry], width: u16) -> Tra
             };
 
         let mut title = entry.title.clone();
-        if entry.kind == EntryKind::ToolCall {
-            if let Some(call_id) = entry.tool_call_id.as_ref() {
-                tool_names_by_call_id.insert(call_id.clone(), title.clone());
-            }
-        } else if entry.kind == EntryKind::ToolResult {
-            if let Some(call_id) = entry.tool_call_id.as_ref() {
-                if let Some(tool_name) = tool_names_by_call_id.get(call_id) {
-                    title = format!("{tool_name} result");
-                }
-            }
-        }
-
-        let _ = i; // index no longer used after removing the pre-pass
 
         if let Some(prev) = cached_entries.last() {
             let same_kind = prev.kind == entry.kind;
@@ -3785,10 +3739,8 @@ fn append_cached_transcript_entry_lines(
         entry.kind,
         EntryKind::User | EntryKind::Assistant | EntryKind::Summary | EntryKind::Reasoning
     );
-    let use_read_file = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
-        && is_read_file_body(&entry.raw_body);
-    let use_diff = matches!(entry.kind, EntryKind::ToolCall | EntryKind::ToolResult)
-        && is_diff_body(&entry.raw_body);
+    let use_read_file = entry.kind == EntryKind::ToolCall && is_read_file_body(&entry.raw_body);
+    let use_diff = entry.kind == EntryKind::ToolCall && is_diff_body(&entry.raw_body);
 
     if use_markdown && !entry.raw_body.is_empty() {
         // Re-render from the raw Markdown source so all spans carry proper styles.

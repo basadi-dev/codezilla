@@ -15,6 +15,7 @@ use crate::system::domain::{
 };
 use crate::system::error as cod_error;
 
+use super::state::command_purpose;
 use super::TurnExecutor;
 
 impl TurnExecutor {
@@ -38,6 +39,8 @@ impl TurnExecutor {
         usize,
         usize,
         Option<String>,
+        usize,
+        usize,
         usize,
         usize,
     )> {
@@ -176,6 +179,8 @@ impl TurnExecutor {
         let mut file_changes: Vec<FileChangeSummary> = Vec::new();
         let mut successful_commands = 0usize;
         let mut failed_commands = 0usize;
+        let mut successful_verifications = 0usize;
+        let mut failed_verifications = 0usize;
         let mut executed_tool_call_ids: HashSet<String> = HashSet::new();
         for batch in batches {
             if batch.len() > 1 {
@@ -191,10 +196,16 @@ impl TurnExecutor {
                     .get(&result.tool_call_id)
                     .is_some_and(|name| matches!(name.as_str(), "bash_exec" | "shell_exec"));
                 if is_command {
+                    let is_verification = calls
+                        .iter()
+                        .find(|call| call.tool_call_id == result.tool_call_id)
+                        .is_some_and(|call| command_purpose(call).verifies());
                     if result.ok {
                         successful_commands += 1;
+                        successful_verifications += usize::from(is_verification);
                     } else {
                         failed_commands += 1;
+                        failed_verifications += usize::from(is_verification);
                     }
                 }
                 if result.ok {
@@ -206,6 +217,9 @@ impl TurnExecutor {
                     );
                     // Extract file change info for benchmark metrics.
                     if let Some(change) = extract_file_change(&result) {
+                        // Only checks after the latest edit are verification.
+                        successful_verifications = 0;
+                        failed_verifications = 0;
                         file_changes.push(change);
                     }
                 } else {
@@ -274,6 +288,8 @@ impl TurnExecutor {
                         Some(stop_reason),
                         successful_commands,
                         failed_commands,
+                        successful_verifications,
+                        failed_verifications,
                     ));
                 }
             }
@@ -288,6 +304,8 @@ impl TurnExecutor {
             None,
             successful_commands,
             failed_commands,
+            successful_verifications,
+            failed_verifications,
         ))
     }
 

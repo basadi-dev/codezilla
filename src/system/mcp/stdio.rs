@@ -34,8 +34,14 @@ impl StdioMcpClient {
             .stderr(Stdio::inherit()) // Let stderr flow to the app log
             .spawn()?;
 
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("MCP server {} did not expose stdin", config.name))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("MCP server {} did not expose stdout", config.name))?;
 
         let (rpc_tx, mut rpc_rx) =
             mpsc::channel::<(Value, tokio::sync::oneshot::Sender<Result<Value>>)>(32);
@@ -54,7 +60,15 @@ impl StdioMcpClient {
                         req["id"] = json!(id.clone());
                         req["jsonrpc"] = json!("2.0");
 
-                        let msg = format!("{}\n", serde_json::to_string(&req).unwrap());
+                        let msg = match serde_json::to_string(&req) {
+                            Ok(message) => format!("{message}\n"),
+                            Err(error) => {
+                                let _ = reply_tx.send(Err(anyhow!(
+                                    "Failed to serialize MCP request: {error}"
+                                )));
+                                continue;
+                            }
+                        };
                         if stdin.write_all(msg.as_bytes()).await.is_err() {
                             let _ = reply_tx.send(Err(anyhow!("Failed to write to MCP stdin")));
                             break;

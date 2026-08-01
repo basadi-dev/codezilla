@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::system::domain::{ThreadId, TurnId, UserInput};
 use crate::system::runtime::ConversationRuntime;
 
-use super::executor::utils::TurnIntent;
+use super::executor::intent::TurnIntent;
 
 // ─── ExplorationResult ────────────────────────────────────────────────────────
 
