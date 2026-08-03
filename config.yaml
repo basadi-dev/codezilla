@@ -137,6 +137,9 @@ agent:
   max_spawn_depth: 3
   child_timeout_secs: 120
   max_child_timeout_secs: 600
+  # Read-only research teams; the parent coordinator remains the sole writer.
+  teams_enabled: true
+  team_max_members: 3
 
 # Auto-compaction: automatically summarise the conversation context after each
 # turn when usage exceeds the threshold, keeping plenty of room for new work.

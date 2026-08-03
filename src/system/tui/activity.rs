@@ -93,6 +93,61 @@ pub struct ChildAgentActivity {
     pub finished_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeamMemberStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    TimedOut,
+}
+
+impl TeamMemberStatus {
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "interrupted" => Self::Interrupted,
+            "timed_out" => Self::TimedOut,
+            "failed" => Self::Failed,
+            _ => Self::Queued,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Interrupted | Self::TimedOut
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TeamMemberActivity {
+    pub member_index: usize,
+    pub role: String,
+    pub objective: String,
+    pub status: TeamMemberStatus,
+    pub child_thread_id: Option<String>,
+    pub child_turn_id: Option<String>,
+    pub started_at: Option<Instant>,
+    pub finished_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TeamActivity {
+    pub team_id: String,
+    pub parent_tool_call_id: String,
+    pub objective: String,
+    pub expected_members: usize,
+    pub timeout_secs: u64,
+    pub started_at: Instant,
+    pub finished_at: Option<Instant>,
+    pub timed_out: bool,
+    pub members: Vec<TeamMemberActivity>,
+}
+
 impl ChildAgentActivity {
     pub fn elapsed(&self, now: Instant) -> Duration {
         self.finished_at
@@ -147,6 +202,8 @@ pub struct ActivityState {
     /// child finishes so the user can still see its final outcome until the
     /// parent turn ends; cleared by `end_turn`.
     child_agents: Vec<ChildAgentActivity>,
+    /// Read-only research teams grouped by their parent tool call.
+    teams: Vec<TeamActivity>,
 }
 
 impl ActivityState {
@@ -221,10 +278,104 @@ impl ActivityState {
         self.paused_at = None;
         self.paused_duration = Duration::ZERO;
         self.child_agents.clear();
+        self.teams.clear();
     }
 
     pub fn child_agents(&self) -> &[ChildAgentActivity] {
         &self.child_agents
+    }
+
+    pub fn teams(&self) -> &[TeamActivity] {
+        &self.teams
+    }
+
+    pub fn team_for_parent_tool(&self, parent_tool_call_id: &str) -> Option<&TeamActivity> {
+        self.teams
+            .iter()
+            .find(|team| team.parent_tool_call_id == parent_tool_call_id)
+    }
+
+    pub fn start_team(
+        &mut self,
+        team_id: impl Into<String>,
+        parent_tool_call_id: impl Into<String>,
+        objective: impl Into<String>,
+        expected_members: usize,
+        timeout_secs: u64,
+        now: Instant,
+    ) {
+        let team_id = team_id.into();
+        if self.teams.iter().any(|team| team.team_id == team_id) {
+            return;
+        }
+        self.teams.push(TeamActivity {
+            team_id,
+            parent_tool_call_id: parent_tool_call_id.into(),
+            objective: objective.into(),
+            expected_members,
+            timeout_secs,
+            started_at: now,
+            finished_at: None,
+            timed_out: false,
+            members: Vec::with_capacity(expected_members),
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_team_member(
+        &mut self,
+        team_id: &str,
+        member_index: usize,
+        role: String,
+        objective: String,
+        status: TeamMemberStatus,
+        child_thread_id: Option<String>,
+        child_turn_id: Option<String>,
+        now: Instant,
+    ) {
+        let Some(team) = self.teams.iter_mut().find(|team| team.team_id == team_id) else {
+            return;
+        };
+        if let Some(member) = team
+            .members
+            .iter_mut()
+            .find(|member| member.member_index == member_index)
+        {
+            member.role = role;
+            member.objective = objective;
+            member.status = status;
+            if child_thread_id.is_some() {
+                member.child_thread_id = child_thread_id;
+            }
+            if child_turn_id.is_some() {
+                member.child_turn_id = child_turn_id;
+            }
+            if status == TeamMemberStatus::Running {
+                member.started_at.get_or_insert(now);
+            }
+            if status.is_terminal() {
+                member.finished_at.get_or_insert(now);
+            }
+            return;
+        }
+        team.members.push(TeamMemberActivity {
+            member_index,
+            role,
+            objective,
+            status,
+            child_thread_id,
+            child_turn_id,
+            started_at: (status == TeamMemberStatus::Running).then_some(now),
+            finished_at: status.is_terminal().then_some(now),
+        });
+        team.members.sort_by_key(|member| member.member_index);
+    }
+
+    pub fn complete_team(&mut self, team_id: &str, timed_out: bool, now: Instant) {
+        if let Some(team) = self.teams.iter_mut().find(|team| team.team_id == team_id) {
+            team.finished_at = Some(now);
+            team.timed_out = timed_out;
+        }
     }
 
     /// Look up a child agent by its `child_thread_id`. Used by the event

@@ -262,6 +262,9 @@ impl AppServer {
                     RuntimeEventKind::Disconnected => "warning",
                     RuntimeEventKind::CompactionStatus => "compaction/status",
                     RuntimeEventKind::ChildAgentSpawned => "agent/spawned",
+                    RuntimeEventKind::AgentTeamStarted => "agent/team/started",
+                    RuntimeEventKind::AgentTeamMemberUpdated => "agent/team/member/updated",
+                    RuntimeEventKind::AgentTeamCompleted => "agent/team/completed",
                     RuntimeEventKind::TokenUsageUpdate => "token/usage/update",
                     RuntimeEventKind::SpeculativeCandidateStarted => {
                         "speculative/candidate/started"

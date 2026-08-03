@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::llm::LlmClient;
 
 // Agent subsystem — types used only internally in this file
-use super::agent::supervisor::{AgentSupervisor, SpawnAgentToolProviderReal};
+use super::agent::supervisor::{AgentOrchestrationToolProvider, AgentSupervisor};
 use super::agent::{
     ApprovalManager, BashToolProvider, EventBus, ExtensionManager, FileToolProvider,
     GraphToolProvider, ImageToolProvider, ListDirToolProvider, MemoryToolProvider, ModelGateway,
@@ -418,21 +418,21 @@ impl ConversationRuntime {
             max_spawn_depth = agent_cfg.max_spawn_depth,
             child_timeout_secs = agent_cfg.child_timeout_secs,
             max_child_timeout_secs = agent_cfg.max_child_timeout_secs,
+            teams_enabled = agent_cfg.teams_enabled,
+            team_max_members = agent_cfg.team_max_members,
             "runtime: agent config loaded"
         );
 
-        // Late-register the real SpawnAgentToolProvider with a runtime clone.
-        me.inner
-            .tool_orchestrator
-            .register_provider(Arc::new(SpawnAgentToolProviderReal::new(
-                AgentSupervisor::new(
-                    me.clone(),
-                    me.inner
-                        .effective_config
-                        .agent
-                        .max_concurrent_child_agents(),
-                ),
-            )));
+        // Late-register agent orchestration tools with a runtime clone.
+        me.inner.tool_orchestrator.register_provider(Arc::new(
+            AgentOrchestrationToolProvider::new(AgentSupervisor::new(
+                me.clone(),
+                me.inner
+                    .effective_config
+                    .agent
+                    .max_concurrent_child_agents(),
+            )),
+        ));
 
         Ok(me)
     }

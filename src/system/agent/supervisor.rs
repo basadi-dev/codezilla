@@ -10,24 +10,58 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::system::agent::tools::ToolProvider;
 use crate::system::agent::EventFilter;
 use crate::system::domain::{
-    ApprovalPolicy, ConversationItem, ItemKind, PermissionProfile, RuntimeEventKind, SurfaceKind,
-    ThreadId, ToolCall, ToolDefinition, ToolExecutionContext, ToolListingContext, ToolProviderKind,
-    ToolResult, TurnId, TurnStatus, UserInput, STATUS_INTERRUPTED, STATUS_TIMEOUT,
+    ApprovalPolicy, ConversationItem, ItemKind, PermissionProfile, RuntimeEventKind, SandboxMode,
+    SurfaceKind, ThreadId, ToolCall, ToolDefinition, ToolExecutionContext, ToolListingContext,
+    ToolProviderKind, ToolResult, TurnId, TurnStatus, UserInput, STATUS_INTERRUPTED,
+    STATUS_TIMEOUT,
 };
 use crate::system::runtime::{
     ConversationRuntime, ThreadStartParams, TurnInterruptParams, TurnStartParams,
 };
 
 const SPAWN_AGENT_DIRECTORY_INVENTORY_ERROR: &str = "deterministic_directory_inventory";
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct TeamAssignment {
+    role: String,
+    objective: String,
+    #[serde(default)]
+    focus_paths: Vec<String>,
+    #[serde(default)]
+    questions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct TeamMemberReport {
+    index: usize,
+    role: String,
+    objective: String,
+    child_thread_id: Option<String>,
+    child_turn_id: Option<String>,
+    status: String,
+    report: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TeamMemberContext {
+    pub team_id: String,
+    pub member_index: usize,
+    pub role: String,
+    pub objective: String,
+}
 
 /// Outcome of awaiting a sub-agent turn.
 pub enum TurnCompletionOutcome {
@@ -67,6 +101,12 @@ pub(crate) struct ChildAgentRequest {
     /// The spawn_agent tool call that produced this child. Used to tie the
     /// child's lifecycle back to the parent's transcript entry.
     pub parent_tool_call_id: String,
+    /// Parent cancellation propagates into the child turn.
+    pub cancel_token: CancellationToken,
+    /// Whether this child may recursively use `spawn_agent`.
+    pub allow_spawning: bool,
+    /// Present when the child belongs to a coordinated research team.
+    pub team_member: Option<TeamMemberContext>,
 }
 
 pub(crate) struct ChildAgentRun {
@@ -85,12 +125,12 @@ impl AgentSupervisor {
     }
 
     pub async fn run_child(&self, request: ChildAgentRequest) -> Result<ChildAgentRun> {
-        let _slot = self
-            .child_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| anyhow!("child_agent_slots_closed: {e}"))?;
+        let cancel_token = request.cancel_token.clone();
+        let acquire_slot = self.child_slots.clone().acquire_owned();
+        let _slot = tokio::select! {
+            slot = acquire_slot => slot.map_err(|error| anyhow!("child_agent_slots_closed: {error}"))?,
+            _ = cancel_token.cancelled() => return Err(anyhow!("child_agent_cancelled_before_start")),
+        };
 
         let child = self
             .runtime
@@ -117,7 +157,11 @@ impl AgentSupervisor {
                     permission_profile: Some(request.permission_profile),
                     output_schema: None,
                     repo_map_verbosity: None,
-                    agent_depth: request.agent_depth + 1,
+                    agent_depth: if request.allow_spawning {
+                        request.agent_depth + 1
+                    } else {
+                        self.runtime.inner.effective_config.agent.max_spawn_depth
+                    },
                 },
                 SurfaceKind::Exec,
             )
@@ -152,9 +196,37 @@ impl AgentSupervisor {
             )
             .await;
 
-        let wait = self
-            .await_child_turn_completion(&child_thread_id, &child_turn_id, request.timeout_secs)
-            .await?;
+        if let Some(member) = &request.team_member {
+            let _ = self
+                .runtime
+                .publish_event(
+                    RuntimeEventKind::AgentTeamMemberUpdated,
+                    Some(request.parent_thread_id.clone()),
+                    Some(request.parent_turn_id.clone()),
+                    json!({
+                        "teamId": member.team_id,
+                        "parentToolCallId": request.parent_tool_call_id,
+                        "memberIndex": member.member_index,
+                        "role": member.role,
+                        "objective": member.objective,
+                        "status": "running",
+                        "childThreadId": child_thread_id,
+                        "childTurnId": child_turn_id,
+                    }),
+                )
+                .await;
+        }
+
+        let wait = tokio::select! {
+            wait = self.await_child_turn_completion(
+                &child_thread_id,
+                &child_turn_id,
+                request.timeout_secs,
+            ) => wait?,
+            _ = cancel_token.cancelled() => {
+                self.cancel_child_turn(&child_thread_id, &child_turn_id, 5).await?
+            }
+        };
         let mut outcome = wait.outcome;
         let mut streamed_text = wait.streamed_text;
 
@@ -414,23 +486,372 @@ fn strip_think_sections(text: &str) -> String {
     out
 }
 
-// ─── SpawnAgentToolProviderReal ───────────────────────────────────────────────
+// ─── AgentOrchestrationToolProvider ──────────────────────────────────────────
 //
 // Registered *after* ConversationRuntime is constructed so it can hold a
 // runtime clone without creating a circular dependency.
 
-pub(crate) struct SpawnAgentToolProviderReal {
+pub(crate) struct AgentOrchestrationToolProvider {
     supervisor: AgentSupervisor,
 }
 
-impl SpawnAgentToolProviderReal {
+impl AgentOrchestrationToolProvider {
     pub fn new(supervisor: AgentSupervisor) -> Self {
         Self { supervisor }
     }
+
+    async fn run_agent_team(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult> {
+        let agent_cfg = &self.supervisor.runtime.inner.effective_config.agent;
+        if !agent_cfg.teams_enabled {
+            return Ok(tool_error(
+                call,
+                "agent teams are disabled by configuration",
+            ));
+        }
+        if ctx.agent_depth > 0 {
+            return Ok(tool_error(
+                call,
+                "only the top-level coordinator may create an agent team",
+            ));
+        }
+        if agent_cfg.max_concurrent_child_agents() == 0 {
+            return Ok(tool_error(
+                call,
+                "no child-agent concurrency slots are available",
+            ));
+        }
+
+        let objective = call
+            .arguments
+            .get("objective")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("run_agent_team: objective is required"))?
+            .to_string();
+        let assignments_value = call
+            .arguments
+            .get("assignments")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("run_agent_team: assignments must be an array"))?;
+        if assignments_value.is_empty() || assignments_value.len() > agent_cfg.team_max_members {
+            return Ok(tool_error(
+                call,
+                &format!(
+                    "team must contain between 1 and {} members",
+                    agent_cfg.team_max_members
+                ),
+            ));
+        }
+        let assignments: Vec<TeamAssignment> = assignments_value
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|error| anyhow!("run_agent_team: invalid assignment: {error}"))?;
+        if assignments.iter().any(|assignment| {
+            assignment.role.trim().is_empty() || assignment.objective.trim().is_empty()
+        }) {
+            return Ok(tool_error(
+                call,
+                "every team assignment needs a non-empty role and objective",
+            ));
+        }
+
+        let timeout_secs = call
+            .arguments
+            .get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(agent_cfg.child_timeout_secs)
+            .clamp(
+                agent_cfg.child_timeout_secs,
+                agent_cfg.max_child_timeout_secs,
+            );
+        let team_id = format!("team_{}", Uuid::new_v4().simple());
+        let _ = self
+            .supervisor
+            .runtime
+            .publish_event(
+                RuntimeEventKind::AgentTeamStarted,
+                Some(ctx.thread_id.clone()),
+                Some(ctx.turn_id.clone()),
+                json!({
+                    "teamId": team_id,
+                    "parentToolCallId": call.tool_call_id,
+                    "objective": objective,
+                    "memberCount": assignments.len(),
+                    "readOnly": true,
+                    "timeoutSecs": timeout_secs,
+                }),
+            )
+            .await;
+
+        for (member_index, assignment) in assignments.iter().enumerate() {
+            let _ = self
+                .supervisor
+                .runtime
+                .publish_event(
+                    RuntimeEventKind::AgentTeamMemberUpdated,
+                    Some(ctx.thread_id.clone()),
+                    Some(ctx.turn_id.clone()),
+                    json!({
+                        "teamId": team_id,
+                        "parentToolCallId": call.tool_call_id,
+                        "memberIndex": member_index,
+                        "role": assignment.role,
+                        "objective": assignment.objective,
+                        "status": "queued",
+                    }),
+                )
+                .await;
+        }
+
+        let team_cancel = CancellationToken::new();
+        let parent_cancel = ctx.cancel_token.clone();
+        let linked_team_cancel = team_cancel.clone();
+        let cancellation_link = tokio::spawn(async move {
+            parent_cancel.cancelled().await;
+            linked_team_cancel.cancel();
+        });
+        let team_deadline = tokio::time::sleep(Duration::from_secs(timeout_secs));
+        tokio::pin!(team_deadline);
+
+        let mut join_set = tokio::task::JoinSet::new();
+        for (index, assignment) in assignments.into_iter().enumerate() {
+            let supervisor = self.supervisor.clone();
+            let mut read_only_profile = ctx.permission_profile.clone();
+            read_only_profile.sandbox_mode = SandboxMode::ReadOnly;
+            read_only_profile.writable_roots.clear();
+            let request = ChildAgentRequest {
+                prompt: team_member_prompt(&objective, &assignment),
+                cwd: ctx.cwd.clone(),
+                approval_policy: ctx.approval_policy.clone(),
+                permission_profile: read_only_profile,
+                timeout_secs,
+                agent_depth: ctx.agent_depth,
+                parent_thread_id: ctx.thread_id.clone(),
+                parent_turn_id: ctx.turn_id.clone(),
+                parent_tool_call_id: call.tool_call_id.clone(),
+                cancel_token: team_cancel.clone(),
+                allow_spawning: false,
+                team_member: Some(TeamMemberContext {
+                    team_id: team_id.clone(),
+                    member_index: index,
+                    role: assignment.role.clone(),
+                    objective: assignment.objective.clone(),
+                }),
+            };
+            join_set.spawn(async move {
+                let result = supervisor.run_child(request).await;
+                (index, assignment, result)
+            });
+        }
+
+        let mut reports = Vec::new();
+        let mut team_timed_out = false;
+        while !join_set.is_empty() {
+            let joined = if team_timed_out {
+                join_set.join_next().await
+            } else {
+                tokio::select! {
+                    joined = join_set.join_next() => joined,
+                    _ = &mut team_deadline => {
+                        team_timed_out = true;
+                        team_cancel.cancel();
+                        continue;
+                    }
+                }
+            };
+            let Some(joined) = joined else { break };
+            match joined {
+                Ok((index, assignment, Ok(run))) => {
+                    let (status, report) = match run.outcome {
+                        TurnCompletionOutcome::Completed => (
+                            "completed",
+                            parse_team_report(&run.result_text)
+                                .unwrap_or_else(|| json!({"summary": run.result_text})),
+                        ),
+                        TurnCompletionOutcome::Failed(reason) => (
+                            "failed",
+                            json!({"summary": run.result_text, "error": reason}),
+                        ),
+                        TurnCompletionOutcome::Interrupted => {
+                            ("interrupted", json!({"summary": run.result_text}))
+                        }
+                        TurnCompletionOutcome::TimedOut => {
+                            ("timed_out", json!({"summary": run.result_text}))
+                        }
+                    };
+                    let _ = self
+                        .supervisor
+                        .runtime
+                        .publish_event(
+                            RuntimeEventKind::AgentTeamMemberUpdated,
+                            Some(ctx.thread_id.clone()),
+                            Some(ctx.turn_id.clone()),
+                            json!({
+                                "teamId": team_id,
+                                "parentToolCallId": call.tool_call_id,
+                                "memberIndex": index,
+                                "role": assignment.role,
+                                "objective": assignment.objective,
+                                "status": status,
+                                "childThreadId": run.child_thread_id,
+                                "childTurnId": run.child_turn_id,
+                            }),
+                        )
+                        .await;
+                    reports.push(TeamMemberReport {
+                        index,
+                        role: assignment.role,
+                        objective: assignment.objective,
+                        child_thread_id: Some(run.child_thread_id),
+                        child_turn_id: Some(run.child_turn_id),
+                        status: status.into(),
+                        report,
+                    });
+                }
+                Ok((index, assignment, Err(error))) => {
+                    let _ = self
+                        .supervisor
+                        .runtime
+                        .publish_event(
+                            RuntimeEventKind::AgentTeamMemberUpdated,
+                            Some(ctx.thread_id.clone()),
+                            Some(ctx.turn_id.clone()),
+                            json!({
+                                "teamId": team_id,
+                                "parentToolCallId": call.tool_call_id,
+                                "memberIndex": index,
+                                "role": assignment.role,
+                                "objective": assignment.objective,
+                                "status": "failed",
+                            }),
+                        )
+                        .await;
+                    reports.push(TeamMemberReport {
+                        index,
+                        role: assignment.role,
+                        objective: assignment.objective,
+                        child_thread_id: None,
+                        child_turn_id: None,
+                        status: "failed".into(),
+                        report: json!({"error": error.to_string()}),
+                    });
+                }
+                Err(error) => reports.push(TeamMemberReport {
+                    index: usize::MAX,
+                    role: "unknown".into(),
+                    objective: "worker task".into(),
+                    child_thread_id: None,
+                    child_turn_id: None,
+                    status: "failed".into(),
+                    report: json!({"error": format!("team worker join failed: {error}")}),
+                }),
+            }
+        }
+        cancellation_link.abort();
+        reports.sort_by_key(|report| report.index);
+        let completed = reports
+            .iter()
+            .filter(|report| report.status == "completed")
+            .count();
+        let _ = self
+            .supervisor
+            .runtime
+            .publish_event(
+                RuntimeEventKind::AgentTeamCompleted,
+                Some(ctx.thread_id.clone()),
+                Some(ctx.turn_id.clone()),
+                json!({
+                    "teamId": team_id,
+                    "memberCount": reports.len(),
+                    "completed": completed,
+                    "failed": reports.len().saturating_sub(completed),
+                    "timedOut": team_timed_out,
+                }),
+            )
+            .await;
+
+        Ok(ToolResult {
+            tool_call_id: call.tool_call_id.clone(),
+            ok: completed > 0,
+            output: json!({
+                "team_id": team_id,
+                "objective": objective,
+                "read_only": true,
+                "coordinator_is_sole_writer": true,
+                "timed_out": team_timed_out,
+                "reports": reports,
+                "next_step": "Synthesize the evidence, make any edits yourself, then run final verification.",
+            }),
+            error_message: (completed == 0).then(|| "all team members failed".into()),
+        })
+    }
+}
+
+fn tool_error(call: &ToolCall, message: &str) -> ToolResult {
+    ToolResult {
+        tool_call_id: call.tool_call_id.clone(),
+        ok: false,
+        output: json!({"error": message}),
+        error_message: Some(message.to_string()),
+    }
+}
+
+fn team_member_prompt(overall_objective: &str, assignment: &TeamAssignment) -> String {
+    let focus = if assignment.focus_paths.is_empty() {
+        "No path restriction; inspect only files relevant to your assignment.".to_string()
+    } else {
+        format!("Focus paths: {}", assignment.focus_paths.join(", "))
+    };
+    let questions = if assignment.questions.is_empty() {
+        "No additional questions.".to_string()
+    } else {
+        format!("Questions:\n- {}", assignment.questions.join("\n- "))
+    };
+    format!(
+        "You are the {role} member of a read-only research team.\n\n\
+         Overall objective: {overall_objective}\n\n\
+         Your bounded assignment: {member_objective}\n\n\
+         {focus}\n{questions}\n\n\
+         You are strictly read-only. Do not edit files, run commands that mutate the repository, \
+         install dependencies, or create commits. Gather concrete evidence and finish promptly.\n\n\
+         Return one JSON object with exactly these top-level fields:\n\
+         {{\"summary\":\"...\",\"findings\":[{{\"claim\":\"...\",\"evidence\":\"file:line or command output\",\"severity\":\"info|warning|critical\"}}],\
+         \"relevant_files\":[\"...\"],\"risks\":[\"...\"],\"recommendations\":[\"...\"],\"blockers\":[\"...\"]}}",
+        role = assignment.role,
+        member_objective = assignment.objective,
+    )
+}
+
+fn parse_team_report(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    let value: Value = serde_json::from_str(trimmed).ok().or_else(|| {
+        let start = trimmed.find('{')?;
+        let end = trimmed.rfind('}')?;
+        serde_json::from_str(&trimmed[start..=end]).ok()
+    })?;
+    let object = value.as_object()?;
+    object.get("summary")?.as_str()?;
+    for field in [
+        "findings",
+        "relevant_files",
+        "risks",
+        "recommendations",
+        "blockers",
+    ] {
+        object.get(field)?.as_array()?;
+    }
+    Some(value)
 }
 
 #[async_trait]
-impl ToolProvider for SpawnAgentToolProviderReal {
+impl ToolProvider for AgentOrchestrationToolProvider {
     fn get_kind(&self) -> ToolProviderKind {
         ToolProviderKind::Builtin
     }
@@ -438,7 +859,7 @@ impl ToolProvider for SpawnAgentToolProviderReal {
     fn list_tools(&self, _ctx: &ToolListingContext) -> Vec<ToolDefinition> {
         let agent_cfg = &self.supervisor.runtime.inner.effective_config.agent;
         let child_budget = agent_cfg.max_concurrent_child_agents();
-        vec![ToolDefinition {
+        let mut tools = vec![ToolDefinition {
             name: "spawn_agent".into(),
             description: format!(
                 "Spawn an independent sub-agent for a bounded task. \
@@ -476,11 +897,69 @@ impl ToolProvider for SpawnAgentToolProviderReal {
             requires_approval: false,
             supports_parallel_calls: true,
             provider_kind: ToolProviderKind::Builtin,
-        }]
+        }];
+        if agent_cfg.teams_enabled {
+            tools.push(ToolDefinition {
+            name: "run_agent_team".into(),
+            description: format!(
+                "Run 1–{} independent research agents concurrently and return structured reports. \
+                 Team members are always read-only; the parent coordinator remains solely responsible \
+                 for edits, integration, and final verification. Use this for genuinely independent \
+                 investigation, review, or risk-analysis assignments—not routine file listing.",
+                agent_cfg.team_max_members
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "Overall problem the team is helping the coordinator solve."
+                    },
+                    "assignments": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": agent_cfg.team_max_members,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string"},
+                                "objective": {"type": "string"},
+                                "focus_paths": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                },
+                                "questions": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                }
+                            },
+                            "required": ["role", "objective"]
+                        }
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": format!(
+                            "Overall team deadline and per-member timeout (default {}, max {}).",
+                            agent_cfg.child_timeout_secs,
+                            agent_cfg.max_child_timeout_secs
+                        )
+                    }
+                },
+                "required": ["objective", "assignments"]
+            }),
+            requires_approval: false,
+            supports_parallel_calls: false,
+            provider_kind: ToolProviderKind::Builtin,
+            });
+        }
+        tools
     }
 
     async fn execute(&self, call: &ToolCall, ctx: &ToolExecutionContext) -> Result<ToolResult> {
         let agent_cfg = &self.supervisor.runtime.inner.effective_config.agent;
+        if call.tool_name == "run_agent_team" {
+            return self.run_agent_team(call, ctx).await;
+        }
         if agent_cfg.max_concurrent_child_agents() == 0 {
             return Ok(ToolResult {
                 tool_call_id: call.tool_call_id.clone(),
@@ -562,6 +1041,9 @@ impl ToolProvider for SpawnAgentToolProviderReal {
                 parent_thread_id: ctx.thread_id.clone(),
                 parent_turn_id: ctx.turn_id.clone(),
                 parent_tool_call_id: call.tool_call_id.clone(),
+                cancel_token: ctx.cancel_token.clone(),
+                allow_spawning: true,
+                team_member: None,
             })
             .await?;
 

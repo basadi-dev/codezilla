@@ -484,6 +484,7 @@ impl TurnExecutor {
                         permission_profile: ctx.permission_profile.clone(),
                         approval_policy,
                         agent_depth: ctx.params.agent_depth,
+                        cancel_token: ctx.cancel_token.clone(),
                     };
                     async move {
                         tracing::debug!(

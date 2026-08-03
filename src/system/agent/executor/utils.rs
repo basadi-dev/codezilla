@@ -184,6 +184,33 @@ pub(crate) fn validate_tool_call(call: &ToolCall) -> Option<String> {
             }
             None
         }
+        "run_agent_team" => {
+            if let Some(reason) = non_empty_string("objective") {
+                return Some(reason.into_owned());
+            }
+            let Some(assignments) = call.arguments.get("assignments").and_then(Value::as_array)
+            else {
+                return Some("`assignments` must be a non-empty array".into());
+            };
+            if assignments.is_empty() {
+                return Some("`assignments` must contain at least one member".into());
+            }
+            if assignments.iter().any(|assignment| {
+                assignment
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| value.trim().is_empty())
+                    || assignment
+                        .get("objective")
+                        .and_then(Value::as_str)
+                        .is_none_or(|value| value.trim().is_empty())
+            }) {
+                return Some(
+                    "every assignment must contain non-empty `role` and `objective` strings".into(),
+                );
+            }
+            None
+        }
         "write_file" => {
             if let Some(reason) = non_empty_string("path") {
                 return Some(reason.into_owned());

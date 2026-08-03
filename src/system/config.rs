@@ -72,6 +72,12 @@ pub struct AgentConfig {
     /// Upper bound accepted from a `spawn_agent` tool call.
     #[serde(default = "default_agent_max_child_timeout_secs")]
     pub max_child_timeout_secs: u64,
+    /// Enable bounded read-only research teams coordinated by the parent agent.
+    #[serde(default = "default_true")]
+    pub teams_enabled: bool,
+    /// Maximum members accepted by one `run_agent_team` call.
+    #[serde(default = "default_agent_team_max_members")]
+    pub team_max_members: usize,
     /// Number of parallel candidate solutions to explore in speculative mode.
     /// Set to 0 or 1 to disable speculative execution entirely.
     #[serde(default = "default_speculative_candidates")]
@@ -117,6 +123,8 @@ impl Default for AgentConfig {
             max_spawn_depth: default_agent_max_spawn_depth(),
             child_timeout_secs: default_agent_child_timeout_secs(),
             max_child_timeout_secs: default_agent_max_child_timeout_secs(),
+            teams_enabled: true,
+            team_max_members: default_agent_team_max_members(),
             speculative_candidates: default_speculative_candidates(),
             speculative_candidate_timeout_secs: default_speculative_candidate_timeout_secs(),
             speculative_auto: default_speculative_auto(),
@@ -140,6 +148,9 @@ impl AgentConfig {
         self.max_child_agents = self.max_child_agents.max(1);
         self.child_timeout_secs = self.child_timeout_secs.max(1);
         self.max_child_timeout_secs = self.max_child_timeout_secs.max(self.child_timeout_secs);
+        // The first team implementation is deliberately small: bounded
+        // research fan-out, not an unbounded general-purpose scheduler.
+        self.team_max_members = self.team_max_members.clamp(1, 3);
         self.speculative_candidate_timeout_secs = self.speculative_candidate_timeout_secs.max(30);
         self.checkpoint_review_max_diff_chars = self.checkpoint_review_max_diff_chars.max(1000);
         self.checkpoint_review_min_changes = self.checkpoint_review_min_changes.max(1);
@@ -201,6 +212,10 @@ fn default_agent_child_timeout_secs() -> u64 {
 
 fn default_agent_max_child_timeout_secs() -> u64 {
     600
+}
+
+fn default_agent_team_max_members() -> usize {
+    3
 }
 
 fn default_speculative_candidates() -> usize {

@@ -14,7 +14,7 @@
 //!     embedding the runtime in a host app that ships its own tools.
 //!
 //! Order of registration is unchanged — extras are appended at the very
-//! end, after `MCP` and after the late-bound `SpawnAgentToolProviderReal`,
+//! end, after `MCP` and after the late-bound `AgentOrchestrationToolProvider`,
 //! so extras can override behaviour but won't accidentally shadow the
 //! builtin parallel/safety contracts the executor relies on.
 

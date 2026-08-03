@@ -46,6 +46,9 @@ pub enum RuntimeEventPayload {
     Disconnected(DisconnectedPayload),
     CompactionStatus(CompactionStatusPayload),
     ChildAgentSpawned(ChildAgentSpawnedPayload),
+    AgentTeamStarted(AgentTeamPayload),
+    AgentTeamMemberUpdated(AgentTeamMemberPayload),
+    AgentTeamCompleted(AgentTeamPayload),
     TokenUsageUpdate(TokenUsageUpdatePayload),
     SpeculativeCandidateStarted(SpeculativePayload),
     SpeculativeCandidateCompleted(SpeculativePayload),
@@ -193,6 +196,51 @@ pub struct CheckpointReviewPayload {
     pub files_reviewed: Option<Vec<String>>,
 }
 
+/// Payload for bounded research-team lifecycle events.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTeamPayload {
+    #[serde(default)]
+    pub team_id: String,
+    #[serde(default)]
+    pub parent_tool_call_id: String,
+    #[serde(default)]
+    pub objective: String,
+    #[serde(default)]
+    pub member_count: usize,
+    #[serde(default)]
+    pub completed: usize,
+    #[serde(default)]
+    pub failed: usize,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub timed_out: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTeamMemberPayload {
+    #[serde(default)]
+    pub team_id: String,
+    #[serde(default)]
+    pub parent_tool_call_id: String,
+    #[serde(default)]
+    pub member_index: usize,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub objective: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub child_thread_id: Option<String>,
+    #[serde(default)]
+    pub child_turn_id: Option<String>,
+}
+
 impl RuntimeEventPayload {
     /// Decode `event.payload` according to `event.kind`.
     pub fn from_event(event: &RuntimeEvent) -> Result<Self> {
@@ -246,6 +294,15 @@ impl RuntimeEventPayload {
                 "ChildAgentSpawned",
                 &event.payload,
             )?)),
+            RuntimeEventKind::AgentTeamStarted => Ok(Self::AgentTeamStarted(
+                decode("AgentTeamStarted", &event.payload).unwrap_or_default(),
+            )),
+            RuntimeEventKind::AgentTeamMemberUpdated => Ok(Self::AgentTeamMemberUpdated(
+                decode("AgentTeamMemberUpdated", &event.payload).unwrap_or_default(),
+            )),
+            RuntimeEventKind::AgentTeamCompleted => Ok(Self::AgentTeamCompleted(
+                decode("AgentTeamCompleted", &event.payload).unwrap_or_default(),
+            )),
             RuntimeEventKind::TokenUsageUpdate => Ok(Self::TokenUsageUpdate(decode(
                 "TokenUsageUpdate",
                 &event.payload,

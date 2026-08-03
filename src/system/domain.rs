@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use tokio_util::sync::CancellationToken;
 
 pub type JsonValue = Value;
 pub type TimestampSeconds = i64;
@@ -582,6 +583,12 @@ pub enum RuntimeEventKind {
     /// TUI render a live activity tree without inferring the relationship
     /// from `agent_depth` heuristics.
     ChildAgentSpawned,
+    /// A bounded read-only research team has started.
+    AgentTeamStarted,
+    /// A research-team member changed queued/running/terminal state.
+    AgentTeamMemberUpdated,
+    /// All members of a bounded research team have reached a terminal state.
+    AgentTeamCompleted,
     /// Live token usage update during streaming (partial/estimated).
     TokenUsageUpdate,
     /// Speculative execution: a candidate exploration agent was spawned.
@@ -642,6 +649,9 @@ pub struct ToolExecutionContext {
     /// Used to prevent unbounded recursive agent spawning.
     #[serde(default)]
     pub agent_depth: u32,
+    /// Cancels long-running tools and any child turns they supervise.
+    #[serde(skip, default)]
+    pub cancel_token: CancellationToken,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -31,7 +31,7 @@ use super::super::runtime::{
     ThreadListParams, ThreadModelSettingsParams, ThreadReadParams, ThreadResumeParams,
     ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnSteerParams,
 };
-use super::activity::ChildAgentStatus;
+use super::activity::{ChildAgentStatus, TeamMemberStatus};
 use super::types::{
     basename, current_state_label, entry_elapsed_secs, entry_from_item, entry_style,
     format_timestamp, format_tool_result, is_diff_body, is_read_file_body, relative_time_ago,
@@ -71,6 +71,7 @@ fn describe_tool_activity(tool: &super::activity::ToolActivity) -> String {
         "web_fetch" => "Fetching",
         "image_metadata" => "Inspecting image",
         "spawn_agent" => "Running sub-agent:",
+        "run_agent_team" => "Running research team:",
         _ => "Calling",
     };
     match &tool.hint {
@@ -1774,22 +1775,34 @@ impl InteractiveApp {
                                 _ => ChildAgentStatus::Completed,
                             };
                             self.activity.set_child_agent_status(child_thread, status);
-                            self.upsert_sub_agent_transcript_status(
-                                &child.parent_tool_call_id,
-                                child_thread,
-                                &child.label,
-                                status,
-                            );
+                            if self
+                                .activity
+                                .team_for_parent_tool(&child.parent_tool_call_id)
+                                .is_none()
+                            {
+                                self.upsert_sub_agent_transcript_status(
+                                    &child.parent_tool_call_id,
+                                    child_thread,
+                                    &child.label,
+                                    status,
+                                );
+                            }
                         }
                         RuntimeEventKind::TurnFailed => {
                             self.activity
                                 .set_child_agent_status(child_thread, ChildAgentStatus::Failed);
-                            self.upsert_sub_agent_transcript_status(
-                                &child.parent_tool_call_id,
-                                child_thread,
-                                &child.label,
-                                ChildAgentStatus::Failed,
-                            );
+                            if self
+                                .activity
+                                .team_for_parent_tool(&child.parent_tool_call_id)
+                                .is_none()
+                            {
+                                self.upsert_sub_agent_transcript_status(
+                                    &child.parent_tool_call_id,
+                                    child_thread,
+                                    &child.label,
+                                    ChildAgentStatus::Failed,
+                                );
+                            }
                         }
                         _ => {}
                     }
@@ -2069,12 +2082,135 @@ impl InteractiveApp {
                     label.clone(),
                     std::time::Instant::now(),
                 );
-                self.upsert_sub_agent_transcript_status(
-                    &parent_call,
-                    &child_tid,
-                    &label,
-                    ChildAgentStatus::Running,
+                if self.activity.team_for_parent_tool(&parent_call).is_none() {
+                    self.upsert_sub_agent_transcript_status(
+                        &parent_call,
+                        &child_tid,
+                        &label,
+                        ChildAgentStatus::Running,
+                    );
+                }
+            }
+            RuntimeEventKind::AgentTeamStarted => {
+                let team_id = event
+                    .payload
+                    .get("teamId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let parent_tool_call_id = event
+                    .payload
+                    .get("parentToolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let objective = event
+                    .payload
+                    .get("objective")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Research")
+                    .to_string();
+                let members = event
+                    .payload
+                    .get("memberCount")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                let timeout_secs = event
+                    .payload
+                    .get("timeoutSecs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                self.activity.start_team(
+                    team_id.clone(),
+                    parent_tool_call_id,
+                    objective,
+                    members as usize,
+                    timeout_secs,
+                    std::time::Instant::now(),
                 );
+                self.status_message = format!("Research team running ({members} members)…");
+                self.upsert_team_transcript_status(&team_id);
+            }
+            RuntimeEventKind::AgentTeamMemberUpdated => {
+                let team_id = event
+                    .payload
+                    .get("teamId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let member_index = event
+                    .payload
+                    .get("memberIndex")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let role = event
+                    .payload
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("researcher")
+                    .to_string();
+                let objective = event
+                    .payload
+                    .get("objective")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let status = TeamMemberStatus::from_wire(
+                    event
+                        .payload
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("queued"),
+                );
+                let child_thread_id = event
+                    .payload
+                    .get("childThreadId")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                let child_turn_id = event
+                    .payload
+                    .get("childTurnId")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                self.activity.update_team_member(
+                    &team_id,
+                    member_index,
+                    role,
+                    objective,
+                    status,
+                    child_thread_id,
+                    child_turn_id,
+                    std::time::Instant::now(),
+                );
+                self.upsert_team_transcript_status(&team_id);
+            }
+            RuntimeEventKind::AgentTeamCompleted => {
+                let team_id = event
+                    .payload
+                    .get("teamId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let completed = event
+                    .payload
+                    .get("completed")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                let failed = event
+                    .payload
+                    .get("failed")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                let timed_out = event
+                    .payload
+                    .get("timedOut")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.activity
+                    .complete_team(&team_id, timed_out, std::time::Instant::now());
+                self.status_message =
+                    format!("Research team finished: {completed} completed, {failed} failed");
+                self.upsert_team_transcript_status(&team_id);
             }
             RuntimeEventKind::TokenUsageUpdate => {
                 // Live streaming updates are handled in the first match above;
@@ -2413,6 +2549,7 @@ impl InteractiveApp {
             // Remove this tool from the in-flight tracker; the reducer keeps
             // any other tools that started in the same parallel batch alive.
             self.activity.finish_tool(&result.tool_call_id);
+            self.refresh_team_transcript_for_tool(&result.tool_call_id);
         } else if matches!(item.kind, ItemKind::ToolCall) {
             let mut entry = entry_from_item(&item);
             entry.pending = true;
@@ -3207,6 +3344,141 @@ impl InteractiveApp {
         );
     }
 
+    fn refresh_team_transcript_for_tool(&mut self, parent_tool_call_id: &str) {
+        let team_ids: Vec<String> = self
+            .activity
+            .teams()
+            .iter()
+            .filter(|team| team.parent_tool_call_id == parent_tool_call_id)
+            .map(|team| team.team_id.clone())
+            .collect();
+        for team_id in team_ids {
+            self.upsert_team_transcript_status(&team_id);
+        }
+    }
+
+    fn upsert_team_transcript_status(&mut self, team_id: &str) {
+        let Some(team) = self
+            .activity
+            .teams()
+            .iter()
+            .find(|team| team.team_id == team_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(call_idx) = self.transcript.iter().rposition(|entry| {
+            entry.kind == EntryKind::ToolCall
+                && entry.tool_call_id.as_deref() == Some(&team.parent_tool_call_id)
+        }) else {
+            return;
+        };
+
+        let now = std::time::Instant::now();
+        let elapsed = team
+            .finished_at
+            .unwrap_or(now)
+            .saturating_duration_since(team.started_at)
+            .as_secs();
+        let deadline = if team.timeout_secs > 0 {
+            format!(" • {elapsed}/{}s", team.timeout_secs)
+        } else {
+            format!(" • {elapsed}s")
+        };
+        let state = if team.timed_out {
+            "timed out"
+        } else if team.finished_at.is_some() {
+            "finished"
+        } else {
+            "running"
+        };
+        let mut lines = vec![
+            "agent team:".to_string(),
+            format!(
+                "{} • {} members • {}{}",
+                truncate_chars(&team.objective, 72),
+                team.expected_members,
+                state,
+                deadline
+            ),
+        ];
+        for (position, member) in team.members.iter().enumerate() {
+            let connector = if position + 1 == team.expected_members {
+                "└─"
+            } else {
+                "├─"
+            };
+            let (icon, status) = match member.status {
+                TeamMemberStatus::Queued => ("◌", "queued"),
+                TeamMemberStatus::Running => {
+                    (spinner_frame(self.activity.spinner_tick()), "running")
+                }
+                TeamMemberStatus::Completed => ("✓", "completed"),
+                TeamMemberStatus::Failed => ("✗", "failed"),
+                TeamMemberStatus::Interrupted => ("◌", "interrupted"),
+                TeamMemberStatus::TimedOut => ("⏱", "timed out"),
+            };
+            let member_elapsed = member
+                .started_at
+                .map(|started| {
+                    member
+                        .finished_at
+                        .unwrap_or(now)
+                        .saturating_duration_since(started)
+                        .as_secs()
+                })
+                .unwrap_or(0);
+            let elapsed_label = if member.status == TeamMemberStatus::Queued {
+                String::new()
+            } else {
+                format!(" • {member_elapsed}s")
+            };
+            lines.push(format!(
+                "{connector} {icon} {} • {status}{elapsed_label}",
+                truncate_chars(&member.role, 42)
+            ));
+            lines.push(format!(
+                "{}  {}",
+                if connector == "└─" { " " } else { "│" },
+                truncate_chars(&member.objective, 76)
+            ));
+        }
+        if team.members.len() < team.expected_members {
+            lines.push(format!(
+                "└─ ◌ waiting for {} member assignment{}",
+                team.expected_members - team.members.len(),
+                if team.expected_members - team.members.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+
+        let section = format!("{}\n", lines.join("\n"));
+        let existing = self.transcript[call_idx].body.clone();
+        let start_marker = "agent team:";
+        let result_marker = "─── result ───";
+        let rebuilt = if let Some(start) = existing.find(start_marker) {
+            let end = existing[start..]
+                .find(result_marker)
+                .map(|relative| start + relative)
+                .unwrap_or(existing.len());
+            format!("{}{}{}", &existing[..start], section, &existing[end..])
+        } else if let Some(result_start) = existing.find(result_marker) {
+            format!(
+                "{}\n{}{}",
+                existing[..result_start].trim_end(),
+                section,
+                &existing[result_start..]
+            )
+        } else {
+            format!("{}\n{}", existing.trim_end(), section)
+        };
+        self.transcript[call_idx].body = rebuilt;
+        self.invalidate_transcript_cache();
+    }
+
     fn upsert_sub_agent_transcript_status(
         &mut self,
         parent_tool_call_id: &str,
@@ -3366,12 +3638,19 @@ impl InteractiveApp {
     }
 
     pub fn refresh_live_sub_agent_sections(&mut self) -> bool {
-        let running = self
+        let running_children = self
             .activity
             .child_agents()
             .iter()
             .any(|c| matches!(c.status, ChildAgentStatus::Running));
-        if !running {
+        let running_teams: Vec<String> = self
+            .activity
+            .teams()
+            .iter()
+            .filter(|team| team.finished_at.is_none())
+            .map(|team| team.team_id.clone())
+            .collect();
+        if !running_children && running_teams.is_empty() {
             return false;
         }
 
@@ -3379,6 +3658,13 @@ impl InteractiveApp {
         let mut seen = std::collections::HashSet::new();
         let children = self.activity.child_agents().to_vec();
         for child in &children {
+            if self
+                .activity
+                .team_for_parent_tool(&child.parent_tool_call_id)
+                .is_some()
+            {
+                continue;
+            }
             if !seen.insert(child.parent_tool_call_id.clone()) {
                 continue;
             }
@@ -3388,6 +3674,10 @@ impl InteractiveApp {
                 &child.label,
                 child.status,
             );
+            changed = true;
+        }
+        for team_id in running_teams {
+            self.upsert_team_transcript_status(&team_id);
             changed = true;
         }
         changed
