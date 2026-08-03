@@ -73,7 +73,7 @@ impl RuntimeBuilder {
         let llm_client = match llm_client {
             Some(c) => c,
             None => Arc::new(
-                UnifiedClient::new(effective_config.llm.clone())
+                UnifiedClient::new(effective_config.llm.clone(), &effective_config.models)
                     .map_err(|e| anyhow!("llm_client_init_failed: {e}"))?,
             ),
         };

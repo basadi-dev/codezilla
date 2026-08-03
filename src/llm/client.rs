@@ -9,6 +9,7 @@ use crate::llm::{
     CompletionRequest, LlmClient, LlmProvider, LlmResponse, Message, StreamChunk, ToolDefinition,
 };
 use crate::system::config::LlmConfig;
+use crate::system::domain::{ModelPreset, ReasoningCapability};
 
 /// Unified LLM client that dispatches to provider implementations.
 ///
@@ -19,7 +20,7 @@ pub struct UnifiedClient {
 }
 
 impl UnifiedClient {
-    pub fn new(cfg: LlmConfig) -> Result<Self> {
+    pub fn new(cfg: LlmConfig, model_presets: &[ModelPreset]) -> Result<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(300))
             .connect_timeout(Duration::from_secs(30))
@@ -32,6 +33,17 @@ impl UnifiedClient {
             Arc::new(ollama::OllamaProvider {
                 http: http.clone(),
                 cfg: cfg.clone(),
+                configured_capabilities: model_presets
+                    .iter()
+                    .filter(|preset| preset.provider_id == "ollama")
+                    .filter_map(|preset| {
+                        preset
+                            .reasoning_capability
+                            .clone()
+                            .map(|capability| (preset.model_id.clone(), capability))
+                    })
+                    .collect::<HashMap<String, ReasoningCapability>>(),
+                discovered_capabilities: tokio::sync::RwLock::new(HashMap::new()),
             }),
         );
         let openai = Arc::new(openai::OpenAiProvider {

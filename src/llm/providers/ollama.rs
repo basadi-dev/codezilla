@@ -3,6 +3,7 @@ use anyhow::{anyhow, Context as AnyhowContext, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -10,6 +11,7 @@ use crate::llm::{
     FunctionCall, LlmResponse, Message, Role, StreamChunk, TokenUsage, ToolCall, ToolDefinition,
 };
 use crate::system::config::LlmConfig as Config;
+use crate::system::domain::ReasoningCapability;
 use crate::system::error::ProviderError;
 
 /// Maximum number of retries for transient HTTP errors (429, 502, 503).
@@ -26,6 +28,13 @@ fn chat_url(cfg: &Config) -> String {
     } else {
         format!("{base}/api/chat")
     }
+}
+
+fn show_url(cfg: &Config) -> String {
+    let chat = chat_url(cfg);
+    chat.strip_suffix("/chat")
+        .map(|base| format!("{base}/show"))
+        .unwrap_or_else(|| format!("{}/api/show", cfg.ollama.base_url.trim_end_matches('/')))
 }
 
 fn auth_headers(cfg: &Config) -> Vec<(String, String)> {
@@ -51,6 +60,7 @@ fn auth_headers(cfg: &Config) -> Vec<(String, String)> {
     headers
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_chat_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -59,6 +69,7 @@ fn build_chat_body(
     max_tokens: usize,
     stream: bool,
     reasoning_effort: Option<&str>,
+    reasoning_capability: Option<&ReasoningCapability>,
 ) -> Value {
     let msgs = build_chat_messages(messages);
     let mut body = json!({
@@ -70,7 +81,14 @@ fn build_chat_body(
             "num_predict": max_tokens,
         }
     });
-    match ollama_think_value(model, reasoning_effort) {
+    let resolved_thinking = ollama_think_value(reasoning_effort, reasoning_capability);
+    tracing::debug!(
+        model,
+        requested_reasoning = reasoning_effort.unwrap_or("provider_default"),
+        resolved_thinking = ?resolved_thinking,
+        "ollama: resolved model thinking control"
+    );
+    match resolved_thinking {
         OllamaThink::Omit => {}
         OllamaThink::Bool(v) => body["think"] = json!(v),
         OllamaThink::Level(level) => body["think"] = json!(level),
@@ -91,46 +109,68 @@ fn build_chat_body(
     body
 }
 
+#[derive(Debug)]
 enum OllamaThink<'a> {
     Omit,
     Bool(bool),
     Level(&'a str),
 }
 
-fn ollama_think_value<'a>(model: &str, reasoning_effort: Option<&'a str>) -> OllamaThink<'a> {
+fn ollama_think_value<'a>(
+    reasoning_effort: Option<&'a str>,
+    capability: Option<&'a ReasoningCapability>,
+) -> OllamaThink<'a> {
     let Some(raw) = reasoning_effort else {
         // Default behavior: let model/provider decide by omitting `think`.
         return OllamaThink::Omit;
     };
 
     let effort = raw.trim().to_ascii_lowercase();
-    match effort.as_str() {
-        "auto" | "" => OllamaThink::Omit,
-        "off" | "none" => OllamaThink::Bool(false),
-        "low" | "medium" | "high" => {
-            if model_supports_think_levels(model) {
-                OllamaThink::Level(match effort.as_str() {
-                    "low" => "low",
-                    "medium" => "medium",
-                    _ => "high",
-                })
-            } else {
-                OllamaThink::Bool(true)
-            }
+    if matches!(effort.as_str(), "auto" | "") {
+        return OllamaThink::Omit;
+    }
+    match capability {
+        Some(ReasoningCapability::None) | None => OllamaThink::Omit,
+        Some(ReasoningCapability::Boolean) => {
+            OllamaThink::Bool(!matches!(effort.as_str(), "off" | "none"))
         }
-        _ => OllamaThink::Bool(true),
+        Some(ReasoningCapability::Levels {
+            supported,
+            can_disable,
+        }) => {
+            if matches!(effort.as_str(), "off" | "none") {
+                return if *can_disable {
+                    OllamaThink::Bool(false)
+                } else {
+                    supported
+                        .first()
+                        .map(|level| OllamaThink::Level(level.as_str()))
+                        .unwrap_or(OllamaThink::Omit)
+                };
+            }
+            resolve_supported_level(&effort, supported)
+                .map(OllamaThink::Level)
+                .unwrap_or(OllamaThink::Omit)
+        }
     }
 }
 
-fn model_supports_think_levels(model: &str) -> bool {
-    let normalized = model.trim().to_ascii_lowercase();
-    // Models known to support granular thinking levels ("low"/"medium"/"high")
-    // via the Ollama `think` parameter, as opposed to a simple boolean.
-    normalized.contains("gpt-oss")
-        || normalized.contains("qwen3")
-        || normalized.contains("deepseek-v4")
-        || normalized.contains("glm-5")
-        || normalized.contains("gemma4")
+fn resolve_supported_level<'a>(requested: &str, supported: &'a [String]) -> Option<&'a str> {
+    const ORDER: &[&str] = &["low", "medium", "high", "max"];
+    if let Some(exact) = supported.iter().find(|level| level.as_str() == requested) {
+        return Some(exact);
+    }
+    let requested_rank = ORDER.iter().position(|level| *level == requested)?;
+    supported
+        .iter()
+        .filter_map(|level| {
+            ORDER
+                .iter()
+                .position(|candidate| *candidate == level)
+                .map(|rank| (rank.abs_diff(requested_rank), rank, level.as_str()))
+        })
+        .min_by_key(|(distance, rank, _)| (*distance, *rank))
+        .map(|(_, _, level)| level)
 }
 
 fn build_chat_messages(messages: &[Message]) -> Vec<Value> {
@@ -256,6 +296,7 @@ pub async fn complete(
     temperature: f32,
     max_tokens: usize,
     reasoning_effort: Option<&str>,
+    reasoning_capability: Option<&ReasoningCapability>,
 ) -> Result<LlmResponse> {
     let url = chat_url(cfg);
     let body = build_chat_body(
@@ -266,6 +307,7 @@ pub async fn complete(
         max_tokens,
         false,
         reasoning_effort,
+        reasoning_capability,
     );
     let headers = auth_headers(cfg);
 
@@ -378,6 +420,7 @@ pub async fn stream(
     temperature: f32,
     max_tokens: usize,
     reasoning_effort: Option<&str>,
+    reasoning_capability: Option<&ReasoningCapability>,
 ) -> Result<mpsc::Receiver<StreamChunk>> {
     let url = chat_url(cfg);
     let body = build_chat_body(
@@ -388,6 +431,7 @@ pub async fn stream(
         max_tokens,
         true,
         reasoning_effort,
+        reasoning_capability,
     );
 
     let mut req = http.post(&url).json(&body);
@@ -908,6 +952,69 @@ use crate::llm::{CompletionRequest, LlmProvider, ProviderCaps};
 pub struct OllamaProvider {
     pub http: Client,
     pub cfg: Config,
+    pub configured_capabilities: HashMap<String, ReasoningCapability>,
+    pub discovered_capabilities: tokio::sync::RwLock<HashMap<String, Option<ReasoningCapability>>>,
+}
+
+impl OllamaProvider {
+    async fn capability_for_request(
+        &self,
+        model: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Option<ReasoningCapability> {
+        if matches!(reasoning_effort, None | Some("") | Some("auto")) {
+            return None;
+        }
+        self.reasoning_capability(model).await
+    }
+
+    async fn reasoning_capability(&self, model: &str) -> Option<ReasoningCapability> {
+        if let Some(capability) = self.configured_capabilities.get(model) {
+            return Some(capability.clone());
+        }
+        if let Some(cached) = self.discovered_capabilities.read().await.get(model) {
+            return cached.clone();
+        }
+
+        let discovered = self.discover_reasoning_capability(model).await;
+        self.discovered_capabilities
+            .write()
+            .await
+            .insert(model.to_string(), discovered.clone());
+        discovered
+    }
+
+    async fn discover_reasoning_capability(&self, model: &str) -> Option<ReasoningCapability> {
+        let mut request = self
+            .http
+            .post(show_url(&self.cfg))
+            .json(&json!({ "model": model }));
+        for (key, value) in auth_headers(&self.cfg) {
+            request = request.header(key, value);
+        }
+        let response = match request.send().await {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                tracing::debug!(model, status = %response.status(), "ollama: model capability discovery unavailable");
+                return None;
+            }
+            Err(error) => {
+                tracing::debug!(model, %error, "ollama: model capability discovery failed");
+                return None;
+            }
+        };
+        let metadata: Value = match response.json().await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::debug!(model, %error, "ollama: invalid model capability response");
+                return None;
+            }
+        };
+        metadata["capabilities"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item == "thinking"))
+            .then_some(ReasoningCapability::Boolean)
+    }
 }
 
 #[async_trait::async_trait]
@@ -925,6 +1032,9 @@ impl LlmProvider for OllamaProvider {
     }
 
     async fn complete(&self, req: CompletionRequest<'_>) -> anyhow::Result<LlmResponse> {
+        let reasoning_capability = self
+            .capability_for_request(req.model, req.reasoning_effort)
+            .await;
         complete(
             &self.http,
             &self.cfg,
@@ -934,6 +1044,7 @@ impl LlmProvider for OllamaProvider {
             req.temperature,
             req.max_tokens,
             req.reasoning_effort,
+            reasoning_capability.as_ref(),
         )
         .await
     }
@@ -942,6 +1053,9 @@ impl LlmProvider for OllamaProvider {
         &self,
         req: CompletionRequest<'_>,
     ) -> anyhow::Result<mpsc::Receiver<StreamChunk>> {
+        let reasoning_capability = self
+            .capability_for_request(req.model, req.reasoning_effort)
+            .await;
         stream(
             &self.http,
             &self.cfg,
@@ -951,6 +1065,7 @@ impl LlmProvider for OllamaProvider {
             req.temperature,
             req.max_tokens,
             req.reasoning_effort,
+            reasoning_capability.as_ref(),
         )
         .await
     }

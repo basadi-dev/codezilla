@@ -87,6 +87,7 @@ async fn async_main() -> Result<i32> {
             tasks_dir,
             filter,
             model,
+            reasoning_effort: matches.get_one::<String>("reasoning").cloned(),
             codezilla_bin,
             config_path: Some(config_path),
             output_dir,
@@ -350,6 +351,14 @@ fn build_cli() -> Command {
                 .global(true),
         )
         .arg(
+            Arg::new("reasoning")
+                .long("reasoning")
+                .value_name("LEVEL")
+                .value_parser(["auto", "off", "low", "medium", "high"])
+                .global(true)
+                .help("Set reasoning effort; auto enables per-turn adaptation"),
+        )
+        .arg(
             Arg::new("profile")
                 .long("profile")
                 .value_name("PROFILE_NAME")
@@ -531,6 +540,12 @@ fn build_cli_overrides(matches: &ArgMatches) -> Result<HashMap<String, serde_jso
         overrides.insert(
             "model_settings.model_id".into(),
             serde_json::Value::String(model.clone()),
+        );
+    }
+    if let Some(reasoning) = matches.get_one::<String>("reasoning") {
+        overrides.insert(
+            "model_settings.reasoning_effort".into(),
+            serde_json::Value::String(reasoning.clone()),
         );
     }
     if let Some(sandbox) = matches.get_one::<String>("sandbox") {

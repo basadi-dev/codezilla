@@ -292,13 +292,18 @@ impl ReasoningEffort {
         !matches!(self, ReasoningEffort::Auto | ReasoningEffort::Off)
     }
 }
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "control", rename_all = "snake_case")]
 pub enum ReasoningCapability {
-    #[default]
     Boolean,
     None,
-    Levels,
+    Levels {
+        /// Provider-native level strings accepted by this model.
+        supported: Vec<String>,
+        /// Whether `think: false` is accepted by this model.
+        #[serde(default)]
+        can_disable: bool,
+    },
 }
 
 /// Input modalities a model supports.

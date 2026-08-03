@@ -544,6 +544,29 @@ impl ConfigManager {
         let mut llm = raw.llm;
         apply_env_overrides(&mut llm);
 
+        for preset in &raw.models {
+            if let Some(super::domain::ReasoningCapability::Levels { supported, .. }) =
+                &preset.reasoning_capability
+            {
+                if supported.is_empty() {
+                    anyhow::bail!(
+                        "config_invalid: model '{}' has level-based reasoning but no supported levels",
+                        preset.model_id
+                    );
+                }
+                if let Some(invalid) = supported
+                    .iter()
+                    .find(|level| !matches!(level.as_str(), "low" | "medium" | "high" | "max"))
+                {
+                    anyhow::bail!(
+                        "config_invalid: model '{}' has unsupported reasoning level '{}'; use low, medium, high, or max",
+                        preset.model_id,
+                        invalid
+                    );
+                }
+            }
+        }
+
         // `model_settings` must be provided by config.yaml (or CLI overrides).
         // We intentionally do NOT fall back to a baked-in default model here —
         // silently selecting a production model when the user's config is

@@ -21,6 +21,12 @@ pub struct BenchConfig {
     pub filter: Option<String>,
     /// Model ID override (passed to `codezilla exec --model`).
     pub model: Option<String>,
+    /// Set a reasoning-effort level for all task runs (passed to
+    /// `codezilla exec --reasoning`). `None` lets configuration decide;
+    /// the normal `auto` setting uses dynamic
+    /// per-turn classification. Used for A/B experiments comparing fixed
+    /// reasoning levels against the adaptive default.
+    pub reasoning_effort: Option<String>,
     /// Path to the codezilla binary.
     pub codezilla_bin: PathBuf,
     /// Path to the codezilla config file to use.
@@ -95,6 +101,13 @@ pub struct FileChangeSummaryResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchSummary {
+    /// Explicit model override used for this run. `None` means the configured model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Explicit reasoning override used for this run. `None` means the configured
+    /// value (normally `auto`, which enables per-turn adaptation).
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -186,6 +199,13 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
         "│ Tasks: {:<4}  Model: {:<36} │",
         tasks.len(),
         config.model.as_deref().unwrap_or("(config default)")
+    );
+    eprintln!(
+        "│ Reasoning: {:<45} │",
+        config
+            .reasoning_effort
+            .as_deref()
+            .unwrap_or("(config default / adaptive)")
     );
     if runs > 1 || parallelism > 1 {
         eprintln!(
@@ -390,6 +410,8 @@ pub fn run_bench(config: &BenchConfig) -> Result<BenchSummary> {
     let avg_tool_calls = avg(|r| r.tool_call_count as f64);
 
     let summary = BenchSummary {
+        model: config.model.clone(),
+        reasoning_effort: config.reasoning_effort.clone(),
         total,
         passed,
         failed,
@@ -709,6 +731,10 @@ fn run_codezilla(config: &BenchConfig, task: &BenchTask, workdir: &Path) -> Resu
 
     if let Some(ref model) = config.model {
         cmd.arg("--model").arg(model);
+    }
+
+    if let Some(ref effort) = config.reasoning_effort {
+        cmd.arg("--reasoning").arg(effort);
     }
 
     if let Some(ref config_path) = config.config_path {

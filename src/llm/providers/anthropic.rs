@@ -169,7 +169,7 @@ pub async fn complete(
     tools: &[ToolDefinition],
     model: &str,
     temperature: f32,
-    reasoning_effort: Option<&str>,
+    _reasoning_effort: Option<&str>,
     max_tokens: usize,
 ) -> Result<LlmResponse> {
     let (system, msgs) = build_anthropic_messages(messages);
@@ -185,12 +185,6 @@ pub async fn complete(
     if !tools.is_empty() {
         body["tools"] = json!(build_anthropic_tools(tools));
     }
-    if let Some(effort) = reasoning_effort {
-        if effort == "low" || effort == "medium" || effort == "high" {
-            body["thinking"] = json!({ "type": "enabled", "budget_tokens": 5000 });
-        }
-    }
-
     let resp: Value = http
         .post(format!("{ANTHROPIC_API}/messages"))
         .header("x-api-key", &cfg.api_keys.anthropic)
@@ -233,7 +227,6 @@ pub async fn stream(
     if !tools.is_empty() {
         body["tools"] = json!(build_anthropic_tools(tools));
     }
-
     let response = http
         .post(format!("{ANTHROPIC_API}/messages"))
         .header("x-api-key", &cfg.api_keys.anthropic)
@@ -380,7 +373,9 @@ impl LlmProvider for AnthropicProvider {
     fn capabilities(&self) -> ProviderCaps {
         ProviderCaps {
             streaming: true,
-            reasoning_effort: true,
+            // Anthropic thinking controls are model/version-specific. Until the
+            // adapter negotiates them explicitly, rely on agent instructions.
+            reasoning_effort: false,
             vision: true,
         }
     }
